@@ -118,8 +118,8 @@ jobs:
         shell: bash
         run: |
           if [ "$PRODUCT" = cli ]; then
-            gh workflow run npm-publish.yml --ref main -f tag="$TAG"
+            gh workflow run npm-publish.yml --repo "$GITHUB_REPOSITORY" --ref main -f tag="$TAG"
           else
-            gh workflow run desktop-publish.yml --ref main -f tag="$TAG" -f publish=false
+            gh workflow run desktop-publish.yml --repo "$GITHUB_REPOSITORY" --ref main -f tag="$TAG" -f publish=false
           fi
           echo "Dispatched publication for ${TAG}." >> "$GITHUB_STEP_SUMMARY"

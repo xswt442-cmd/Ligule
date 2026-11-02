@@ -440,8 +440,8 @@ test('release workflows split CI, tagging, and product publication and keep proc
   assert.deepEqual(Object.keys(tag.jobs), ['create-tag', 'dispatch']);
   assert.equal(tag.jobs.dispatch.permissions.actions, 'write');
   const dispatchScript = tag.jobs.dispatch.steps.map((step) => step.run ?? '').join('\n');
-  assert.match(dispatchScript, /gh workflow run npm-publish\.yml --ref main -f tag="\$TAG"/);
-  assert.match(dispatchScript, /gh workflow run desktop-publish\.yml --ref main -f tag="\$TAG" -f publish=false/);
+  assert.match(dispatchScript, /gh workflow run npm-publish\.yml --repo "\$GITHUB_REPOSITORY" --ref main -f tag="\$TAG"/);
+  assert.match(dispatchScript, /gh workflow run desktop-publish\.yml --repo "\$GITHUB_REPOSITORY" --ref main -f tag="\$TAG" -f publish=false/);
   assert.match(JSON.stringify(tag.jobs['create-tag']), /"outputs"/);
   assert.doesNotMatch(JSON.stringify(tag), /pull-requests: write/);
 
