@@ -46,7 +46,7 @@ import { adoptForSessionDirectory } from '../session/adopt.js';
 import { searchSessionDirectories } from '../session/search.js';
 import { branchSession } from '../session/branch.js';
 import { listProjectFiles } from './paths.js';
-import { branchSessionId, exportImageUrl, exportMarkdown, MAX_EXPORT_ASSETS, writeExport, type ExportAsset, type ExportRecord } from './export.js';
+import { branchSessionId, exportImageUrl, exportMarkdown, exportRecordOf, MAX_EXPORT_ASSETS, writeExport, type ExportAsset, type ExportRecord } from './export.js';
 import { compactionLimitsOf, loopLimitsOf, sessionLoopLimits, taskLimitsOf } from './runtime-limits.js';
 export { compactionLimitsOf } from './runtime-limits.js';
 import { createCompaction } from '../session/compaction.js';
@@ -550,42 +550,6 @@ function checkedToolDefinition(value: unknown): ToolDefinition {
   if (value.parameters.type !== 'object') throw new KernelError('tool_parameters_type_not_object');
   if (!isToolDefinition(value)) throw new KernelError('tool_name_required');
   return value;
-}
-
-function exportRecordOf(event: SessionEvent): ExportRecord | undefined {
-  if (typeof event.kind !== 'string') return undefined;
-  const record: {
-    kind: string;
-    seq?: number;
-    raw?: string;
-    text?: string;
-    tool?: string;
-    toolCalls?: { id: string; name: string; args?: Record<string, unknown> }[];
-    result?: { content?: unknown; failed?: boolean; code?: string; spilled?: string; images?: readonly ImageReference[] };
-    name?: string;
-    layer?: string;
-  } = { kind: event.kind };
-  if (typeof event.seq === 'number') record.seq = event.seq;
-  if (typeof event.raw === 'string') record.raw = event.raw;
-  if (typeof event.text === 'string') record.text = event.text;
-  if (typeof event.tool === 'string') record.tool = event.tool;
-  if (typeof event.name === 'string') record.name = event.name;
-  if (typeof event.layer === 'string') record.layer = event.layer;
-  if (Array.isArray(event.toolCalls)) {
-    record.toolCalls = event.toolCalls.flatMap((call) => isRecord(call) && typeof call.id === 'string' && typeof call.name === 'string'
-      ? [{ id: call.id, name: call.name, ...(isRecord(call.args) ? { args: call.args } : {}) }]
-      : []);
-  }
-  if (isRecord(event.result)) {
-    record.result = {
-      ...(Object.hasOwn(event.result, 'content') ? { content: event.result.content } : {}),
-      ...(typeof event.result.failed === 'boolean' ? { failed: event.result.failed } : {}),
-      ...(typeof event.result.code === 'string' ? { code: event.result.code } : {}),
-      ...(typeof event.result.spilled === 'string' ? { spilled: event.result.spilled } : {}),
-      ...(event.result.images === undefined ? {} : { images: checkedImageReferences(event.result.images) }),
-    };
-  }
-  return record;
 }
 
 // 将流式事件转发给客户端，同时把原事件交回循环。

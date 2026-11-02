@@ -4,7 +4,8 @@ import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
-import { IMAGE_LIMITS, IMAGE_ID, isImageReference, type ImageReference } from '../session/media.js';
+import { checkedImageReferences, IMAGE_LIMITS, IMAGE_ID, isImageReference, type ImageReference } from '../session/media.js';
+import type { SessionEvent } from '../session/format.js';
 
 /** 导出结果中每个文件的状态，包括已写入、目标已存在和写入失败。 */
 export interface Exported {
@@ -39,6 +40,46 @@ export interface ExportAsset {
 export const MAX_EXPORT_ASSETS = 4096;
 const fence = (value: string) => `\`\`\`\n${value.replace(/\n+$/, '')}\n\`\`\``;
 const stemOf = (path: string) => path.replace(/\.(md|markdown|txt)$/i, '');
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function exportRecordOf(event: SessionEvent): ExportRecord | undefined {
+  if (typeof event.kind !== 'string') return undefined;
+  const record: {
+    kind: string;
+    seq?: number;
+    raw?: string;
+    text?: string;
+    tool?: string;
+    toolCalls?: { id: string; name: string; args?: Record<string, unknown> }[];
+    result?: { content?: unknown; failed?: boolean; code?: string; spilled?: string; images?: readonly ImageReference[] };
+    name?: string;
+    layer?: string;
+  } = { kind: event.kind };
+  if (typeof event.seq === 'number') record.seq = event.seq;
+  if (typeof event.raw === 'string') record.raw = event.raw;
+  if (typeof event.text === 'string') record.text = event.text;
+  if (typeof event.tool === 'string') record.tool = event.tool;
+  if (typeof event.name === 'string') record.name = event.name;
+  if (typeof event.layer === 'string') record.layer = event.layer;
+  if (Array.isArray(event.toolCalls)) {
+    record.toolCalls = event.toolCalls.flatMap((call) => isRecord(call) && typeof call.id === 'string' && typeof call.name === 'string'
+      ? [{ id: call.id, name: call.name, ...(isRecord(call.args) ? { args: call.args } : {}) }]
+      : []);
+  }
+  if (isRecord(event.result)) {
+    record.result = {
+      ...(Object.hasOwn(event.result, 'content') ? { content: event.result.content } : {}),
+      ...(typeof event.result.failed === 'boolean' ? { failed: event.result.failed } : {}),
+      ...(typeof event.result.code === 'string' ? { code: event.result.code } : {}),
+      ...(typeof event.result.spilled === 'string' ? { spilled: event.result.spilled } : {}),
+      ...(event.result.images === undefined ? {} : { images: checkedImageReferences(event.result.images) }),
+    };
+  }
+  return record;
+}
 
 // 优先显示结构化结果中的 `text` 字段；其他结果序列化为文本，失败时附带稳定错误码。
 function resultBody(record: ExportRecord): string {
