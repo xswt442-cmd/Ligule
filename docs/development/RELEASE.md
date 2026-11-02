@@ -17,6 +17,8 @@ Ligule 分为两条独立发行线，版本可分别推进：
 4. **Desktop 草稿：** Tag 创建后 [`desktop-publish.yml`](../../.github/workflows/desktop-publish.yml) 被自动分发（`publish=false`）。工作流从标签提交构建 Windows 与 Linux 三种安装包、校验发行资产并创建或补齐 GitHub Release 草稿。
 5. **公开 Desktop：** 检查草稿说明、三种安装包和 SHA-256 后，再手动 dispatch 同一工作流并设置 `publish=true`。工作流重新核对标签、历史草稿运行与全部资产，检查 `desktop-publish` Environment 已配置必需审核者，然后等待该 Environment 审批；获批后才公开 Release。
 
+**打 Tag 前最后核对：** 确认本地 `dev`、`main` 与远端分支已同步，工作区干净；`main` 最新提交的完整 push CI 成功，两个产品的 Manifest 版本与中英 Changelog 对应，目标 Tag 都尚不存在。使用上面的 `tag.yml` 分别创建产品标签，而不是手工推送轻量 Tag：该工作流还会校验精确 SHA 并自动分发后续流程。**创建 CLI Tag 会立即启动 npm 打包验证并最终等待 `npm-publish` Environment 审批；创建 Desktop Tag 会启动安装包构建和 Release 草稿流程，但不会公开 Desktop。** 不要把“Tag 已创建”或“草稿已生成”当成产品已正式发布。
+
 ## 发行故障处理与回退
 
 - **发行前工作流失败：** 先查看对应 GitHub Actions 运行记录和失败步骤。CLI 可在 `main` 上重新手动启动 [`npm-publish.yml`](../../.github/workflows/npm-publish.yml)，输入原有 `cli-vX.Y.Z` Tag；工作流会重新打包、验证并比较 Registry 内容，已存在且内容相同的 npm 版本不会重复发布。Desktop 可在 `main` 上重新手动启动 [`desktop-publish.yml`](../../.github/workflows/desktop-publish.yml)，输入原有 `desktop-vX.Y.Z` Tag 并设 `publish=false`；工作流只会补齐经过校验的草稿资产，遇到已公开 Release、意外资产或同名不同内容时会失败并要求人工检查。修正源码后应走新版本和新 Tag。
