@@ -2,7 +2,7 @@
 import { fork, type ChildProcess } from 'node:child_process';
 import { isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 
 export interface OwnedWindowsCommand {
   readonly child: ChildProcess;

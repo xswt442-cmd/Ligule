@@ -3,7 +3,7 @@
 // 搜索指定会话时还会读取溢出文件中的完整工具结果。
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 import { SPILL_NAME } from '../kernel/result.js';
 import { listSessions } from './list.js';
 import type { SessionEvent } from './format.js';

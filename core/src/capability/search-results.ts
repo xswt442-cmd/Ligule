@@ -1,4 +1,4 @@
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 
 const RESULT_LIMIT = 10;
 const OUTPUT_LIMIT = 24_000;

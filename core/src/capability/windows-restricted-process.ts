@@ -1,5 +1,5 @@
 import { randomInt } from 'node:crypto';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 import type { NativeHandle } from './windows-appcontainer-process.js';
 import type { OwnedProcessJob } from './win32-job.js';
 

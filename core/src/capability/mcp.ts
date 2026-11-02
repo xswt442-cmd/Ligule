@@ -17,7 +17,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { AjvJsonSchemaValidator } from '@modelcontextprotocol/sdk/validation/ajv';
 import type { JsonSchemaType } from '@modelcontextprotocol/sdk/validation';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 import { createOwnedProcessJob, type OwnedProcessJob } from './win32-job.js';
 
 export interface McpServerConfig {

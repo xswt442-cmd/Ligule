@@ -5,7 +5,7 @@
 // 记录读写失败会抛出 `KernelRuntimeError` 并中止循环，不能当作普通工具失败处理。
 import { mkdir, open, truncate, type FileHandle } from 'node:fs/promises';
 import { join } from 'node:path';
-import { KernelError, KernelRuntimeError } from '../kernel/error.js';
+import { KernelError, KernelRuntimeError } from '../errors.js';
 import { loadCheckpointFile, type CompactionBlock } from './checkpoint.js';
 import { checkedImageReferences } from './media.js';
 import { createSessionHeader } from './format.js';

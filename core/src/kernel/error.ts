@@ -1,35 +1,15 @@
-// Kernel 及其组件统一使用带稳定错误码的错误类型，供调用方分支处理。
-// 第二个参数沿用 `Error` options，可通过 `cause` 保留底层错误。
-export interface KernelErrorOptions extends ErrorOptions {
-  readonly detail?: string;
-  readonly diagnostics?: ProviderDiagnostic;
-}
+import { PROVIDER_DIAGNOSTIC_CATEGORIES, type ProviderDiagnostic } from '../errors.js';
 
-export type ProviderDiagnosticCategory = 'authentication' | 'rate_limit' | 'client' | 'server' | 'http' | 'transport' | 'stream' | 'invalid_response' | 'cancelled';
+export {
+  KernelError,
+  KernelRuntimeError,
+  type KernelErrorOptions,
+  type ProviderDiagnostic,
+  type ProviderDiagnosticCategory,
+  PROVIDER_DIAGNOSTIC_CATEGORIES,
+} from '../errors.js';
 
-export interface ProviderDiagnostic {
-  readonly category: ProviderDiagnosticCategory;
-  readonly status?: number;
-  readonly attempts: number;
-  readonly responseReceived: boolean;
-  readonly streamReceived: boolean;
-  readonly recoverable: boolean;
-}
-
-// Desktop、TUI 和 Host 共用同一份分类文案，避免各自维护一张会漂移的表。
-export const PROVIDER_DIAGNOSTIC_CATEGORIES: Readonly<Record<ProviderDiagnosticCategory, readonly [string, string]>> = {
-  authentication: ['身份认证', 'authentication'],
-  rate_limit: ['请求限流', 'rate limit'],
-  client: ['客户端请求', 'client request'],
-  server: ['服务端故障', 'server failure'],
-  http: ['HTTP 响应', 'HTTP response'],
-  transport: ['传输故障', 'transport failure'],
-  stream: ['响应流中断', 'response stream interrupted'],
-  invalid_response: ['响应格式无效', 'invalid response'],
-  cancelled: ['请求已取消', 'request cancelled'],
-};
-
-// 界面收到的诊断来自 JSON，先按稳定结构校验，再交给上表生成文案。
+// Validate diagnostics received over the protocol before formatting them.
 export function parseProviderDiagnostic(value: unknown): ProviderDiagnostic | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
   const candidate = value as Partial<ProviderDiagnostic>;
@@ -43,7 +23,7 @@ export function parseProviderDiagnostic(value: unknown): ProviderDiagnostic | un
     return undefined;
   }
   return {
-    category: candidate.category as ProviderDiagnosticCategory,
+    category: candidate.category as ProviderDiagnostic['category'],
     ...(candidate.status === undefined ? {} : { status: candidate.status }),
     attempts: candidate.attempts as number,
     responseReceived: candidate.responseReceived,
@@ -52,7 +32,7 @@ export function parseProviderDiagnostic(value: unknown): ProviderDiagnostic | un
   };
 }
 
-// 一行诊断摘要：状态码 · 分类 · 尝试次数 · 响应/响应流 · 是否可重试。
+// Format one concise diagnostic line with a shared bilingual category label.
 export function providerDiagnosticText(diagnostic: ProviderDiagnostic): { readonly zh: string; readonly en: string } {
   const category = PROVIDER_DIAGNOSTIC_CATEGORIES[diagnostic.category];
   const status: readonly [string, string] = diagnostic.status === undefined
@@ -66,48 +46,4 @@ export function providerDiagnosticText(diagnostic: ProviderDiagnostic): { readon
     zh: [status[0], category[0], attempts[0], response[0], stream[0], recovery[0]].join(' · '),
     en: [status[1], category[1], attempts[1], response[1], stream[1], recovery[1]].join(' · '),
   };
-}
-
-export class KernelError extends Error {
-  readonly code: string;
-  readonly detail: string | undefined;
-  readonly diagnostics: ProviderDiagnostic | undefined;
-
-  constructor(code: string, options?: KernelErrorOptions) {
-    super(code, options);
-    this.name = 'KernelError';
-    this.code = code;
-    // 错误说明会提供给模型；稳定错误码供调用方判断。
-    this.detail = options?.detail;
-    const diagnostics = options?.diagnostics;
-    if (diagnostics !== undefined) {
-      const categories: readonly string[] = Object.keys(PROVIDER_DIAGNOSTIC_CATEGORIES);
-      if (!categories.includes(diagnostics.category)
-        || !Number.isSafeInteger(diagnostics.attempts) || diagnostics.attempts < 1
-        || (diagnostics.status !== undefined
-          && (!Number.isSafeInteger(diagnostics.status) || diagnostics.status < 100 || diagnostics.status > 599))
-        || typeof diagnostics.responseReceived !== 'boolean'
-        || typeof diagnostics.streamReceived !== 'boolean'
-        || typeof diagnostics.recoverable !== 'boolean') {
-        throw new TypeError('provider diagnostics are invalid');
-      }
-    }
-    this.diagnostics = diagnostics === undefined ? undefined : Object.freeze({
-      category: diagnostics.category,
-      ...(diagnostics.status === undefined ? {} : { status: diagnostics.status }),
-      attempts: diagnostics.attempts,
-      responseReceived: diagnostics.responseReceived,
-      streamReceived: diagnostics.streamReceived,
-      recoverable: diagnostics.recoverable,
-    });
-  }
-}
-
-// Kernel 内部故障表示运行状态或记录可能不可信，应中止循环。
-// 普通工具失败作为失败事件写入记录，循环可以继续运行。
-export class KernelRuntimeError extends KernelError {
-  constructor(code: string, options?: KernelErrorOptions) {
-    super(code, options);
-    this.name = 'KernelRuntimeError';
-  }
 }

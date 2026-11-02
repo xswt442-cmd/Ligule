@@ -2,7 +2,7 @@
 // 平台实现集中在此处：Windows 使用系统接口，Linux 调用 GIO 系统回收站，macOS 暂无系统后端。
 // 每个进程只探测一次系统回收站能力。
 import { spawn } from 'node:child_process';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 
 type RecycleBackend = {
   name: string;

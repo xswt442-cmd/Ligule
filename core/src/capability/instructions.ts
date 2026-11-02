@@ -3,7 +3,7 @@
 // 指令内容会注入模型，因此受字节上限约束；超限时在末尾添加说明。
 import { readFile, realpath } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 import { matchesName } from '../kernel/match.js';
 import { isWithin } from './paths.js';
 

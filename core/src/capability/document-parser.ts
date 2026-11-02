@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import yauzl from 'yauzl';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 import { IMAGE_LIMITS } from '../session/media.js';
 import { DOCUMENT_LIMITS, type DocumentChunk, type DocumentOptions, type DocumentRequest, type DocumentResult } from './document-types.js';
 

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import { link, lstat, open, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 import type { RunResult } from '../delegation.js';
 import type { SessionEvent } from './format.js';
 

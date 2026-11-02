@@ -3,7 +3,7 @@
 // 探测失败时返回原因，由调用方记录并选择 Node 遍历实现。
 import { spawn } from 'node:child_process';
 import { resolve } from 'node:path';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 
 type RipgrepResolution =
   | { executable: string }

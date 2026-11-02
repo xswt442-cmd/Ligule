@@ -1,6 +1,6 @@
 // 每种能力后端提供独立探测函数，返回实际强制级别和稳定错误码。
 // 无法探测时返回 `none`，不伪报为受控；底层异常写入日志，响应仅包含错误码。
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 import { createLogger } from '../kernel/log.js';
 
 type CapabilityLevel = 'full' | 'partial' | 'none';

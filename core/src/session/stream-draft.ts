@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { KernelError, KernelRuntimeError } from '../kernel/error.js';
+import { KernelError, KernelRuntimeError } from '../errors.js';
 import type { SessionEvent } from './format.js';
 
 const CHANNEL_CHARACTERS = 8192;

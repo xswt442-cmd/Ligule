@@ -1,6 +1,6 @@
 // 文件边界和工具上限来自配置快照；工具本身不读取其他配置来源。
 // 默认值由项目维护，配置层可以逐字段覆盖。
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 import { resolve } from 'node:path';
 // 以下为各工具默认上限，配置层可以逐字段覆盖。
 export const DEFAULT_LIMITS = Object.freeze({

@@ -4,7 +4,7 @@ import { readdir, readFile, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { dataRoot } from '../kernel/config-file.js';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 import type { ModeFile } from '../kernel/modes.js';
 import { workspaceIdentity } from '../kernel/workspace.js';
 import { findUnresolvedCalls } from './repair.js';

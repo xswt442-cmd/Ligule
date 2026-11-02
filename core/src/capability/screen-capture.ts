@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 import { IMAGE_LIMITS } from '../session/media.js';
 import { createOwnedProcessJob } from './win32-job.js';
 

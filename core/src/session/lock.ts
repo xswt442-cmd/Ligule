@@ -2,7 +2,7 @@
 import lockfile from 'proper-lockfile';
 import { mkdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
-import { KernelError, KernelRuntimeError } from '../kernel/error.js';
+import { KernelError, KernelRuntimeError } from '../errors.js';
 
 export const SESSION_LOCK_STALE_MS = 10_000;
 

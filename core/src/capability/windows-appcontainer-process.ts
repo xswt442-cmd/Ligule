@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 
 type Koffi = typeof import('koffi')['default'];
 export type NativeHandle = number | bigint;

@@ -5,7 +5,7 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import type { ClientRequestArgs } from 'node:http';
 import { isIP } from 'node:net';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 
 // 公网地址按普通规则判定；环回和私有地址至少需要一次审批。
 // 链路本地地址（含云元数据地址）和未指定、组播、保留地址一律拒绝。

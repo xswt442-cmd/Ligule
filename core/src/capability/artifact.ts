@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import { createHash } from 'node:crypto';
 import sharp from 'sharp';
 import { extname, isAbsolute, relative, resolve, sep } from 'node:path';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 import { resolveWithin, isWithin } from './paths.js';
 import type { FileArtifact } from '../session/artifact.js';
 

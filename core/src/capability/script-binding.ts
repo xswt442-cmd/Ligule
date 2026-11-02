@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { constants, existsSync } from 'node:fs';
 import { open, realpath, stat, type FileHandle } from 'node:fs/promises';
 import { delimiter, extname, join, resolve } from 'node:path';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 import { inspectCommand } from './command.js';
 import { isWithin } from './paths.js';
 import type { PermissionContext } from '../kernel/permission.js';

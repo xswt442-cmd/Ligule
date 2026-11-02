@@ -4,7 +4,7 @@ import { lstat, mkdir, open, opendir, readdir, rename, unlink } from 'node:fs/pr
 import { join, relative, sep } from 'node:path';
 import lockfile from 'proper-lockfile';
 import sharp from 'sharp';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 import { workspaceIdentity } from '../kernel/workspace.js';
 import { dataRoot } from '../kernel/config-file.js';
 import { sessionDirectories, workspaceDataDirectory, type SessionDirectoryConfig } from '../session/list.js';

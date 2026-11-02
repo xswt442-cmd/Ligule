@@ -1,6 +1,6 @@
 // 会话记录首行保存格式版本、项目归属和创建时的模式信息。
 // 未知格式版本必须拒绝读取，避免静默跳过记录并生成错误的模型上下文。
-import { KernelRuntimeError } from '../kernel/error.js';
+import { KernelRuntimeError } from '../errors.js';
 import { isCanonicalTodoItems } from './todo.js';
 import { checkedImageReferences } from './media.js';
 import { isRunAcceptance, isRunResultRef } from './run.js';

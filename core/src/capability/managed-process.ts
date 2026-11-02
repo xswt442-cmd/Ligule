@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 import type { Plugin } from '../kernel/assembly.js';
 import type { Kernel, ToolDefinition } from '../kernel/kernel.js';
 import { runManagedExec, type ExecRunContext, type ManagedExecLease } from './exec.js';

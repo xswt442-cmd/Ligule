@@ -3,7 +3,7 @@
 // 此模块只判定边界；实际文件和进程约束由能力后端执行。
 import { realpath, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 
 type ResolveWithinOptions = { forWrite?: boolean; cwd?: string };
 

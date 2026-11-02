@@ -5,7 +5,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { dataRoot } from '../kernel/config-file.js';
 import { SPILL_NAME } from '../kernel/result.js';
-import { KernelRuntimeError } from '../kernel/error.js';
+import { KernelRuntimeError } from '../errors.js';
 import { workspaceIdentity } from '../kernel/workspace.js';
 import { acquireSessionLock } from './lock.js';
 import { isRunResultRef } from './run.js';

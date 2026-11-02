@@ -1,4 +1,4 @@
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 
 export const DOCUMENT_LIMITS = Object.freeze({ inputBytes: 20 * 1024 * 1024, outputBytes: 24_000,
   timeoutMs: 15_000, zipBytes: 64 * 1024 * 1024, zipEntries: 2000, units: 200,

@@ -5,7 +5,7 @@ import { constants, type Stats } from 'node:fs';
 import { lstat, mkdir, open, opendir, rmdir, unlink } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 import lockfile from 'proper-lockfile';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 
 export type StorageGcKind = 'browser' | 'cache' | 'tmp';
 export interface StorageGcCandidate {

@@ -3,7 +3,7 @@
 // 通过检查文件路径探测解释器，不启动进程。
 import { existsSync } from 'node:fs';
 import { delimiter, join, win32 } from 'node:path';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 
 export type ShellKind = 'bash' | 'powershell';
 

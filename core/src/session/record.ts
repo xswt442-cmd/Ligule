@@ -1,6 +1,6 @@
 // 记录的只读入口：完整行参与校验，未完成的尾行只报告长度，不修改文件。
 import { readFile } from 'node:fs/promises';
-import { KernelRuntimeError } from '../kernel/error.js';
+import { KernelRuntimeError } from '../errors.js';
 import { parseSessionEvents, type SessionEvent, type SessionRecord } from './format.js';
 
 export interface ReadSessionRecord extends SessionRecord {

@@ -4,7 +4,7 @@
 import { createHash } from 'node:crypto';
 import { createBlock, createCheckpointFile, loadCheckpointFile, PROJECTED_KINDS, writeCheckpointFile, type CompactionBlock } from './checkpoint.js';
 import { spillContent } from '../kernel/result.js';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 import type { SessionEvent } from './format.js';
 import { estimateRequest, estimateTokens, usageEvent, type ProviderCacheUsage } from './usage.js';
 import type { LoopCompactionRequest, ModelProvider, ModelRequest, ModelTool, ProviderEvent } from '../kernel/loop.js';

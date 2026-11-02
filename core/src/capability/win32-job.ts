@@ -1,5 +1,5 @@
 // Job 句柄只由守护进程持有；后代自动继承归属，不继承这个句柄。
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 
 type NativeHandle = number | bigint;
 

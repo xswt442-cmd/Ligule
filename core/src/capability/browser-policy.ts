@@ -1,4 +1,4 @@
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 
 export const BROWSER_SERVER = 'ligule-browser';
 

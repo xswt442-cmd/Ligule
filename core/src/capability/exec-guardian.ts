@@ -2,7 +2,7 @@
 import { spawn } from 'node:child_process';
 import { readdirSync, readFileSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 import {
   createAppContainerProfile,
   runAppContainerCommand,

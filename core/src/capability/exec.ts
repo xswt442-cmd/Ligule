@@ -8,7 +8,7 @@ import { chmod, mkdir, mkdtemp, open, realpath, rm, stat, type FileHandle } from
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join, parse, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 import { dataRoot } from '../kernel/config-file.js';
 import { isWithin, resolveWithin } from './paths.js';
 import { boundaryOf, limitsOf, workingDirectoryOf, type CapabilityConfig } from './limits.js';

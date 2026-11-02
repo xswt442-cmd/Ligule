@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import { lstat, open, realpath } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 import { boundaryOf, limitsOf, workingDirectoryOf, type CapabilityConfig } from './limits.js';
 import { resolveWithin } from './paths.js';
 import { createOwnedProcessJob } from './win32-job.js';

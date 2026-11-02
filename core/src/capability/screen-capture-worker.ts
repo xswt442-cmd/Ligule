@@ -1,4 +1,4 @@
-import { KernelError } from '../kernel/error.js';
+import { KernelError } from '../errors.js';
 import { IMAGE_LIMITS } from '../session/media.js';
 import { checkedCaptureOptions } from './screen-capture.js';
 const PER_MONITOR_AWARE_V2 = -4;
