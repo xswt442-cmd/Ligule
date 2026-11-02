@@ -231,6 +231,8 @@ type McpTrustPending = {
   readonly scope: McpTrustScope;
   readonly version: string;
   readonly identityDigest: string;
+  readonly sessionId: string;
+  readonly sessionGeneration: number;
 };
 function agentMcpConfig(grant: AgentGrant): string {
   const args = ['mcp-server', '--project', grant.projectRoot, '--grant', grant.id];
@@ -523,6 +525,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const app = useApp();
   const [sessionId, setSessionId] = useState(firstSessionId);
   const activeSession = useRef(sessionId);
+  const sessionIdentityGeneration = useRef(0);
   const terminalReceived = useRef(false);
   activeSession.current = sessionId;
   const [geometry, setGeometry] = useState({ columns: stdout?.columns ?? 80, rows: stdout?.rows ?? 24 });
@@ -552,7 +555,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [externalModel, setExternalModel] = useState<string | null>(null);
   const resolvedExternalInteractions = useRef(new Set<string>());
   useEffect(() => { resolvedExternalInteractions.current.clear(); }, [sessionId]);
-  useEffect(() => { setMcpTrustPending(null); }, [sessionId]);
+  useEffect(() => {
+    sessionIdentityGeneration.current += 1;
+    setMcpTrustPending(null);
+  }, [sessionId]);
   useEffect(() => { setSessionName(''); }, [sessionId]);
   const pickerRequest = useRef(0);
   const sessionNavigation = useRef({ generation: 0, activeToken: 0 });
@@ -1375,6 +1381,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       push({ kind: 'meta', text: t('会话切换正在进行，请稍后重试。', 'A session switch is in progress; try again shortly.') });
       return undefined;
     }
+    sessionIdentityGeneration.current += 1;
     const token = ++navigation.generation;
     navigation.activeToken = token;
     return { token, owner };
@@ -1451,26 +1458,34 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       }
       if (action === 'confirm') {
         const pending = mcpTrustPending;
-        if (pending === null) {
+        if (pending === null || pending.sessionId !== sessionId || pending.sessionGeneration !== sessionIdentityGeneration.current
+          || activeSession.current !== sessionId) {
+          if (pending !== null) setMcpTrustPending((current) => current === pending ? null : current);
           push({ kind: 'error', text: t('没有待确认的 MCP Server 信任请求。', 'No MCP server trust request is pending.') });
           return;
         }
+        const isCurrent = () => alive.current && activeSession.current === pending.sessionId
+          && sessionId === pending.sessionId && sessionIdentityGeneration.current === pending.sessionGeneration;
         void (async () => {
           try {
-            const snapshot = await client.request('mcp.trust.list', { projectRoot: info.boundary, sessionId });
+            const snapshot = await client.request('mcp.trust.list', { projectRoot: info.boundary, sessionId: pending.sessionId });
+            if (!isCurrent()) return;
             const current = snapshot.servers.find((server) => server.name === pending.server);
             if (current === undefined || current.identityDigest !== pending.identityDigest) {
-              setMcpTrustPending(null);
+              setMcpTrustPending((value) => value === pending ? null : value);
               throw new Error('mcp_server_config_changed');
             }
             await client.request('mcp.trust.set', {
-              projectRoot: info.boundary, sessionId, server: pending.server, identityDigest: pending.identityDigest, scope: pending.scope, trusted: true,
+              projectRoot: info.boundary, sessionId: pending.sessionId, server: pending.server, identityDigest: pending.identityDigest, scope: pending.scope, trusted: true,
               confirmTrust: true, confirmExternalAccess: true,
               ...(pending.scope === 'session' ? {} : { version: snapshot.version }),
             });
-            setMcpTrustPending(null);
+            if (!isCurrent()) return;
+            setMcpTrustPending((value) => value === pending ? null : value);
             push({ kind: 'meta', text: t(`已在${pending.scope}范围信任 ${pending.server}。`, `${pending.server} is trusted at ${pending.scope} scope.`) });
           } catch (error) {
+            if (!isCurrent()) return;
+            setMcpTrustPending((value) => value === pending ? null : value);
             push({ kind: 'error', text: t(`MCP Server 未获信任：${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_failed'}`, `MCP server was not trusted: ${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_failed'}`) });
           }
         })();
@@ -1493,15 +1508,27 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'error', text: t('当前没有会话，不能保存会话范围的信任。', 'There is no active session for session-scoped trust.') });
           return;
         }
-        void client.request('mcp.trust.list', { projectRoot: info.boundary, sessionId }).then((snapshot) => {
-          const server = snapshot.servers.find((item) => item.name === serverName);
-          if (server === undefined) throw new Error('mcp_server_unknown');
-          setMcpTrustPending({ server: server.name, scope, version: snapshot.version, identityDigest: server.identityDigest });
-          push({ kind: 'meta', text: t(
-            `待确认：${server.name}\n程序：${server.command}\n参数：${server.args.join(' ') || '无'}\n工作目录：${server.cwd}\n环境变量名：${server.environmentNames.join(', ') || '无'}\n它在 Shell 沙箱外运行，可访问当前 OS 用户可访问的文件和网络。输入 /mcp confirm 确认信任范围 ${scope}。`,
-            `Pending trust: ${server.name}\nProgram: ${server.command}\nArguments: ${server.args.join(' ') || 'none'}\nWorking directory: ${server.cwd}\nEnvironment variable names: ${server.environmentNames.join(', ') || 'none'}\nIt runs outside the Shell sandbox and may access files and networks available to this OS user. Type /mcp confirm to trust at ${scope} scope.`,
-          ) });
-        }, (error: unknown) => push({ kind: 'error', text: t(`无法读取 MCP Server：${errorCode(error) ?? 'mcp_trust_list_failed'}`, `Could not read MCP server: ${errorCode(error) ?? 'mcp_trust_list_failed'}`) }));
+        const owner = sessionId;
+        const generation = sessionIdentityGeneration.current;
+        const isCurrent = () => alive.current && activeSession.current === owner
+          && sessionId === owner && sessionIdentityGeneration.current === generation;
+        void (async () => {
+          try {
+            const snapshot = await client.request('mcp.trust.list', { projectRoot: info.boundary, sessionId: owner });
+            if (!isCurrent()) return;
+            const server = snapshot.servers.find((item) => item.name === serverName);
+            if (server === undefined) throw new Error('mcp_server_unknown');
+            setMcpTrustPending({ server: server.name, scope, version: snapshot.version, identityDigest: server.identityDigest,
+              sessionId: owner, sessionGeneration: generation });
+            push({ kind: 'meta', text: t(
+              `待确认：${server.name}\n程序：${server.command}\n参数：${server.args.join(' ') || '无'}\n工作目录：${server.cwd}\n环境变量名：${server.environmentNames.join(', ') || '无'}\n它在 Shell 沙箱外运行，可访问当前 OS 用户可访问的文件和网络。输入 /mcp confirm 确认信任范围 ${scope}。`,
+              `Pending trust: ${server.name}\nProgram: ${server.command}\nArguments: ${server.args.join(' ') || 'none'}\nWorking directory: ${server.cwd}\nEnvironment variable names: ${server.environmentNames.join(', ') || 'none'}\nIt runs outside the Shell sandbox and may access files and networks available to this OS user. Type /mcp confirm to trust at ${scope} scope.`,
+            ) });
+          } catch (error) {
+            if (!isCurrent()) return;
+            push({ kind: 'error', text: t(`无法读取 MCP Server：${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_list_failed'}`, `Could not read MCP server: ${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_list_failed'}`) });
+          }
+        })();
         return;
       }
       if (action === 'revoke') {
