@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useText } from '../locale';
 
 export type QuestionOption = { label: string; description?: string };
@@ -9,10 +9,11 @@ export type QuestionDrafts = Record<string, { picked: string[]; extra: string }>
 
 const answered = (draft: { picked: string[]; extra: string }) => draft.picked.length > 0 || draft.extra.trim() !== '';
 
-export function QuestionCard({ ask, queued, active, onSubmit, onCancel, onOpen, onDraft }: {
+export function QuestionCard({ ask, queued, active, initialDrafts, onSubmit, onCancel, onOpen, onDraft }: {
   ask: QuestionAsk;
   queued: number;
   active: string | null;
+  initialDrafts?: QuestionDrafts;
   onSubmit: (answers: { id: string; selected: string[]; custom?: string }[]) => void;
   onCancel: () => void;
   onOpen: (sessionId: string) => void;
@@ -20,19 +21,24 @@ export function QuestionCard({ ask, queued, active, onSubmit, onCancel, onOpen, 
 }) {
   const t = useText();
   const [drafts, setDrafts] = useState<QuestionDrafts>(
-    () => Object.fromEntries(ask.questions.map((question) => [question.id, { picked: [], extra: '' }])),
+    () => initialDrafts ?? Object.fromEntries(ask.questions.map((question) => [question.id, { picked: [], extra: '' }])),
   );
-  useEffect(() => { onDraft(ask.id, drafts); }, [ask.id, drafts, onDraft]);
   const background = ask.sessionId !== active;
   const anyAnswered = ask.questions.some((question) => answered(drafts[question.id] ?? { picked: [], extra: '' }));
-  const pick = (id: string, label: string, multiple: boolean) => setDrafts((current) => {
-    const draft = current[id] ?? { picked: [], extra: '' };
+  const pick = (id: string, label: string, multiple: boolean) => {
+    const draft = drafts[id] ?? { picked: [], extra: '' };
     const picked = multiple
       ? (draft.picked.includes(label) ? draft.picked.filter((one) => one !== label) : [...draft.picked, label])
       : [label];
-    return { ...current, [id]: { ...draft, picked } };
-  });
-  const write = (id: string, extra: string) => setDrafts((current) => ({ ...current, [id]: { ...(current[id] ?? { picked: [], extra: '' }), extra } }));
+    const next = { ...drafts, [id]: { ...draft, picked } };
+    setDrafts(next);
+    onDraft(ask.id, next);
+  };
+  const write = (id: string, extra: string) => {
+    const next = { ...drafts, [id]: { ...(drafts[id] ?? { picked: [], extra: '' }), extra } };
+    setDrafts(next);
+    onDraft(ask.id, next);
+  };
   const submit = () => {
     if (!anyAnswered) return;
     onSubmit(ask.questions

@@ -39,6 +39,7 @@ const PROOF_FILES = [
 const providerLabel = '本地 stub 模型';
 const externalControlOnly = process.argv.includes('--external-control-only');
 const providerRequests = [];
+let externalFetchCount = 0;
 // 启用后只记录新请求而不返回响应，用于验证界面在请求等待期间的行为。
 let hangRequests = false;
 const skillMcpProof = { skillToolAvailable: false, skillActivated: false, mcpInspectAvailable: false, mcpCallAvailable: false, mcpInspectRequested: false };
@@ -71,7 +72,13 @@ const server = createServer(async (request, response) => {
   const url = request.url ?? '';
   if (url.startsWith('/stub/')) {
     if (request.method === 'GET' && url === '/stub/state') {
-      jsonResponse(response, 200, { requests: providerRequests.length, hang: hangRequests, skillMcpProof });
+      jsonResponse(response, 200, { requests: providerRequests.length, hang: hangRequests, skillMcpProof, externalFetchCount });
+      return;
+    }
+    if (request.method === 'GET' && url === '/stub/external-fetch-target') {
+      externalFetchCount += 1;
+      response.writeHead(200, { 'content-type': 'text/plain' });
+      response.end('EXTERNAL_FETCH_APPROVED');
       return;
     }
     if (request.method === 'POST' && url === '/stub/hang') {
@@ -96,6 +103,7 @@ const server = createServer(async (request, response) => {
   const lastUser = [...messages].reverse().find(message => message.role === 'user');
   const prompt = typeof lastUser?.content === 'string' ? lastUser.content : '';
   const followup = messages.at(-1)?.role === 'tool';
+  const sessionQuestionTurn = messages.some(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes('desktop-session-question-draft'));
   const externalQuestionTurn = messages.some(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes('desktop-external-control-question'));
   const externalApprovalTurn = messages.some(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes('desktop-external-control-approval'));
   const workflowMarker = 'desktop-skill-mcp-load-proof';
@@ -136,6 +144,11 @@ const server = createServer(async (request, response) => {
       finish('stop');
       return;
     }
+    if (sessionQuestionTurn) {
+      streamChunk(response, { choices: [{ index: 0, delta: { content: '普通会话问题已收到人类答复。' } }] });
+      finish('stop');
+      return;
+    }
     if (workflowStep === 1) {
       const skill = body.tools?.find(item => item.function?.name === 'skill');
       const inspect = body.tools?.find(item => item.function?.name === mcpInspectWireName);
@@ -172,11 +185,14 @@ const server = createServer(async (request, response) => {
     }, 'stub-external-human-question');
     return;
   }
+  if (prompt.includes('desktop-session-question-draft')) {
+    respondWithTool(response, 'ask_user_question', {
+      questions: JSON.stringify([{ question: 'Choose a session route', options: [{ label: 'north' }, { label: 'south' }], multiSelect: false }]),
+    }, 'stub-session-question-draft');
+    return;
+  }
   if (prompt.includes('desktop-external-control-approval')) {
-    respondWithTool(response, 'create', {
-      path: 'desktop-external-control-proof.txt',
-      content: 'HUMAN_APPROVED',
-    }, 'stub-external-human-approval');
+    respondWithTool(response, 'fetch', { url: externalFetchTarget }, 'stub-external-human-approval');
     return;
   }
   if (prompt.includes('desktop-human-control-followup')) {
@@ -205,6 +221,7 @@ await new Promise((resolvePromise, reject) => {
   server.listen(0, '127.0.0.1', resolvePromise);
 });
 const endpoint = `http://127.0.0.1:${server.address().port}/v1`;
+const externalFetchTarget = new URL('/stub/external-fetch-target', endpoint).href;
 
 const runId = new Date().toISOString().replace(/[:.]/gu, '-');
 await mkdir(temporaryParent, { recursive: true });
@@ -215,14 +232,21 @@ const isolatedHome = join(temporaryRoot, 'ligule-home');
 const userData = join(temporaryRoot, 'electron-user-data');
 const workspace = join(temporaryRoot, 'workspaces', 'project');
 const skillDirectory = join(workspace, '.agents', 'skills', 'desktop-smoke');
+const modeDirectory = join(workspace, '.ligule', 'modes');
 const schemaPath = join(temporaryRoot, 'mcp-echo-schema.json');
 await Promise.all([
   mkdir(isolatedHome, { recursive: true }),
   mkdir(userData, { recursive: true }),
   mkdir(workspace, { recursive: true }),
   mkdir(skillDirectory, { recursive: true }),
+  mkdir(modeDirectory, { recursive: true }),
   mkdir(evidenceRoot, { recursive: true }),
 ]);
+await writeFile(join(modeDirectory, 'minimal.toml'), [
+  "tools = ['exec', 'managed_process', 'find', 'search', 'read', 'create', 'write', 'edit', 'delete', 'fetch']",
+  'prompt = []',
+  '',
+].join('\n'), 'utf8');
 await writeFile(join(skillDirectory, 'SKILL.md'), [
   '---',
   'name: desktop-smoke',
@@ -272,6 +296,7 @@ environment.LIGULE_REAL_MODEL_USER_DATA = userData;
 environment.LIGULE_MODEL_PROVIDER_LABEL = providerLabel;
 environment.LIGULE_MODEL_EVIDENCE_NAME = 'stub-model';
 environment.LIGULE_STUB_CONTROL = `http://127.0.0.1:${server.address().port}/stub`;
+environment.LIGULE_STUB_FETCH_TARGET = externalFetchTarget;
 environment.LIGULE_EXTERNAL_CONTROL_TEST = '1';
 if (externalControlOnly) environment.LIGULE_EXTERNAL_CONTROL_ONLY = '1';
 

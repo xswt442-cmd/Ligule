@@ -61,7 +61,7 @@ function approvalOf(item: PendingInteraction, project: string, expanded?: { args
     sessionId: item.sessionId,
     project,
     tool: typeof details.tool === 'string' ? details.tool : 'unknown',
-    detail: typeof details.command === 'string' ? details.command : typeof args.path === 'string' ? args.path : '',
+    detail: typeof details.command === 'string' ? details.command : typeof args.path === 'string' ? args.path : typeof args.url === 'string' ? args.url : '',
     change: change.summary,
     reason: typeof details.reason === 'string' ? details.reason : '',
     backend: typeof details.executable === 'string' ? details.executable : typeof details.shell === 'string' ? details.shell : '',
@@ -103,7 +103,7 @@ function phaseLabel(snapshot: ControlSnapshot | null, t: (chinese: string, engli
   }
 }
 
-export function ExternalSessionControlPanel({ client, sessionId, projectRoot, verbosity, onRuntimeAvailability, onDelta, onSessionEvent, onTakeover }: {
+export function ExternalSessionControlPanel({ client, sessionId, projectRoot, verbosity, onRuntimeAvailability, onDelta, onSessionEvent, onTakeover, getQuestionDraft, onQuestionDraft }: {
   client: Client;
   sessionId: string;
   projectRoot: string;
@@ -112,6 +112,8 @@ export function ExternalSessionControlPanel({ client, sessionId, projectRoot, ve
   onDelta: (kind: 'text' | 'reasoning', text: string) => void;
   onSessionEvent: (kind: string) => void;
   onTakeover: () => void;
+  getQuestionDraft: (sessionId: string, requestId: string) => QuestionDrafts | undefined;
+  onQuestionDraft: (sessionId: string, requestId: string, drafts: QuestionDrafts | null) => void;
 }) {
   const t = useText();
   const [snapshot, setSnapshot] = useState<ControlSnapshot | null>(null);
@@ -191,6 +193,7 @@ export function ExternalSessionControlPanel({ client, sessionId, projectRoot, ve
     setBusy(true);
     try {
       await act({ action: 'reply', requestId: item.requestId, type: item.type, ...answer });
+      if (item.type === 'question') onQuestionDraft(item.sessionId, item.requestId, null);
       setNote({ text: t('已将答复交给外控会话。', 'Answer sent to the external session.'), bad: false });
     } catch (error) {
       setNote({ text: t(`答复未提交：${code(error)}`, `Answer was not submitted: ${code(error)}`), bad: true });
@@ -252,12 +255,13 @@ export function ExternalSessionControlPanel({ client, sessionId, projectRoot, ve
       ? <QuestionCard
           key={item.requestId}
           ask={questionOf(item, project)}
+          initialDrafts={getQuestionDraft(item.sessionId, item.requestId)}
           queued={pending.length - 1}
           active={sessionId}
           onSubmit={(answers) => void reply(item, { answers })}
           onCancel={() => void cancel()}
           onOpen={() => undefined}
-          onDraft={(_id: string, _drafts: QuestionDrafts) => undefined}
+          onDraft={(id, drafts) => onQuestionDraft(item.sessionId, id, drafts)}
         />
       : <ApprovalCard
           key={item.requestId}

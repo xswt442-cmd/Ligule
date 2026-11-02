@@ -192,9 +192,22 @@ export function App({ transport }: { transport: Transport }) {
   useEffect(() => { queriesLeft.current = queries; }, [queries]);
   // 暂存卡片中的答案；卡片关闭后将问题和答案写入转录，并禁止重复提交。
   const questionDrafts = useRef(new Map<string, QuestionDrafts>());
+  const externalQuestionDrafts = useRef(new Map<string, Map<string, QuestionDrafts>>());
   // 会话不在前台时暂存其问题和答案，等重新打开该会话时再写入记录。
   const pendingEchoes = useRef(new Map<string, Array<{ zh: string; en: string }>>());
   const keepQuestionDraft = useCallback((id: string, drafts: QuestionDrafts) => { questionDrafts.current.set(id, drafts); }, []);
+  const getExternalQuestionDraft = useCallback((owner: string, id: string) => externalQuestionDrafts.current.get(owner)?.get(id), []);
+  const keepExternalQuestionDraft = useCallback((owner: string, id: string, drafts: QuestionDrafts | null) => {
+    const sessionDrafts = externalQuestionDrafts.current.get(owner);
+    if (drafts === null) {
+      sessionDrafts?.delete(id);
+      if (sessionDrafts?.size === 0) externalQuestionDrafts.current.delete(owner);
+      return;
+    }
+    const nextSessionDrafts = sessionDrafts ?? new Map<string, QuestionDrafts>();
+    nextSessionDrafts.set(id, drafts);
+    if (sessionDrafts === undefined) externalQuestionDrafts.current.set(owner, nextSessionDrafts);
+  }, []);
   // 每个会话独立维护运行状态、取消信号和输入队列。
   // 轮次完成状态只更新所属会话，切换前台会话不会改变其他会话的显示。
   const [runningIds, setRunningIds] = useState<string[]>([]);
@@ -1750,6 +1763,7 @@ export function App({ transport }: { transport: Transport }) {
       {currentQueries.length > 0 && <QuestionCard
         key={currentQueries[0].id}
         ask={currentQueries[0]}
+        initialDrafts={questionDrafts.current.get(currentQueries[0].id)}
         queued={currentQueries.length - 1}
         active={sessionId}
         onOpen={(id: string) => void openSession(id)}
@@ -1779,6 +1793,8 @@ export function App({ transport }: { transport: Transport }) {
         onDelta={acceptExternalDelta}
         onSessionEvent={settleExternalEvent}
         onTakeover={() => { void openSession(sessionId, undefined, false, projectRoot); }}
+        getQuestionDraft={getExternalQuestionDraft}
+        onQuestionDraft={keepExternalQuestionDraft}
       />}
 
       {link !== null && <div className="banner" role="alert">

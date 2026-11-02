@@ -367,6 +367,28 @@ async function verifyExternalSessionControl() {
   const trust = await import(pathToFileURL(join(repositoryRoot, 'core', 'dist', 'kernel', 'workspace-trust.js')).href);
   const agentControl = await import(pathToFileURL(join(repositoryRoot, 'core', 'dist', 'host', 'agent-control.js')).href);
   const previousSessionId = sessionId;
+  const sessionQuestionDraft = 'desktop-session-question-draft-answer';
+  let draftAwaySessionId = previousSessionId;
+  let sessionQuestionRun;
+  if (typeof previousSessionId === 'string') {
+    sessionQuestionRun = requestHost('run.start', { sessionId: previousSessionId, input: 'desktop-session-question-draft' })
+      .then(() => undefined, (error) => error);
+    await waitFor(`(() => [...document.querySelectorAll('.question')]
+      .some(item => item.closest('.external-control') === null && item.querySelector('.question-item') !== null))()`, 15_000, 'session_question_card_not_visible');
+    const enteredSessionQuestion = await evaluate(`(() => {
+      const card = [...document.querySelectorAll('.question')].find(item => item.closest('.external-control') === null && item.querySelector('.question-item') !== null);
+      const option = card?.querySelector('.question-option input');
+      const extra = card?.querySelector('.question-free');
+      if (option === null || option === undefined || extra === null || extra === undefined) return false;
+      option.click();
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(extra, ${JSON.stringify(sessionQuestionDraft)});
+      extra.dispatchEvent(new Event('input', { bubbles: true }));
+      return option.checked && extra.value === ${JSON.stringify(sessionQuestionDraft)};
+    })()`);
+    assert.equal(enteredSessionQuestion, true, 'session_question_draft_setup_failed');
+    await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+  }
   await trust.setTrusted(workspaceRoot, true, join(isolatedHome, 'tui-trust.json'));
   const grantStorePath = agentControl.delegationPathOf(isolatedHome);
   const grantBefore = await agentControl.listDelegationGrants(grantStorePath);
@@ -375,8 +397,8 @@ async function verifyExternalSessionControl() {
     projectRoot: workspaceRoot,
     defaultPermissionProfile: 'workspace-write',
     maxPermissionProfile: 'workspace-write',
-    defaultNetwork: 'disabled',
-    maxNetwork: 'disabled',
+    defaultNetwork: 'policy',
+    maxNetwork: 'policy',
     defaultPolicy: 'ask',
     allowedPolicies: ['ask'],
     allowOperator: false,
@@ -403,6 +425,11 @@ async function verifyExternalSessionControl() {
     const created = await mcpClient.callTool({ name: 'ligule_session_create', arguments: { projectRoot: workspaceRoot } });
     if (created.isError === true) throw Object.assign(new Error(`external_control_session_create_failed:${mcpStderr.slice(-500)}`), { code: JSON.parse(created.content?.[0]?.text ?? '{}').code ?? 'external_control_session_create_failed' });
     observerSessionId = created.structuredContent.sessionId;
+    if (typeof draftAwaySessionId !== 'string') {
+      const away = await mcpClient.callTool({ name: 'ligule_session_create', arguments: { projectRoot: workspaceRoot } });
+      if (away.isError === true) throw Object.assign(new Error(`external_control_away_session_create_failed:${mcpStderr.slice(-500)}`), { code: JSON.parse(away.content?.[0]?.text ?? '{}').code ?? 'external_control_away_session_create_failed' });
+      draftAwaySessionId = away.structuredContent.sessionId;
+    }
     await evaluate(`(() => {
       const button = document.querySelector('button[aria-label="展开侧栏"], button[aria-label="Show sidebar"]');
       button?.click();
@@ -444,6 +471,35 @@ async function verifyExternalSessionControl() {
         && configuration !== null && composer.querySelector('details.external-session-grant') !== null
         && hasModel && hasToolMode && hasPolicy && hasPermission;
     })()`, 15_000, 'external_session_composer_or_config_missing');
+    if (typeof previousSessionId === 'string') {
+      await evaluate(`(() => {
+        const item = [...document.querySelectorAll('.session-item')].find(button => button.title.endsWith(${JSON.stringify(` · ${previousSessionId}`)}));
+        item?.click();
+        return item !== undefined;
+      })()`);
+      await waitFor(`(() => {
+        const active = document.querySelector('.session-item.active');
+        const card = [...document.querySelectorAll('.question')].find(item => item.closest('.external-control') === null && item.querySelector('.question-item') !== null);
+        return active?.title.endsWith(${JSON.stringify(` · ${previousSessionId}`)}) === true
+          && card?.querySelector('.question-option input')?.checked === true
+          && card?.querySelector('.question-free')?.value === ${JSON.stringify(sessionQuestionDraft)};
+      })()`, 10_000, 'session_question_draft_lost_after_navigation');
+      await evaluate(`(() => {
+        const card = [...document.querySelectorAll('.question')].find(item => item.closest('.external-control') === null && item.querySelector('.question-item') !== null);
+        card?.querySelector('.question-actions button[data-tone="allow"]')?.click();
+        return card !== undefined;
+      })()`);
+      await waitFor(`document.querySelector('.center')?.innerText.includes('普通会话问题已收到人类答复') === true`, 15_000, 'session_question_answer_not_recorded');
+      await waitForSessionIdle(15_000, 'session_question_turn_did_not_complete');
+      const sessionQuestionError = await sessionQuestionRun;
+      if (sessionQuestionError !== undefined) throw sessionQuestionError;
+      await evaluate(`(() => {
+        const item = [...document.querySelectorAll('.session-item')].find(button => button.title.endsWith(${JSON.stringify(` · ${observerSessionId}`)}));
+        item?.click();
+        return item !== undefined;
+      })()`);
+      await waitFor(`document.querySelector('.external-session-composer') !== null`, 10_000, 'external_session_composer_not_restored_after_question');
+    }
     const sendDisabled = await evaluate(`document.querySelector('button.send')?.disabled === true`);
     assert.equal(sendDisabled, true, 'external_session_composer_must_start_empty');
     await evaluate(`document.querySelector('.external-session-grant summary')?.click()`);
@@ -504,6 +560,36 @@ async function verifyExternalSessionControl() {
       const source = document.querySelector('.row.question[data-source="controller"] .question-source')?.textContent ?? '';
       return source.includes('外部 Agent') || source.includes('External agent');
     })()`, 10_000, 'external_controller_message_source_not_visible');
+    const questionDraft = 'desktop-external-question-draft';
+    const enteredQuestion = await evaluate(`(() => {
+      const card = document.querySelector('.external-control .question');
+      const option = card?.querySelector('.question-option input');
+      const extra = card?.querySelector('.question-free');
+      if (option === null || option === undefined || extra === null || extra === undefined) return false;
+      option.click();
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(extra, ${JSON.stringify(questionDraft)});
+      extra.dispatchEvent(new Event('input', { bubbles: true }));
+      return option.checked && extra.value === ${JSON.stringify(questionDraft)};
+    })()`);
+    assert.equal(enteredQuestion, true, 'external_question_draft_setup_failed');
+    await evaluate(`(() => {
+      const item = [...document.querySelectorAll('.session-item')].find(button => button.title.endsWith(${JSON.stringify(` · ${draftAwaySessionId}`)}));
+      item?.click();
+      return item !== undefined;
+    })()`);
+    await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${draftAwaySessionId}`)}) === true
+      && document.querySelector('.external-session-composer') === null`, 10_000, 'external_question_switch_away_failed');
+    await evaluate(`(() => {
+      const item = [...document.querySelectorAll('.session-item')].find(button => button.title.endsWith(${JSON.stringify(` · ${observerSessionId}`)}));
+      item?.click();
+      return item !== undefined;
+    })()`);
+    await waitFor(`(() => {
+      const card = document.querySelector('.external-control .question');
+      return card?.querySelector('.question-option input')?.checked === true
+        && card?.querySelector('.question-free')?.value === ${JSON.stringify(questionDraft)};
+    })()`, 10_000, 'external_question_draft_lost_after_navigation');
     const laterDraft = 'desktop-human-control-later-draft';
     const sendGate = holdNextExternalSendResponse();
     try {
@@ -546,11 +632,6 @@ async function verifyExternalSessionControl() {
       sendGate.release();
     }
     await evaluate(`(() => {
-      const choice = document.querySelector('.external-control .question-option input');
-      choice?.click();
-      return choice !== null;
-    })()`);
-    await evaluate(`(() => {
       const button = [...document.querySelectorAll('.external-control .question-actions button')].find(item => /提交答案|Submit answers/u.test(item.textContent ?? ''));
       button?.click();
       return button !== undefined;
@@ -572,16 +653,20 @@ async function verifyExternalSessionControl() {
       input: 'desktop-external-control-approval',
     } });
     if (approvalStart.isError === true) throw Object.assign(new Error('external_control_approval_start_failed'), { code: JSON.parse(approvalStart.content?.[0]?.text ?? '{}').code ?? 'external_control_approval_start_failed' });
-    await waitFor(`document.querySelector('.external-control .approval .row-tool')?.textContent.trim() === 'create'`, 15_000, 'external_control_approval_not_visible');
+    const fetchTarget = process.env.LIGULE_STUB_FETCH_TARGET;
+    if (typeof fetchTarget !== 'string' || fetchTarget === '') throw Object.assign(new Error('external_control_fetch_target_missing'), { code: 'external_control_fetch_target_missing' });
+    await waitFor(`document.querySelector('.external-control .approval .row-tool')?.textContent.trim() === 'fetch'`, 15_000, 'external_control_approval_not_visible');
+    await waitFor(`(() => [...document.querySelectorAll('.external-control .approval .row-target')]
+      .some(item => item.textContent?.trim() === ${JSON.stringify(fetchTarget)}))()`, 10_000, 'external_control_approval_target_not_visible');
     await evaluate(`(() => {
-      const card = [...document.querySelectorAll('.external-control .approval')].find(item => item.querySelector('.row-tool')?.textContent.trim() === 'create');
+      const card = [...document.querySelectorAll('.external-control .approval')].find(item => item.querySelector('.row-tool')?.textContent.trim() === 'fetch');
       const button = card?.querySelector('button[data-tone="allow"]');
       button?.click();
       return button !== null && button !== undefined;
     })()`);
     await waitFor(`document.querySelector('.center')?.innerText.includes('外控审批已通过') === true`, 20_000, 'external_control_approval_not_completed');
-    const approvedFile = await require('node:fs/promises').readFile(join(workspaceRoot, 'desktop-external-control-proof.txt'), 'utf8').catch(() => null);
-    assert.equal(approvedFile, 'HUMAN_APPROVED', 'human_approval_did_not_allow_the_bound_tool');
+    const fetchState = await fetch(`${process.env.LIGULE_STUB_CONTROL}/state`).then(response => response.json());
+    assert.equal(fetchState.externalFetchCount, 1, 'human_approval_did_not_allow_the_bound_fetch');
 
     await fetch(`${process.env.LIGULE_STUB_CONTROL}/hang`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hang: true }) });
     await evaluate(`(() => {
@@ -633,7 +718,7 @@ async function verifyExternalSessionControl() {
         return active?.title.endsWith(${JSON.stringify(` · ${previousSessionId}`)}) === true && input?.readOnly === false;
       })()`, 10_000, 'observer_previous_session_restore_failed');
     }
-    return '真实 Electron 窗口连接到独立 stdio MCP Host：处理人类问题、一次性审批、排队消息、取消和接管；批准的 create 工具写入测试文件，接管后原 MCP Host 的写入请求被拒绝。模型由本地固定 SSE stub 驱动，不构成真实模型验收';
+    return '真实 Electron 窗口验证普通会话与外控会话的问题草稿切换会话后保留，并覆盖一次性 fetch 审批、排队消息、取消和接管；批准的请求访问隔离本机测试端点，接管后原 MCP Host 的写入请求被拒绝。模型由本地固定 SSE stub 驱动，不构成真实模型验收';
   } finally {
     await fetch(`${process.env.LIGULE_STUB_CONTROL}/hang`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hang: false }) }).catch(() => {});
     await mcpClient.close().catch(() => {});
@@ -731,7 +816,7 @@ async function runChecks() {
   assert.ok(workspaceRegistration.workspaces.some(item => resolve(item.directory) === resolve(workspaceRoot)), 'isolated_workspace_not_registered');
 
   // 新会话默认只读；审批用例先通过真实设置控件授予工作区文件工具写入权限。
-  await selectNewSessionPermission('workspace-write');
+  if (!externalControlOnly) await selectNewSessionPermission('workspace-write');
   if (externalControlOnly) {
     await check('MCP 外控会话的人类观察、干预与接管', verifyExternalSessionControl);
     return;
