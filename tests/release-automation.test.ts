@@ -501,7 +501,7 @@ test('release workflows split CI, tagging, and product publication and keep proc
     assert.match(probeCommand, /probeLinuxSandboxIsolation/);
     assert.match(probeCommand, /if \(!result\.available\)/);
   }
-  assert.ok(ci.jobs['cli-package'].steps.some((step) => step.uses === 'actions/upload-artifact@v7'
+  assert.ok(ci.jobs['cli-package'].steps.some((step) => step.uses === 'actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9'
     && step.with?.name === 'ligule-cli-tarball-${{ github.run_id }}'
     && step.with?.path === 'testplace/pack/*.tgz'
     && step.with?.overwrite === true));
