@@ -12,6 +12,10 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 - 终端常驻区只保留模型、思考档（模型声明可用时）、工具模式、权限、审批与会话阶段；预算、计数和完整标识符在 `/status` 查看。
 - 外控授权向导读取 MCP 清单期间可取消；迟到结果不会重新打开向导。提交授权后会显示等待状态，避免误报取消或重复创建。
+- MCP Server 信任请求及其异步结果绑定发起时的 Session；切换会话后，迟到的读取或确认结果不会污染另一会话。
+- 外控问题答复失败时保留已填写答案并允许重试；只有 Host 确认接收后才清除待处理交互。
+- 窄终端下状态行按可用列宽截断并保留打断提示；MCP 调用的目标从实际嵌套参数中提取，避免显示错误目标。
+- 权限结果仅在实际提高权限时标记为升级，避免普通策略判断被误报为权限升级。
 
 - `run.wait` 必须明确指定 `origin`，但该字段不授予权限。可信本地 UI 可读取本 Session 的所有回执；经过认证的 Agent Control 桥接受限于 human 与当前 Grant scope；其他 Host 只能读取自己的 controller scope。Host 按持久 Run 归属与调用方上下文授权。跨 scope 的 `requestKey` 多重匹配返回 `run_request_key_ambiguous`，应使用 `runId`。
 - POSIX MCP Server 使用独立进程组；撤销、取消或 Host 关闭时有界地发送终止信号并清理仍存活的所属子进程，失败保留为可重试错误。主动通过 `setpgid` 移入其他进程组或通过 `setsid` 创建新会话的后代不在原进程组边界内。
@@ -49,6 +53,10 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 - The terminal status area keeps only the model, thinking effort (when the model declares one), tool mode, permission, approvals, and the session phase; budgets, counters, and full identifiers live in `/status`.
 - The Agent Control grant wizard can be canceled while it reads MCP lists; late responses no longer reopen it. Grant submission shows a waiting state to prevent false cancellation and duplicate creation.
+- MCP server trust requests and their asynchronous results stay bound to the originating Session; late list or confirmation responses after a Session switch cannot change another Session's trust state.
+- Failed external question replies retain the entered answers for retry; the pending interaction is cleared only after the Host confirms the reply.
+- On narrow terminals, the status line truncates to the available width while preserving the interrupt hint; MCP call targets are derived from their actual nested arguments.
+- Permission results are marked as escalations only when they actually raise privileges, avoiding false escalation labels for ordinary policy decisions.
 
 - `run.wait` requires an explicit `origin`, but that field does not grant access. A trusted local UI can read all Receipts in its Session; an authenticated Agent Control bridge is limited to human and its active Grant scopes; other Hosts can read only their controller scope. The Host authorizes access from the persisted Run owner and caller context. An ambiguous `requestKey` across visible scopes returns `run_request_key_ambiguous`; use `runId` to select one.
 - POSIX MCP servers use dedicated process groups. Revoke, cancellation, and Host shutdown send bounded termination signals and clean up surviving owned descendants; failures remain retryable. Descendants that move to another group with `setpgid` or start a new session with `setsid` are outside the original process-group boundary.

@@ -72,7 +72,15 @@ const server = createServer(async (request, response) => {
   const url = request.url ?? '';
   if (url.startsWith('/stub/')) {
     if (request.method === 'GET' && url === '/stub/state') {
-      jsonResponse(response, 200, { requests: providerRequests.length, hang: hangRequests, skillMcpProof, externalFetchCount });
+      const sessionQuestionFollowups = providerRequests.filter(item => item.sessionQuestionTurn && item.followup);
+      jsonResponse(response, 200, {
+        requests: providerRequests.length,
+        hang: hangRequests,
+        skillMcpProof,
+        externalFetchCount,
+        sessionQuestionFollowups: sessionQuestionFollowups.length,
+        lastSessionQuestionAnswer: sessionQuestionFollowups.at(-1)?.sessionQuestionAnswer ?? null,
+      });
       return;
     }
     if (request.method === 'GET' && url === '/stub/external-fetch-target') {
@@ -104,6 +112,7 @@ const server = createServer(async (request, response) => {
   const prompt = typeof lastUser?.content === 'string' ? lastUser.content : '';
   const followup = messages.at(-1)?.role === 'tool';
   const sessionQuestionTurn = messages.some(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes('desktop-session-question-draft'));
+  const sessionQuestionAnswer = sessionQuestionTurn && followup ? String(messages.at(-1)?.content ?? '') : '';
   const externalQuestionTurn = messages.some(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes('desktop-external-control-question'));
   const externalApprovalTurn = messages.some(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes('desktop-external-control-approval'));
   const workflowMarker = 'desktop-skill-mcp-load-proof';
@@ -114,6 +123,13 @@ const server = createServer(async (request, response) => {
     stream: body.stream === true,
     toolCount: Array.isArray(body.tools) ? body.tools.length : 0,
     followup,
+    sessionQuestionTurn,
+    ...(sessionQuestionAnswer === '' ? {} : {
+      sessionQuestionAnswer: {
+        includesOption: sessionQuestionAnswer.includes('north'),
+        includesDraft: sessionQuestionAnswer.includes('desktop-session-question-draft-answer'),
+      },
+    }),
     toolCall: followup ? null : target?.name ?? null,
     skillMcpStep: workflowStep < 0 ? null : workflowStep,
     ...(workflowStep < 0 ? {} : { skillMcpProof: { ...skillMcpProof } }),

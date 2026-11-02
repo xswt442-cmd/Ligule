@@ -121,6 +121,26 @@ async function evaluate(source) {
   return await mainWindow.webContents.executeJavaScript(source, true);
 }
 
+async function clickWithMouse(selector, failureCode) {
+  const point = await evaluate(`(() => {
+    const button = document.querySelector(${JSON.stringify(selector)});
+    if (!(button instanceof HTMLButtonElement) || button.disabled) return null;
+    button.scrollIntoView({ block: 'center', inline: 'center' });
+    const rect = button.getBoundingClientRect();
+    const x = Math.round(rect.left + rect.width / 2);
+    const y = Math.round(rect.top + rect.height / 2);
+    const hit = document.elementFromPoint(x, y);
+    return { x, y, hitTarget: hit !== null && (hit === button || button.contains(hit)) };
+  })()`);
+  if (point === null || point.hitTarget !== true) {
+    throw Object.assign(new Error(failureCode), { code: failureCode });
+  }
+  mainWindow.focus();
+  mainWindow.webContents.focus();
+  mainWindow.webContents.sendInputEvent({ type: 'mouseDown', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+  mainWindow.webContents.sendInputEvent({ type: 'mouseUp', x: point.x, y: point.y, button: 'left', clickCount: 1 });
+}
+
 async function requestHost(method, params = {}, timeoutMs = 60_000) {
   const id = nextId('real-model-rpc');
   const encoded = JSON.stringify({ id, method, params });
@@ -278,6 +298,8 @@ async function createApplication() {
             resultHasSkillProof: JSON.stringify(event.result?.content ?? null).includes('SKILL_LOAD_PROOF'),
             resultHasSchemaDigest: JSON.stringify(event.result?.content ?? null).includes('schemaDigest'),
             resultHasMcpProof: JSON.stringify(event.result?.content ?? null).includes('echo: MCP_LOADING_PROOF'),
+            resultHasSessionQuestionOption: JSON.stringify(event.result?.content?.answers ?? null).includes('"selected":["north"]'),
+            resultHasSessionQuestionDraft: JSON.stringify(event.result?.content?.answers ?? null).includes('"custom":"desktop-session-question-draft-answer"'),
             resultCode: event.result?.code,
           }));
         }
@@ -735,29 +757,43 @@ async function waitForSavedSessionInput(projectRoot, id, draft, queued, timeoutM
   throw Object.assign(new Error('crash_recovery_inputs_not_persisted'), { code: 'crash_recovery_inputs_not_persisted' });
 }
 
-async function verifyQuestionDraftSurvivesSessionSwitch() {
+async function verifyQuestionDraftSurvivesSessionSwitchAndSubmission() {
   if (typeof sessionId !== 'string') throw Object.assign(new Error('session_question_session_missing'), { code: 'session_question_session_missing' });
+  const stubControl = process.env.LIGULE_STUB_CONTROL;
+  if (typeof stubControl !== 'string' || stubControl === '') {
+    throw Object.assign(new Error('session_question_stub_control_missing'), { code: 'session_question_stub_control_missing' });
+  }
   const owner = sessionId;
   const draft = 'desktop-session-question-draft-answer';
+  const stateResponse = await fetch(`${stubControl}/state`);
+  if (!stateResponse.ok) throw Object.assign(new Error('session_question_stub_state_unavailable'), { code: 'session_question_stub_state_unavailable' });
+  const initialStubState = await stateResponse.json();
+  const initialFollowups = initialStubState.sessionQuestionFollowups ?? 0;
+  const questionRun = requestHost('run.start', { sessionId: owner, input: 'desktop-session-question-draft' })
+    .then(result => ({ result }), error => ({ error }));
   let awaySessionId;
-  void requestHost('run.start', { sessionId: owner, input: 'desktop-session-question-draft' }).catch(() => undefined);
   let step = 'question-card';
   try {
     await waitFor(`(() => [...document.querySelectorAll('.question')]
-      .some(item => item.closest('.external-control') === null && item.textContent.includes('Choose a session route')))()`,
+      .some(item => item.closest('.external-control') === null && item.querySelector('.question-item') !== null
+        && item.textContent.includes('Choose a session route')))()`,
     15_000, 'session_question_card_not_visible');
     step = 'type-draft';
     const entered = await evaluate(`(() => {
       const card = [...document.querySelectorAll('.question')].find(item => item.closest('.external-control') === null
         && item.textContent.includes('Choose a session route'));
+      const option = [...(card?.querySelectorAll('.question-option') ?? [])]
+        .find(item => item.textContent.includes('north'))?.querySelector('input');
       const extra = card?.querySelector('.question-free');
-      if (extra === null || extra === undefined) return false;
+      if (option === null || option === undefined || extra === null || extra === undefined) return false;
+      option.click();
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(extra, ${JSON.stringify(draft)});
       extra.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${JSON.stringify(draft)} }));
-      return extra.value === ${JSON.stringify(draft)}
+      return option.checked && extra.value === ${JSON.stringify(draft)}
         && card?.querySelector('.question-actions button[data-tone="allow"]')?.disabled === false;
     })()`);
     assert.equal(entered, true, 'session_question_draft_setup_failed');
+    await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
 
     step = 'create-away-session';
     const away = await requestHost('session.create', { projectRoot: workspaceRoot });
@@ -790,12 +826,35 @@ async function verifyQuestionDraftSurvivesSessionSwitch() {
     await waitFor(`(() => {
       const card = [...document.querySelectorAll('.question')].find(item => item.closest('.external-control') === null
         && item.textContent.includes('Choose a session route'));
+      const selected = card?.querySelector('.question-option input:checked')?.closest('.question-option');
       return document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${owner}`)}) === true
+        && selected?.textContent.includes('north') === true
         && card?.querySelector('.question-free')?.value === ${JSON.stringify(draft)}
         && card?.querySelector('.question-actions button[data-tone="allow"]')?.disabled === false;
     })()`, 10_000, 'session_question_draft_lost_after_navigation');
 
-    return '普通会话问题的未提交文本跨另一条已保存会话的切换往返后仍保留';
+    step = 'submit-restored-answer';
+    await clickWithMouse('.question-actions button[data-tone="allow"]', 'session_question_submit_mouse_target_missing');
+    const completedRun = await questionRun;
+    if (completedRun.error !== undefined) throw completedRun.error;
+    const summary = await waitForSessionIdle(20_000, 'session_question_turn_did_not_complete');
+    assert.equal(summary.turns.at(-1)?.status, 'completed', 'session_question_turn_terminal_status_invalid');
+    step = 'verify-host-answer';
+    const record = await requestHost('session.read', { sessionId: owner, fullResults: true });
+    const questionAnswer = record.events.findLast(event => event.kind === 'tool' && event.tool === 'ask_user_question');
+    assert.equal(questionAnswer?.resultKind, 'result', 'session_question_host_answer_not_recorded');
+    assert.equal(questionAnswer.resultHasSessionQuestionOption === true && questionAnswer.resultHasSessionQuestionDraft === true,
+      true, 'session_question_host_answer_incomplete');
+
+    step = 'verify-provider-followup';
+    const finalStateResponse = await fetch(`${stubControl}/state`);
+    if (!finalStateResponse.ok) throw Object.assign(new Error('session_question_stub_state_unavailable'), { code: 'session_question_stub_state_unavailable' });
+    const finalStubState = await finalStateResponse.json();
+    assert.equal(finalStubState.sessionQuestionFollowups, initialFollowups + 1, 'session_question_followup_provider_request_missing');
+    assert.deepEqual(finalStubState.lastSessionQuestionAnswer, { includesOption: true, includesDraft: true },
+      'session_question_answer_not_forwarded_to_provider');
+
+    return '普通会话问题的选项与自由文本跨会话切换后恢复；Electron 鼠标提交后 Host 完成本轮并将完整答案发送到 Provider followup';
   } catch (error) {
     if (error !== null && typeof error === 'object' && error.diagnostic === undefined) {
       error.diagnostic = `normal-question-step:${step}`;
@@ -808,6 +867,8 @@ async function verifyQuestionDraftSurvivesSessionSwitch() {
         item?.click();
         return item !== undefined;
       })()`).catch(() => undefined);
+      await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${owner}`)}) === true`,
+        5_000, 'session_question_owner_restore_failed').catch(() => undefined);
       await requestHost('session.close', { sessionId: awaySessionId }).catch(() => undefined);
     }
   }
@@ -1135,7 +1196,9 @@ async function runChecks() {
     });
   }
 
-  await check(`${providerLabel}普通会话问题草稿切换`, verifyQuestionDraftSurvivesSessionSwitch);
+  if (typeof stubControl === 'string' && stubControl !== '') {
+    await check(`${providerLabel}普通会话问题恢复、鼠标提交与 Provider followup`, verifyQuestionDraftSurvivesSessionSwitchAndSubmission);
+  }
 
 }
 

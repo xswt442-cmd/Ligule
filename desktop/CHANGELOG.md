@@ -19,6 +19,9 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - 审批摘要与脚本绑定说明分别生成中文和英文内容，切换界面语言时保持一致。
 - 会话写入锁仍由其他 Host 持有时，桌面以只读方式打开并保留占用说明。
 - 只读观察区分普通 Host 写入与可用的外控 Agent runtime；仅在 runtime 可用时显示外控面板与指导输入。断连提示会保留到 Host 的只读观察或会话恢复成功。
+- 普通会话与外控会话的问题卡片草稿按 Session 保存并在切换后恢复；提交期间继续输入的新文本不会被旧请求清空。
+- 外控审批目标、观察状态与异步响应绑定所属 Session；切换会话后，旧会话的迟到结果不会更新当前会话界面。
+- 权限结果仅在实际提高权限时标记为升级，避免普通策略判断被误报为权限升级。
 
 - `run.wait` 必须明确指定 `origin`，但该字段不授予权限。可信本地 UI 可读取本 Session 的所有回执；经过认证的 Agent Control 桥接受限于 human 与当前 Grant scope；其他 Host 只能读取自己的 controller scope。Host 按持久 Run 归属与调用方上下文授权。跨 scope 的 `requestKey` 多重匹配返回 `run_request_key_ambiguous`，应使用 `runId`。
 - POSIX MCP Server 使用独立进程组；撤销、取消或 Host 关闭时有界地发送终止信号并清理仍存活的所属子进程，失败保留为可重试错误。主动通过 `setpgid` 移入其他进程组或通过 `setsid` 创建新会话的后代不在原进程组边界内。
@@ -56,6 +59,9 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - Approval summaries and script-binding details keep separate Chinese and English text across interface-language changes.
 - If another Host still holds a session writer lock, Desktop opens the conversation read-only and keeps the lock explanation visible.
 - Read-only observation distinguishes an ordinary Host writer from an available Agent Control runtime, showing control panels and guidance input only when that runtime responds. Disconnect notices remain until a read-only Host observation or session reopen succeeds.
+- Question-card drafts in normal and externally controlled Sessions are saved per Session and restored after switching; text typed while a submission is in flight is not cleared by the earlier request.
+- Agent Control approval targets, observation state, and asynchronous responses stay bound to their owning Session, so late results from an old Session do not update the current view.
+- Permission results are marked as escalations only when they actually raise privileges, avoiding false escalation labels for ordinary policy decisions.
 
 - `run.wait` requires an explicit `origin`, but that field does not grant access. A trusted local UI can read all Receipts in its Session; an authenticated Agent Control bridge is limited to human and its active Grant scopes; other Hosts can read only their controller scope. The Host authorizes access from the persisted Run owner and caller context. An ambiguous `requestKey` across visible scopes returns `run_request_key_ambiguous`; use `runId` to select one.
 - POSIX MCP servers use dedicated process groups. Revoke, cancellation, and Host shutdown send bounded termination signals and clean up surviving owned descendants; failures remain retryable. Descendants that move to another group with `setpgid` or start a new session with `setsid` are outside the original process-group boundary.
