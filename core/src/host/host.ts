@@ -106,6 +106,7 @@ import { providerFromConfig, hostProviderFromConfig, type HostGenerationOptions,
 import { approvalArgsDigest, summarizeApproval } from './approval.js';
 import { runAcceptanceScope, runReceiptView, withinRunWindows } from './run-records.js';
 import { parseInitialGenerationSettings } from './session-initial-settings.js';
+import { settingsToolCatalog as buildSettingsToolCatalog } from './tool-catalog.js';
 export { providerFromConfig, hostProviderFromConfig } from './provider.js';
 
 interface HostConfigSnapshot extends ConfigSnapshot {
@@ -845,42 +846,18 @@ export function createHost({
   async function settingsToolCatalog(env: ProjectEnvironment, skills: SkillRegistry): Promise<ReturnType<Kernel['catalog']>> {
     const search = await createSearchSupport(env.config, env.layers);
     await browserForEnvironment(env);
-    const kernel = createKernel({ config: env.config });
-    const mcp = createMcpRegistry(env.mcpConfigs, { toolPolicy: browserToolPolicy });
-    const managedProcesses = createManagedProcessRegistry();
-    const basePlugins: Plugin<Kernel>[] = [
-      ...plugins,
-      ...(search.plugin === undefined ? [] : [search.plugin]),
-      ...(skills.skills.length === 0 ? [] : [createSkillPlugin(skills, () => env.mcpConfigs.map((server) => server.name))]),
-      createMcpPlugin(mcp),
-    ];
-    const catalogPlugins: Plugin<Kernel>[] = [
-      ...basePlugins,
-      createTodoWritePlugin(),
-      createReadImagePlugin(),
-      createReadDocumentPlugin(),
-      createPresentPlugin(),
-      createScreenshotPlugin(),
-      managedProcessPlugin(managedProcesses),
-      ...(interactive ? [createAskUserPlugin({ ask: async () => { throw new KernelError('settings_catalog_not_executable'); } })] : []),
-      createSubagentPlugin({
-        config: env.config,
-        provider: env.provider,
-        chain: createDecisionChain({ mode: env.policy?.mode ?? 'ask', rules: env.policy?.rules ?? [] }),
-        prompt: { staticPrefix: '' },
-        directory: env.directory,
-        sessionId: 'settings-catalog',
-        plugins: basePlugins,
-        modePaths: env.modePaths,
-      }),
-    ];
-    const assembly = loadAssembly(kernel, catalogPlugins);
-    try {
-      return kernel.catalog();
-    } finally {
-      assembly.dispose();
-      await Promise.all([mcp.close(), managedProcesses.close()]);
-    }
+    return await buildSettingsToolCatalog({
+      config: env.config,
+      provider: env.provider,
+      policy: env.policy,
+      directory: env.directory,
+      modePaths: env.modePaths,
+      skills,
+      plugins,
+      searchPlugin: search.plugin,
+      mcpConfigs: env.mcpConfigs,
+      interactive,
+    });
   }
 
   async function stopMcpServersWithChangedConfig(env: ProjectEnvironment, current: ReturnType<typeof mcpServerConfigs>): Promise<void> {
@@ -920,7 +897,6 @@ export function createHost({
     if (params.confirmInitialWorkspaceTrust === true) requireTrustedUi('workspace-trust', controlTrust);
     const hasProvider = params.initialProvider !== undefined;
     const hasModel = params.initialModel !== undefined;
-    if (hasProvider !== hasModel) throw new KernelError('session_model_selection_invalid', { detail: 'initialProvider and initialModel must be supplied together' });
     if (hasProvider !== hasModel) throw new KernelError('session_model_selection_invalid', { detail: 'initialProvider and initialModel must be supplied together' });
     let selection: ModelSelection | undefined;
     let model = { ...(env.generation?.model ?? env.pendingModel ?? modelConfigOf(env.config)) };
