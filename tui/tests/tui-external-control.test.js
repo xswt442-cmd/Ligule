@@ -50,6 +50,7 @@ test('TUI observes an externally locked session, answers a question, sends guida
     const questions = [{ id: 'q1', question: 'Choose a route', options: [{ label: 'north' }, { label: 'south' }], multiSelect: false }];
     let currentOperation = 'external-question-run';
     let currentState = 'running';
+    let failFirstQuestionReply = true;
     let pending = [];
     let events = [{ cursor: 1, kind: 'run.started', at: Date.now(), sessionId, operationId: currentOperation }];
     const actions = [];
@@ -77,6 +78,10 @@ test('TUI observes an externally locked session, answers a question, sends guida
         };
       }
       if (request.action === 'reply') {
+        if (failFirstQuestionReply) {
+          failFirstQuestionReply = false;
+          throw Object.assign(new Error('test_reply_failed'), { code: 'test_reply_failed' });
+        }
         pending = [];
         currentState = 'done';
         events = [...events, { cursor: 2, kind: 'interaction.resolved', at: Date.now(), sessionId, operationId: currentOperation, source: 'human' }];
@@ -119,8 +124,14 @@ test('TUI observes an externally locked session, answers a question, sends guida
       stdin.write('north');
       await wait(() => frame().split('\n').some((line) => line.trim().endsWith('north') && !line.includes('1. north') && !line.includes('2. north')));
       stdin.write('\r');
+      await wait(() => output().includes('test_reply_failed'));
+      assert.doesNotMatch(output(), /Submitted 1\/1 answers to the external session|已提交 1\/1 个回答/u,
+        'the TUI must not report success before the Host accepts the answer');
+      await wait(() => frame().includes('Choose a route')
+        && frame().split('\n').some((line) => line.trim().endsWith('north') && !line.includes('1. north') && !line.includes('2. north')));
+      stdin.write('\r');
       await wait(() => output().includes('answers to the external session') || output().includes('回答（外控会话）'));
-      await wait(() => actions.some((action) => action.action === 'reply'));
+      await wait(() => actions.filter((action) => action.action === 'reply').length === 2);
       assert.equal(actions.find((action) => action.action === 'reply').type, 'question');
       assert.deepEqual(actions.find((action) => action.action === 'reply').answers, [{ id: 'q1', selected: [], custom: 'north' }]);
       await wait(() => output().includes('Submitted 1/1 answers') || output().includes('已提交 1/1 个回答'));

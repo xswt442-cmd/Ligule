@@ -555,6 +555,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [externalControl, setExternalControl] = useState(false);
   const [externalSnapshot, setExternalSnapshot] = useState<ExternalControlSnapshot | null>(null);
   const [externalModel, setExternalModel] = useState<string | null>(null);
+  const externalQuestionReplies = useRef(new Set<string>());
   const resolvedExternalInteractions = useRef(new Set<string>());
   useEffect(() => { resolvedExternalInteractions.current.clear(); }, [sessionId]);
   useEffect(() => {
@@ -2700,33 +2701,50 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const answerQuery = useCallback((text: string) => {
     const head = query;
     if (head === null) return;
+    if (head.external && resolvedExternalInteractions.current.has(head.id)) return;
     const question = head.questions[head.at];
     if (question === undefined) return;
     const picked: Record<string, { readonly raw: string; readonly answer: AskAnswer | null }> = {
       ...head.picked,
       [question.id]: { raw: text, answer: answerOf(question, text) },
     };
-    resetDraft('');
     if (head.at + 1 < head.questions.length) {
+      resetDraft('');
       setQuery({ ...head, at: head.at + 1, picked });
       return;
     }
     const answers = head.questions.map((one) => picked[one.id]?.answer).filter((one) => one !== undefined && one !== null);
-    setQuery(null);
-    push({ kind: 'meta', text: head.external
-      ? t(`已提交 ${answers.length}/${head.questions.length} 个回答（外控会话）`, `Submitted ${answers.length}/${head.questions.length} answers to the external session`)
-      : t(`已提交 ${answers.length}/${head.questions.length} 个回答`, `Submitted ${answers.length}/${head.questions.length} answers`) });
     if (head.external) {
-      resolvedExternalInteractions.current.add(head.id);
-      void client.request('session.control', {
-        projectRoot: info.boundary ?? '',
-        sessionId,
-        request: { action: 'reply', requestId: head.id, type: 'question', answers },
-      }).catch((error: unknown) => {
-        resolvedExternalInteractions.current.delete(head.id);
-        push({ kind: 'error', text: t(`外控答复失败：${errorCode(error) ?? 'external_control_reply_failed'}`, `Could not submit external answer: ${errorCode(error) ?? 'external_control_reply_failed'}`) });
-      });
-    } else client.reply(head.id, { answers });
+      if (externalQuestionReplies.current.has(head.id)) return;
+      externalQuestionReplies.current.add(head.id);
+      void (async () => {
+        try {
+          await client.request('session.control', {
+            projectRoot: info.boundary ?? '',
+            sessionId,
+            request: { action: 'reply', requestId: head.id, type: 'question', answers },
+          });
+          externalQuestionReplies.current.delete(head.id);
+          if (!alive.current || activeSession.current !== sessionId) return;
+          resolvedExternalInteractions.current.add(head.id);
+          resetDraft('');
+          setQuery((current) => current?.id === head.id ? null : current);
+          push({ kind: 'meta', text: t(
+            `已提交 ${answers.length}/${head.questions.length} 个回答（外控会话）`,
+            `Submitted ${answers.length}/${head.questions.length} answers to the external session`,
+          ) });
+        } catch (error) {
+          externalQuestionReplies.current.delete(head.id);
+          if (!alive.current || activeSession.current !== sessionId) return;
+          push({ kind: 'error', text: t(`外控答复失败：${errorCode(error) ?? 'external_control_reply_failed'}`, `Could not submit external answer: ${errorCode(error) ?? 'external_control_reply_failed'}`) });
+        }
+      })();
+      return;
+    }
+    resetDraft('');
+    setQuery(null);
+    push({ kind: 'meta', text: t(`已提交 ${answers.length}/${head.questions.length} 个回答`, `Submitted ${answers.length}/${head.questions.length} answers`) });
+    client.reply(head.id, { answers });
   }, [client, externalControl, info.boundary, push, query, resetDraft, sessionId, t]);
 
   const advanceControlWizard = useCallback(async (raw: string) => {
