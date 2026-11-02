@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
 import { lstat, mkdir, open, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
-import { checkedImageReferences, IMAGE_LIMITS, IMAGE_ID, isImageReference, type ImageReference } from '../session/media.js';
+import { checkedImageReferences, IMAGE_LIMITS, IMAGE_ID, isImageReference, type ImageReference } from '../media.js';
 import type { SessionEvent } from '../session/format.js';
 
 /** 导出结果中每个文件的状态，包括已写入、目标已存在和写入失败。 */

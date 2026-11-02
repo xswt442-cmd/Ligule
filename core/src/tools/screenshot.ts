@@ -1,7 +1,7 @@
 import { KernelError } from '../kernel/error.js';
 import { captureScreen, type CaptureOptions } from '../capability/screen-capture.js';
 import type { MediaStore } from '../capability/media.js';
-import type { ImageToolResult } from '../session/media.js';
+import type { ImageToolResult } from '../media.js';
 import type { ToolDefinition } from '../kernel/kernel.js';
 
 export interface ScreenshotDeps {

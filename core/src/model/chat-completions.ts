@@ -11,7 +11,7 @@ import {
 } from './http.js';
 import type { ModelMessage, ModelRequest, ProviderEvent } from '../kernel/loop.js';
 import { imageInputOf, resolveRequestImages } from './images.js';
-import type { ImageReference } from '../session/media.js';
+import type { ImageReference } from '../media.js';
 
 interface ChatCompletionsCapabilities extends ProviderCapabilities {
   readonly streaming: boolean;

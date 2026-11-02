@@ -78,7 +78,7 @@ import { assertBrowserArguments, browserToolPolicy, BROWSER_SERVER } from '../ca
 import { createScreenshotPlugin } from '../tools/screenshot.js';
 import { createMediaStore, imagePreview, type SessionMediaScan } from '../capability/media.js';
 import { previewStorageGarbage, applyStorageGarbage, type StorageGcCandidate } from '../capability/storage-gc.js';
-import { checkedImageReferences, IMAGE_LIMITS, type ImageReference } from '../session/media.js';
+import { checkedImageReferences, IMAGE_LIMITS, type ImageReference } from '../media.js';
 import { createSkillPlugin } from '../tools/skill.js';
 import { createMcpPlugin, type McpAuthorization } from '../tools/mcp.js';
 import { createSubagentPlugin } from '../tools/subagent.js';

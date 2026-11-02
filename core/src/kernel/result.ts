@@ -3,7 +3,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { KernelRuntimeError } from './error.js';
-import { checkedImageReferences, isImageToolResult, type ImageReference } from '../session/media.js';
+import { checkedImageReferences, isImageToolResult, type ImageReference } from '../media.js';
 
 type EmptyExtra = Record<never, never>;
 type ToolResultShape<Kind extends string, Failed extends boolean, Extra extends object> = {

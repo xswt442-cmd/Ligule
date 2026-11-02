@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { KernelError } from '../kernel/error.js';
-import { checkedImageReferences, type ImageReference } from '../session/media.js';
+import { checkedImageReferences, type ImageReference } from '../media.js';
 import type { ModelRequest } from '../kernel/loop.js';
 
 /** Explicit per-model declarations override the small set of verified official routes. */

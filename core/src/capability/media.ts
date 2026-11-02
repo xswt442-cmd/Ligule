@@ -11,8 +11,8 @@ import { sessionDirectories, workspaceDataDirectory, type SessionDirectoryConfig
 import { parseSessionBytes } from '../session/record.js';
 import { resolveWithin } from './paths.js';
 import { boundaryOf, workingDirectoryOf } from './limits.js';
-import { IMAGE_ID, IMAGE_LIMITS, isImageReference, type ImageReference } from '../session/media.js';
-export { IMAGE_LIMITS, isImageReference, type ImageReference } from '../session/media.js';
+import { IMAGE_ID, IMAGE_LIMITS, isImageReference, type ImageReference } from '../media.js';
+export { IMAGE_LIMITS, isImageReference, type ImageReference } from '../media.js';
 
 export interface SessionMediaScan {
   readonly workspace: string;

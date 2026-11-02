@@ -1,7 +1,7 @@
 import { KernelError } from '../kernel/error.js';
 import { readImageFile, type MediaStore } from '../capability/media.js';
 import type { ToolContext, ToolDefinition } from '../kernel/kernel.js';
-import type { ImageToolResult } from '../session/media.js';
+import type { ImageToolResult } from '../media.js';
 
 interface ReadImageArguments { readonly path?: string; readonly shotId?: string }
 interface ReadImageDeps { readonly media?: MediaStore; readonly supportsImages?: () => boolean }
