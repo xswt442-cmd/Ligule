@@ -5,7 +5,7 @@ import sharp from 'sharp';
 import { extname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { KernelError } from '../errors.js';
 import { resolveWithin, isWithin } from './paths.js';
-import type { FileArtifact } from '../session/artifact.js';
+import type { FileArtifact } from '../artifact.js';
 
 const FILE_LIMIT = 20 * 1024 * 1024;
 const TOTAL_LIMIT = 64 * 1024 * 1024;

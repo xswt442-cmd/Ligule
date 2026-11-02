@@ -7,7 +7,7 @@ import { failureOf } from './result.js';
 import { rememberRunSummary, type RunSummary } from './run-summary.js';
 import type { TaskBudget } from './task-budget.js';
 import type { RunResultRef } from '../session/run.js';
-import { isFileArtifact, type FileArtifact } from '../session/artifact.js';
+import { isFileArtifact, type FileArtifact } from '../artifact.js';
 import type { Kernel } from './kernel.js';
 import type { PromptAssembly } from './prompt.js';
 import type { StreamDraftWriter } from '../session/stream-draft.js';

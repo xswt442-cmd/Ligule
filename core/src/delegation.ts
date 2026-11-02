@@ -5,7 +5,7 @@ import type { Kernel } from './kernel/kernel.js';
 import type { LoopResult } from './kernel/loop.js';
 import type { RunSummary } from './kernel/run-summary.js';
 import type { TaskBudgetLimits } from './kernel/task-budget.js';
-import type { FileArtifact } from './session/artifact.js';
+import type { FileArtifact } from './artifact.js';
 import type { RequestedModeSelection } from './kernel/modes.js';
 import { assertSupportedSchema, validateArgs } from './kernel/schema.js';
 

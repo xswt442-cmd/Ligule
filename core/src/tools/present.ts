@@ -1,6 +1,6 @@
 import { KernelError } from '../kernel/error.js';
 import type { ToolContext, ToolDefinition } from '../kernel/kernel.js';
-import type { FileArtifact } from '../session/artifact.js';
+import type { FileArtifact } from '../artifact.js';
 import { boundaryOf, workingDirectoryOf } from '../capability/limits.js';
 import { readFileArtifacts, type PresentFile } from '../capability/artifact.js';
 

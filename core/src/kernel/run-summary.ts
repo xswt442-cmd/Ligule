@@ -1,4 +1,4 @@
-import { isFileArtifact, type FileArtifact } from '../session/artifact.js';
+import { isFileArtifact, type FileArtifact } from '../artifact.js';
 import type { TaskBudget } from './task-budget.js';
 
 export interface RunSummary {
