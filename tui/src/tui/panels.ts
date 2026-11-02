@@ -1,7 +1,7 @@
 import { createElement, useEffect, useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { Box, Text, useInput } from 'ink';
-import type { Locale } from '@ligule/core/kernel/locale.js';
+import type { Locale } from '@ligule/core/tui.js';
 import { hit, keyHint } from './keymap.js';
 import { HELP_TABS, helpEntries, helpTabTitle, type HelpTab } from './help.js';
 import type { TemplateCommand } from './commands.js';

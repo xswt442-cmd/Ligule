@@ -1,5 +1,4 @@
-import { textOf as chooseText, type Locale } from '@ligule/core/kernel/locale.js';
-import type { SessionEvent } from '@ligule/core/session/format.js';
+import { textOf as chooseText, type Locale, type SessionEvent } from '@ligule/core/tui.js';
 import { providerDiagnosticText, runtimeFailureText } from './errors.js';
 import { toolTarget } from './message-format.js';
 

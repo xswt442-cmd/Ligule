@@ -1,8 +1,7 @@
 // 终端命令表和候选清单的纯计算逻辑。
 // 命令和提示模板由 Host 提供并展开，界面不维护副本。
 import stringWidth from 'string-width';
-import type { AskAnswer, AskQuestion } from '@ligule/core/tools/ask-user.js';
-import { textOf, type Locale } from '@ligule/core/kernel/locale.js';
+import { textOf, type AskAnswer, type AskQuestion, type Locale } from '@ligule/core/tui.js';
 const WIDTH_CACHE_LIMIT = 1024;
 const widthCache = new Map<string, number>();
 

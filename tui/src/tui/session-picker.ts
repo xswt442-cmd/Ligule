@@ -1,9 +1,7 @@
 import { createElement, useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
 import { Text, useInput, usePaste } from 'ink';
-import type { Locale } from '@ligule/core/kernel/locale.js';
-import type { SessionSummary } from '@ligule/core/session/list.js';
-import { textOf } from '@ligule/core/kernel/locale.js';
+import { textOf, type Locale, type SessionSummary } from '@ligule/core/tui.js';
 import { editDraft } from './draft.js';
 import { hit, keyHint } from './keymap.js';
 import { PanelFrame } from './panels.js';

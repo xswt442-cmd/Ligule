@@ -3,14 +3,10 @@
 // Ink 和 React 是可选依赖；缺少时 TUI 返回 `tui_dependency_missing`，其他 CLI 命令仍可使用。
 import { createElement } from 'react';
 import { render, type RenderOptions } from 'ink';
-import { createConnection } from '@ligule/core/host/connection.js';
-import { createMemoryConnectionPair } from '@ligule/core/host/memory.js';
-import { serveHost } from '@ligule/core/host/host.js';
-import { createInteractivePermissionContext } from '@ligule/core/capability/permission-capabilities.js';
+import { createConnection, createInteractivePermissionContext, createMemoryConnectionPair, serveHost } from '@ligule/core/tui.js';
 import { App } from './app.js';
 import type { TuiClient } from './app.js';
-import type { Locale } from '@ligule/core/kernel/locale.js';
-import { flushHistory, historyPathOf, loadHistory, rememberHistory } from '@ligule/core/kernel/input-history.js';
+import { flushHistory, historyPathOf, loadHistory, rememberHistory, type Locale } from '@ligule/core/tui.js';
 import { flushInput, inputPathOf, readInput, rememberInput } from './input-store.js';
 import { flushKeys, keyPathOf, readKeys, writeKeys } from './key-store.js';
 import { titleEscape } from './output.js';

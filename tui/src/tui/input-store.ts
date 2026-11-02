@@ -4,7 +4,7 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { dataRoot } from '@ligule/core/kernel/config-file.js';
+import { dataRoot } from '@ligule/core/tui.js';
 
 export type SavedInput = { projectRoot: string; sessionId: string; draft: string; queued: string[] };
 

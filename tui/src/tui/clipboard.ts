@@ -1,4 +1,4 @@
-export { clipboardPayload, copyToClipboard, writeClipboard, type ClipboardResult } from '@ligule/core/capability/clipboard.js';
+export { clipboardPayload, copyToClipboard, writeClipboard, type ClipboardResult } from '@ligule/core/tui.js';
 
 // 复制记录中最近一条带正文的助手事件，不复制尚未落盘的流式内容。
 export function lastAnswer(events: readonly { kind?: string; text?: string }[]): string {

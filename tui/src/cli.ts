@@ -5,33 +5,16 @@ import { existsSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import { loadProjectConfig } from '@ligule/core/host/environment.js';
-import { languageOf, textOf, type Locale } from '@ligule/core/kernel/locale.js';
-import { loadConfigLayers } from '@ligule/core/kernel/config-file.js';
-import { createConfigStore } from '@ligule/core/kernel/config-store.js';
-import { createKernel } from '@ligule/core/kernel/kernel.js';
-import { createInteractivePermissionContext, detectPermissionCapabilities } from '@ligule/core/capability/permission-capabilities.js';
-import { createPermissionContext, type PermissionContext } from '@ligule/core/kernel/permission.js';
-import { loadAssembly } from '@ligule/core/kernel/assembly.js';
-import { DEFAULT_MODE, modeDirectories } from '@ligule/core/kernel/modes.js';
-import { extensionSources } from '@ligule/core/kernel/extensions.js';
-import { readRegistry, registryPathOf } from '@ligule/core/kernel/workspace.js';
-import { isTrusted } from '@ligule/core/kernel/workspace-trust.js';
-import { discoverSkills, skillDirectories } from '@ligule/core/kernel/skills.js';
-import { createSessionLog } from '@ligule/core/session/session.js';
-import { listWorkspaceSessions, sessionDirectories } from '@ligule/core/session/list.js';
-import { summarizeVerdicts } from '@ligule/core/session/verdicts.js';
-import { minimalPlugin } from '@ligule/core/tools/minimal.js';
-import { networkPlugin } from '@ligule/core/tools/network.js';
-import { createHost, providerFromConfig, hostProviderFromConfig, serveHost } from '@ligule/core/host/host.js';
-import { KernelError } from '@ligule/core/kernel/error.js';
+import {
+  createConfigStore, createHost, createInteractivePermissionContext, createKernel, createPermissionContext, createSessionLog,
+  DEFAULT_MODE, detectPermissionCapabilities, discoverSkills, extensionSources, hostProviderFromConfig, isTrusted, KernelError,
+  languageOf, listWorkspaceSessions, loadAssembly, loadConfigLayers, loadProjectConfig, minimalPlugin, modeDirectories,
+  networkPlugin, providerFromConfig, readRegistry, registryPathOf, serveHost, sessionDirectories, skillDirectories,
+  summarizeVerdicts, textOf, type Locale, type PermissionContext,
+} from '@ligule/core/tui.js';
 import { providerDiagnosticText, runtimeFailureText } from './tui/errors.js';
 import { configureTerminalColors } from './tui/output.js';
-import type { ConfigSnapshot } from '@ligule/core/kernel/config.js';
-import { isPolicyRule, type PolicyMode, type PolicyThresholds } from '@ligule/core/kernel/policy.js';
-import type { PolicyRule } from '@ligule/core/kernel/config-edit.js';
-import type { Connection } from '@ligule/core/host/connection.js';
-import type { ModeDirectories } from '@ligule/core/kernel/modes.js';
+import { isPolicyRule, type ConfigSnapshot, type Connection, type ModeDirectories, type PolicyMode, type PolicyRule, type PolicyThresholds } from '@ligule/core/tui.js';
 interface CliPolicy extends Record<string, unknown> {
   readonly mode?: PolicyMode;
   readonly rules?: PolicyRule[];

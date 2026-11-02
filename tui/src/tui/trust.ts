@@ -1,6 +1,6 @@
 import { createElement, useState } from 'react';
 import { Box, Text, render, useInput, usePaste, type RenderOptions } from 'ink';
-import type { Locale } from '@ligule/core/kernel/locale.js';
+import type { Locale } from '@ligule/core/tui.js';
 import { isTrusted, setTrusted, trustPathOf } from './trust-store.js';
 
 type TrustPromptProps = {

@@ -1,7 +1,7 @@
 import { createElement as h } from 'react';
 import type { ReactElement } from 'react';
 import { Box, Text } from 'ink';
-import { textOf, type Locale } from '@ligule/core/kernel/locale.js';
+import { textOf, type Locale } from '@ligule/core/tui.js';
 import { displayWidth } from './commands.js';
 import { keyHint } from './keymap.js';
 import { TUI_COLORS } from './ui-style.js';

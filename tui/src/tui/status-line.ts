@@ -1,7 +1,7 @@
 // 状态行与预算提示的纯函数：只根据快照拼文本，不读时钟、不发请求、不改状态。
 import { displayWidth } from './commands.js';
 import { keyHint } from './keymap.js';
-import { textOf as chooseText, type Locale } from '@ligule/core/kernel/locale.js';
+import { textOf as chooseText, type Locale } from '@ligule/core/tui.js';
 
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
 

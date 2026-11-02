@@ -1,7 +1,7 @@
 // 历史浏览的光标与选择只存在于界面；窗口按终端列数换行后再分页。
 import { markdownLines } from './markdown.js';
 import { displayWidth } from './commands.js';
-import { textOf, type Locale } from '@ligule/core/kernel/locale.js';
+import { textOf, type Locale } from '@ligule/core/tui.js';
 
 export interface TranscriptRow {
   readonly kind: string;

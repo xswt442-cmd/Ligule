@@ -1,7 +1,7 @@
 import { createElement } from 'react';
 import type { ReactElement } from 'react';
 import { Text } from 'ink';
-import type { Locale } from '@ligule/core/kernel/locale.js';
+import type { Locale } from '@ligule/core/tui.js';
 import { displayWidth } from './commands.js';
 import { keyHint } from './keymap.js';
 import { PanelFrame } from './panels.js';

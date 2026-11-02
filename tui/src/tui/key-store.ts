@@ -4,7 +4,7 @@ import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { parseSpec } from './keymap.js';
-import { dataRoot } from '@ligule/core/kernel/config-file.js';
+import { dataRoot } from '@ligule/core/tui.js';
 
 export function keyPathOf(home = homedir()): string {
   return join(dataRoot(home), 'tui-keys.json');

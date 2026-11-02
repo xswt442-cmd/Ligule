@@ -1,4 +1,4 @@
-import type { Locale } from '@ligule/core/kernel/locale.js';
+import type { Locale } from '@ligule/core/tui.js';
 import { localizedCommand, UI_COMMANDS, type TemplateCommand } from './commands.js';
 import { CURRENT, ENGLISH_LABELS, ENGLISH_VIEWS, formatKeys, KEYMAP, type Binding, type KeyView, type TerminalAction } from './keymap.js';
 

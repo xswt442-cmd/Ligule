@@ -9,6 +9,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./tui.js": {
+      "types": "./dist/tui.d.ts",
+      "import": "./dist/tui.js"
+    },
     "./capability/*.js": {
       "types": "./dist/capability/*.d.ts",
       "import": "./dist/capability/*.js"

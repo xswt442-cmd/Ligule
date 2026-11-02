@@ -1,7 +1,7 @@
 // Transcript display helpers keep presentation limits separate from session facts.
 import { displayWidth } from './commands.js';
 import { wrapLine } from './viewport.js';
-import { textOf as localized, type Locale } from '@ligule/core/kernel/locale.js';
+import { textOf as localized, type Locale } from '@ligule/core/tui.js';
 
 const textOf = (value: unknown): string => typeof value === 'string' ? value : JSON.stringify(value ?? '', null, 2);
 const graphemes = new Intl.Segmenter(undefined, { granularity: 'grapheme' });

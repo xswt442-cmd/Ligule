@@ -1,7 +1,7 @@
 import { createElement as h, Fragment, useMemo } from 'react';
 import type { ReactElement } from 'react';
 import { Box, Text } from 'ink';
-import { textOf as chooseText, type Locale } from '@ligule/core/kernel/locale.js';
+import { textOf as chooseText, type Locale } from '@ligule/core/tui.js';
 import { displayWidth } from './commands.js';
 import type { MarkdownLine } from './markdown.js';
 import { markdownLines } from './markdown.js';

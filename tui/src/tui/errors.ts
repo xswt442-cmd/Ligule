@@ -1,5 +1,4 @@
-import type { Locale } from '@ligule/core/kernel/locale.js';
-import { parseProviderDiagnostic, providerDiagnosticText as providerDiagnosticTextPair } from '@ligule/core/kernel/error.js';
+import { parseProviderDiagnostic, providerDiagnosticText as providerDiagnosticTextPair, type Locale } from '@ligule/core/tui.js';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

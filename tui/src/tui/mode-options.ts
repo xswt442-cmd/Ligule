@@ -1,7 +1,6 @@
 import { readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { KernelError } from '@ligule/core/kernel/error.js';
-import type { ModeDirectories, ModeLayer } from '@ligule/core/kernel/modes.js';
+import { KernelError, type ModeDirectories, type ModeLayer } from '@ligule/core/tui.js';
 
 export type ModeOption = { name: string; layer: ModeLayer };
 
