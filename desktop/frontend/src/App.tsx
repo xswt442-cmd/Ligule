@@ -38,7 +38,7 @@ import { LocaleProvider, localeOf } from './locale';
 import { notificationOf, notificationTarget, type NotificationKind, type NotificationTarget } from './notifications';
 import { SessionStreamBuffer } from './session-stream';
 import { observeExternalSession } from './external-session-observation';
-import { externalSessionDraftFor, updateExternalSessionDrafts, type ExternalSessionDrafts } from './external-session-drafts';
+import { clearExternalSessionDraftIfCurrent, externalSessionDraftFor, externalSessionDraftRevisionFor, updateExternalSessionDrafts, type ExternalSessionDrafts } from './external-session-drafts';
 import { Composer } from './components/Composer';
 import { ExternalSessionComposer, ExternalSessionControlPanel } from './components/ExternalSessionControlPanel';
 import type { MentionState } from './mentions';
@@ -1798,7 +1798,9 @@ export function App({ transport }: { transport: Transport }) {
       {observingExternalSession && sessionWriterActive && externalControlSessionId === sessionId && sessionId !== null
         ? <ExternalSessionComposer key={`external-session-composer:${sessionId}`} client={client} sessionId={sessionId} projectRoot={projectRoot}
             draft={externalSessionDraftFor(externalSessionDrafts, sessionId)}
-            onDraftChange={(value) => setExternalSessionDrafts((current) => updateExternalSessionDrafts(current, sessionId, value))} />
+            draftRevision={externalSessionDraftRevisionFor(externalSessionDrafts, sessionId)}
+            onDraftChange={(value) => setExternalSessionDrafts((current) => updateExternalSessionDrafts(current, sessionId, value))}
+            onDraftSent={(revision) => setExternalSessionDrafts((current) => clearExternalSessionDraftIfCurrent(current, sessionId, revision))} />
         : <Composer
         client={client}
         sessionId={sessionId}

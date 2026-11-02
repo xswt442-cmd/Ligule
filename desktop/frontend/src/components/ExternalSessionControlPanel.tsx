@@ -312,12 +312,14 @@ function networkName(value: string | undefined, t: (chinese: string, english: st
   }
 }
 
-export function ExternalSessionComposer({ client, sessionId, projectRoot, draft, onDraftChange }: {
+export function ExternalSessionComposer({ client, sessionId, projectRoot, draft, draftRevision, onDraftChange, onDraftSent }: {
   client: Client;
   sessionId: string;
   projectRoot: string;
   draft: string;
+  draftRevision: number;
   onDraftChange: (draft: string) => void;
+  onDraftSent: (submittedRevision: number) => void;
 }) {
   const t = useText();
   const [status, setStatus] = useState<Status | null>(null);
@@ -357,15 +359,17 @@ export function ExternalSessionComposer({ client, sessionId, projectRoot, draft,
   }, [client, projectRoot, sessionId]);
 
   async function send(): Promise<void> {
-    if (draft.trim() === '' || busy) return;
+    const submittedDraft = draft;
+    const submittedRevision = draftRevision;
+    if (submittedDraft.trim() === '' || busy) return;
     setBusy(true);
     try {
       const result = await client.call('session.control', {
         projectRoot,
         sessionId,
-        request: { action: 'send', input: draft },
+        request: { action: 'send', input: submittedDraft },
       }, 35_000) as { queued?: boolean };
-      onDraftChange('');
+      onDraftSent(submittedRevision);
       setNote({
         text: result.queued === true
           ? t('消息已加入外控会话队列。', 'Message queued for the external session.')

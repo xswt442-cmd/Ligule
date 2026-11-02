@@ -26,6 +26,35 @@ const hostRequests = [];
 const providerLabel = process.env.LIGULE_MODEL_PROVIDER_LABEL ?? '真实模型';
 const evidenceName = process.env.LIGULE_MODEL_EVIDENCE_NAME ?? 'real-model';
 const hostResponses = [];
+let nextExternalSendResponseGate = null;
+
+function holdNextExternalSendResponse() {
+  if (nextExternalSendResponseGate !== null) throw Object.assign(new Error('external_send_response_gate_already_set'), { code: 'external_send_response_gate_already_set' });
+  let resolveHeld;
+  let resolveReleased;
+  const gate = {
+    held: new Promise(resolve => { resolveHeld = resolve; }),
+    released: new Promise(resolve => { resolveReleased = resolve; }),
+    resolveHeld: () => resolveHeld(),
+    release: () => resolveReleased(),
+  };
+  nextExternalSendResponseGate = gate;
+  return gate;
+}
+
+async function waitForExternalSendResponse(gate, timeoutMs = 15_000) {
+  let timer;
+  try {
+    await Promise.race([
+      gate.held,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error('external_send_response_not_held'), { code: 'external_send_response_not_held' })), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 if ([workspaceRoot, evidenceRoot, userDataRoot, isolatedHome].some(value => typeof value !== 'string' || value.length === 0)) {
   throw new Error('real_model_harness_paths_missing');
@@ -169,13 +198,24 @@ async function createApplication() {
     hostEntry: runtime.hostEntry,
     entry: join(desktopRoot, 'electron', 'dist', 'host-entry.js'),
     onFrame: frame => {
+      let heldResponse = false;
       try {
         const response = JSON.parse(frame);
         if (typeof response.id === 'string') {
           hostResponses.push({ id: response.id, errorCode: typeof response.error?.code === 'string' ? response.error.code : undefined, receivedAt: Date.now() });
+          const gate = nextExternalSendResponseGate;
+          const request = gate === null ? undefined : hostRequests.findLast(item => item.id === response.id);
+          if (gate !== null && request?.method === 'session.control' && request.action === 'send') {
+            nextExternalSendResponseGate = null;
+            heldResponse = true;
+            gate.resolveHeld();
+            void gate.released.then(() => {
+              if (mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.webContents.send('ligule:host-frame', frame);
+            });
+          }
         }
       } catch {}
-      if (mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.webContents.send('ligule:host-frame', frame);
+      if (!heldResponse && mainWindow !== undefined && !mainWindow.isDestroyed()) mainWindow.webContents.send('ligule:host-frame', frame);
     },
     onFault: () => {},
   });
@@ -183,12 +223,13 @@ async function createApplication() {
   host.send = frame => {
     try {
       const request = JSON.parse(frame);
-      if (['session.open', 'session.read', 'session.observe', 'prefs.read', 'prefs.write', 'status.get'].includes(request.method)) {
+      if (['session.open', 'session.read', 'session.observe', 'session.control', 'prefs.read', 'prefs.write', 'status.get'].includes(request.method)) {
         const projectRoot = request.params?.projectRoot;
         hostRequests.push({
           id: request.id,
           method: request.method,
           sessionId: request.params?.sessionId,
+          action: request.method === 'session.control' ? request.params?.request?.action : undefined,
           projectRootScope: projectRoot === undefined ? 'omitted'
             : projectRoot === workspaceRoot ? 'matches_workspace' : 'different_workspace',
           hostPid: host.pid,
@@ -457,18 +498,47 @@ async function verifyExternalSessionControl() {
       const source = document.querySelector('.row.question[data-source="controller"] .question-source')?.textContent ?? '';
       return source.includes('外部 Agent') || source.includes('External agent');
     })()`, 10_000, 'external_controller_message_source_not_visible');
-    const typed = await evaluate(`(() => {
-      const input = document.querySelector('.external-session-composer textarea[aria-label="发送消息到外控会话"], .external-session-composer textarea[aria-label="Send a message to the external session"]');
-      if (input === null) return false;
-      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
-      setter.call(input, 'desktop-human-control-followup');
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      return true;
-    })()`);
-    assert.equal(typed, true, 'external_control_message_input_missing');
-    await evaluate(`document.querySelector('.external-session-composer button.send')?.click(); true`);
-    await waitFor(`document.querySelector('.external-session-note')?.textContent.includes('已加入外控会话队列') === true
-      || document.querySelector('.external-session-note')?.textContent.includes('queued for the external session') === true`, 10_000, 'external_control_message_not_queued');
+    const laterDraft = 'desktop-human-control-later-draft';
+    const sendGate = holdNextExternalSendResponse();
+    try {
+      const typed = await evaluate(`(() => {
+        const input = document.querySelector('.external-session-composer textarea[aria-label="发送消息到外控会话"], .external-session-composer textarea[aria-label="Send a message to the external session"]');
+        if (input === null) return false;
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(input, 'desktop-human-control-followup');
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      })()`);
+      if (typed !== true) throw Object.assign(new Error('external_control_message_input_missing'), { code: 'external_control_message_input_missing' });
+      await evaluate(`document.querySelector('.external-session-composer button.send')?.click(); true`);
+      await waitForExternalSendResponse(sendGate);
+
+      const editedWhileSending = await evaluate(`(() => {
+        const input = document.querySelector('.external-session-composer textarea[aria-label="发送消息到外控会话"], .external-session-composer textarea[aria-label="Send a message to the external session"]');
+        if (input === null) return null;
+        const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(input, ${JSON.stringify(laterDraft)});
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        return input.value;
+      })()`);
+      if (editedWhileSending !== laterDraft) {
+        throw Object.assign(new Error('external_control_composer_must_allow_editing_while_send_is_pending'), {
+          code: 'external_control_composer_must_allow_editing_while_send_is_pending',
+        });
+      }
+      sendGate.release();
+      await waitFor(`document.querySelector('.external-session-note')?.textContent.includes('已加入外控会话队列') === true
+        || document.querySelector('.external-session-note')?.textContent.includes('queued for the external session') === true`, 10_000, 'external_control_message_not_queued');
+      const remainingDraft = await evaluate(`document.querySelector('.external-session-composer textarea[aria-label="发送消息到外控会话"], .external-session-composer textarea[aria-label="Send a message to the external session"]')?.value ?? null`);
+      if (remainingDraft !== laterDraft) {
+        throw Object.assign(new Error('external_control_newer_draft_cleared'), {
+          code: 'external_control_newer_draft_cleared',
+          diagnostic: JSON.stringify({ expected: laterDraft, actual: remainingDraft }),
+        });
+      }
+    } finally {
+      sendGate.release();
+    }
     await evaluate(`(() => {
       const choice = document.querySelector('.external-control .question-option input');
       choice?.click();
@@ -489,6 +559,7 @@ async function verifyExternalSessionControl() {
     const userRecords = transcriptRecords.filter(item => item.kind === 'user');
     assert.equal(userRecords.some(item => item.origin === 'controller' && item.text === 'desktop-external-control-question'), true, 'external_controller_origin_missing');
     assert.equal(userRecords.some(item => item.origin === 'human' && item.text === 'desktop-human-control-followup'), true, 'human_origin_missing');
+    assert.equal(userRecords.some(item => item.origin === 'human' && item.text === laterDraft), false, 'newer_external_guidance_must_remain_unsent');
 
     const approvalStart = await mcpClient.callTool({ name: 'ligule_run_start', arguments: {
       sessionId: observerSessionId,
