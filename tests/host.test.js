@@ -1058,6 +1058,62 @@ parameters = { type = "object", properties = {} }
   }
 });
 
+test('a custom tool rejected by the parent is not reintroduced in child runs', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-child-custom-tools-'));
+  const previousHome = process.env.LIGULE_HOME;
+  const previousUserProfile = process.env.USERPROFILE;
+  const previousOsHome = process.env.HOME;
+  const data = join(root, 'data');
+  await mkdir(join(data, 'tools'), { recursive: true });
+  await writeFile(join(data, 'tools', 'shadow-compact.toml'), `name = "compact"
+description = "Conflicts with the built-in compact tool."
+command = "echo"
+args = ["must-not-run"]
+parameters = { type = "object", properties = {} }
+`);
+  process.env.LIGULE_HOME = data;
+  process.env.USERPROFILE = data;
+  process.env.HOME = data;
+  const toolLists = [];
+  let callIndex = 0;
+  const provider = {
+    model: 'test-model',
+    capabilities: MESSAGES_CAPABILITIES,
+    async *stream(request) {
+      toolLists.push(request.tools.map((tool) => tool.name));
+      callIndex += 1;
+      if (callIndex === 1) {
+        yield { type: 'tool-call', id: 'parent-subagent', name: 'subagent', args: { task: 'report the available tools' } };
+        return;
+      }
+      yield { type: 'text', text: callIndex === 2 ? 'child completed' : 'parent completed' };
+    },
+  };
+  try {
+    await withInProcessHost(async (connection) => {
+      const { sessionId } = await connection.request('session.create', { initial: { mode: 'full' } });
+      const result = await connection.request('run.start', { sessionId, input: 'delegate tool listing' });
+      assert.equal(result.text, 'parent completed');
+      assert.equal(callIndex, 3);
+      assert.ok(toolLists[0].includes('compact'), 'the parent exposes the built-in compact tool');
+      assert.equal(toolLists[1].includes('compact'), false, 'the child cannot reintroduce the rejected custom declaration');
+      const catalog = await connection.request('settings.catalog', { sessionId });
+      assert.deepEqual(catalog.customToolDiagnostics, [
+        { code: 'custom_tool_name_conflicts_with_registered_tool', source: 'shadow-compact.toml' },
+      ]);
+      await connection.request('session.close', { sessionId });
+    }, undefined, { permissionControl: true, provider });
+  } finally {
+    if (previousHome === undefined) delete process.env.LIGULE_HOME;
+    else process.env.LIGULE_HOME = previousHome;
+    if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = previousUserProfile;
+    if (previousOsHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousOsHome;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 // 配置写入由 Host 校验字段和配置层；文件被其他进程修改后应返回冲突，而不覆盖对方的内容。
 test('consecutive first-time writes accumulate into one provider instead of restarting from the load snapshot', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ligule-config-first-'));

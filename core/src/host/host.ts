@@ -845,14 +845,22 @@ export function createHost({
 
   function customToolsPluginOf(customTools: Awaited<ReturnType<typeof discoverCustomTools>>) {
     if (customTools.tools.length === 0) return undefined;
-    return createCustomToolsPlugin(customTools.tools, (name) => {
+    const code = 'custom_tool_name_conflicts_with_registered_tool';
+    const reportConflict = (name: string) => {
       const path = customTools.sources[name] ?? name;
-      const code = 'custom_tool_name_conflicts_with_registered_tool';
-      if (!customTools.diagnostics.some((diagnostic) => diagnostic.code === code && diagnostic.path === path)) {
-        customTools.diagnostics.push({ code, path, detail: `${name} conflicts with an already registered tool` });
-        logger?.log?.('custom tool is not loaded', { code, path });
-      }
-    });
+      if (customTools.diagnostics.some((diagnostic) => diagnostic.code === code && diagnostic.path === path)) return;
+      customTools.diagnostics.push({ code, path, detail: `${name} conflicts with an already registered tool` });
+      logger?.log?.('custom tool is not loaded', { code, path });
+    };
+    return {
+      name: 'ligule-custom-tools',
+      setup(kernel: Kernel) {
+        // Parent setup records conflicts. Child setup sees those diagnostics and must not retry rejected declarations.
+        const available = customTools.tools.filter((tool) => !customTools.diagnostics.some((diagnostic) =>
+          diagnostic.code === code && diagnostic.path === (customTools.sources[tool.name] ?? tool.name)));
+        return createCustomToolsPlugin(available, reportConflict).setup(kernel);
+      },
+    } satisfies Plugin<Kernel>;
   }
 
   // Settings can inspect the Host-configured runtime registry before opening a conversation.
@@ -2004,7 +2012,6 @@ export function createHost({
       logger?.log?.('custom tool is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
     }
     const customToolPlugin = customToolsPluginOf(customTools);
-    const childCustomToolPlugin = customTools.tools.length === 0 ? undefined : createCustomToolsPlugin(customTools.tools);
     const loaded = [
       ...plugins,
       ...(skills.skills.length === 0 ? [] : [createSkillPlugin(skills, () => mcp.servers())]),
@@ -2078,7 +2085,7 @@ export function createHost({
       sessionId: id,
       logger,
       plugins: basePlugins,
-      customToolPlugin: childCustomToolPlugin,
+      customToolPlugin,
       authorizeScreenCapture,
       taskBudget: () => state.taskBudget,
       telemetry,
