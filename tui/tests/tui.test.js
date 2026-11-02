@@ -358,8 +358,10 @@ test('the TUI shows the MCP program before trusting it and starts it only after 
       client, sessionId, info: { boundary: projectDirectory }, interactive: true,
     }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
     const sendCommand = async (text) => {
+      const start = painted.length;
+      const currentDraft = () => plainOutput(completeFrame(painted.slice(start)));
       stdin.write(text);
-      await waitFor(() => shown().includes(`› ${text}`), { within: 5_000, read: shown });
+      await waitFor(() => currentDraft().includes(`› ${text}`), { within: 5_000, read: currentDraft });
       stdin.write('\r');
     };
     try {
@@ -447,8 +449,10 @@ test('a delayed MCP trust list cannot move session trust to a newly opened Sessi
       client, sessionId, info: { boundary: projectDirectory }, interactive: true,
     }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
     const sendCommand = async (text) => {
+      const start = painted.length;
+      const currentDraft = () => plainOutput(painted.slice(start));
       stdin.write(text);
-      await waitFor(() => shown().includes(`› ${text}`), { within: 5_000, read: shown });
+      await waitFor(() => currentDraft().includes(`› ${text}`), { within: 5_000, read: currentDraft });
       stdin.write('\r');
     };
 
@@ -472,6 +476,145 @@ test('a delayed MCP trust list cannot move session trust to a newly opened Sessi
       assert.equal(sessionTrust.servers[0]?.trustScopes.session, null);
     } finally {
       releaseTrustList();
+      instance.unmount();
+    }
+  }, {
+    config: { mcp: { servers: { probe: { command: process.execPath, args: [mcpServerFixture, 'mcp-schema.json', 'mcp-started.pid'] } } } },
+    setup: async ({ projectDirectory }) => {
+      await writeFile(join(projectDirectory, 'mcp-schema.json'), JSON.stringify({ type: 'object', properties: { value: { type: 'string' } } }));
+      await mkdir(join(projectDirectory, '.ligule'), { recursive: true });
+      await writeFile(join(projectDirectory, '.ligule', 'config.toml'), [
+        '[mcp.servers.probe]',
+        'command = ' + JSON.stringify(process.execPath),
+        'args = [' + [mcpServerFixture, 'mcp-schema.json', 'mcp-started.pid'].map((value) => JSON.stringify(value)).join(', ') + ']',
+        '',
+      ].join('\n'));
+    },
+  });
+});
+
+test('a completed MCP trust confirmation is reported to its originating Session after navigation', options, async () => {
+  await withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+    const { createElement } = await import('react');
+    const { render } = await import('ink');
+    const { PassThrough } = await import('node:stream');
+    const { App } = await import('../dist/tui/app.js');
+    const originalRequest = client.request.bind(client);
+    let releaseTrustSet = () => {};
+    let trustSetApplied = false;
+    let trustSetSettled = false;
+    let newSessionId;
+    let thirdSessionId;
+    let createdSessions = 0;
+    let failNextTrustSet = false;
+    let trustFailureApplied = false;
+    let trustFailureSettled = false;
+    let trustFailureCode;
+    let releaseTrustFailure = () => {};
+    const trustSetGate = new Promise((resolve) => { releaseTrustSet = resolve; });
+    const trustFailureGate = new Promise((resolve) => { releaseTrustFailure = resolve; });
+    client.request = (method, params) => {
+      if (method === 'mcp.trust.set' && params.sessionId === newSessionId && failNextTrustSet) {
+        failNextTrustSet = false;
+        return originalRequest(method, { ...params, identityDigest: '0'.repeat(64) }).catch(async (error) => {
+          trustFailureCode = error.code ?? String(error);
+          trustFailureApplied = true;
+          await trustFailureGate;
+          trustFailureSettled = true;
+          throw error;
+        });
+      }
+      const pending = originalRequest(method, params);
+      if (method === 'mcp.trust.set' && params.sessionId === sessionId) {
+        return pending.then(async (result) => {
+          trustSetApplied = true;
+          await trustSetGate;
+          trustSetSettled = true;
+          return result;
+        });
+      }
+      if (method === 'session.create') {
+        return pending.then((created) => {
+          createdSessions += 1;
+          if (createdSessions === 1) newSessionId = created.sessionId;
+          else thirdSessionId = created.sessionId;
+          return created;
+        });
+      }
+      return pending;
+    };
+
+    const stdout = new PassThrough();
+    stdout.columns = 110;
+    stdout.isTTY = true;
+    let painted = '';
+    stdout.on('data', (chunk) => { painted += chunk; });
+    const shown = () => plainOutput(painted);
+    const shownSince = (start) => plainOutput(painted.slice(start));
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+    const instance = render(createElement(App, {
+      client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+    }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+    const sendCommand = async (text) => {
+      const start = painted.length;
+      const currentDraft = () => plainOutput(completeFrame(painted.slice(start)));
+      stdin.write(text);
+      await waitFor(() => currentDraft().includes(`› ${text}`), { within: 5_000, read: currentDraft });
+      stdin.write('\r');
+    };
+
+    try {
+      await waitFor(() => shown().includes('描述任务'), { read: shown });
+      await sendCommand('/mcp trust probe session');
+      await waitFor(() => shown().includes('待确认：probe'), { within: 5_000, read: shown });
+      await sendCommand('/mcp confirm');
+      await waitFor(() => trustSetApplied && requests.some((request) =>
+        request.method === 'mcp.trust.set' && request.params.sessionId === sessionId), { within: 5_000, read: shown });
+
+      await sendCommand('/new');
+      await waitFor(() => newSessionId !== undefined && newSessionId !== sessionId
+        && shown().includes(newSessionId.slice(0, 8)), { within: 5_000, read: shown });
+      const outputAfterNewSession = painted.length;
+      releaseTrustSet();
+      await waitFor(() => trustSetSettled, { within: 5_000, read: shown });
+      assert.doesNotMatch(plainOutput(painted.slice(outputAfterNewSession)), /probe is trusted at session scope/u,
+        'a trust result must not be appended to another Session');
+
+      const originalSessionOutput = painted.length;
+      await sendCommand(`/resume ${sessionId.slice(0, 8)}`);
+      await waitFor(() => shown().includes(`已恢复会话 ${sessionId.slice(0, 8)}`)
+        && plainOutput(painted.slice(originalSessionOutput)).includes('已在session范围信任 probe'), { within: 5_000, read: shown });
+
+      const trusted = await originalRequest('mcp.trust.list', { projectRoot: projectDirectory, sessionId });
+      assert.notEqual(trusted.servers[0]?.trustScopes.session, null, 'the confirmed trust must remain bound to the original Session');
+
+      await sendCommand(`/resume ${newSessionId.slice(0, 8)}`);
+      await waitFor(() => shown().includes(`已恢复会话 ${newSessionId.slice(0, 8)}`), { within: 5_000, read: shown });
+      failNextTrustSet = true;
+      const failurePromptOutput = painted.length;
+      await sendCommand('/mcp trust probe session');
+      await waitFor(() => shownSince(failurePromptOutput).includes('待确认：probe'), { within: 5_000, read: () => shownSince(failurePromptOutput) });
+      await sendCommand('/mcp confirm');
+      await waitFor(() => trustFailureApplied && typeof trustFailureCode === 'string', { within: 5_000, read: shown });
+
+      await sendCommand('/new');
+      await waitFor(() => thirdSessionId !== undefined && thirdSessionId !== newSessionId
+        && shown().includes(thirdSessionId.slice(0, 8)), { within: 5_000, read: shown });
+      const outputAfterThirdSession = painted.length;
+      releaseTrustFailure();
+      await waitFor(() => trustFailureSettled, { within: 5_000, read: shown });
+      assert.doesNotMatch(plainOutput(painted.slice(outputAfterThirdSession)), /MCP Server 未获信任/u,
+        'a trust failure must not be appended to another Session');
+
+      const failedSessionOutput = painted.length;
+      await sendCommand(`/resume ${newSessionId.slice(0, 8)}`);
+      await waitFor(() => shown().includes(`已恢复会话 ${newSessionId.slice(0, 8)}`)
+        && plainOutput(painted.slice(failedSessionOutput)).includes('MCP Server 未获信任'), { within: 5_000, read: shown });
+      const failedSessionTrust = await originalRequest('mcp.trust.list', { projectRoot: projectDirectory, sessionId: newSessionId });
+      assert.equal(failedSessionTrust.servers[0]?.trustScopes.session, null, 'a rejected trust change must not be stored');
+    } finally {
+      releaseTrustSet();
+      releaseTrustFailure();
       instance.unmount();
     }
   }, {

@@ -550,6 +550,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const controlWizardSubmittingRef = useRef(false);
   const controlWizardGeneration = useRef(0);
   const [mcpTrustPending, setMcpTrustPending] = useState<McpTrustPending | null>(null);
+  const mcpTrustOutcomeRows = useRef(new Map<string, TranscriptItem[]>());
+  const [mcpTrustOutcomeRevision, setMcpTrustOutcomeRevision] = useState(0);
   const [externalControl, setExternalControl] = useState(false);
   const [externalSnapshot, setExternalSnapshot] = useState<ExternalControlSnapshot | null>(null);
   const [externalModel, setExternalModel] = useState<string | null>(null);
@@ -644,6 +646,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const push = useCallback((...added: TranscriptItem[]) => {
     if (!alive.current) return;
     setRows((current) => [...current, ...added]);
+  }, []);
+  const reportMcpTrustOutcome = useCallback((owner: string, outcome: TranscriptItem) => {
+    if (!alive.current) return;
+    const current = mcpTrustOutcomeRows.current.get(owner) ?? [];
+    mcpTrustOutcomeRows.current.set(owner, [...current, outcome]);
+    setMcpTrustOutcomeRevision((revision) => revision + 1);
   }, []);
   // 用户快捷键覆盖存放在独立的本地文件中，不进入会话记录、模型上下文或项目配置。
   const [keyOverrides, setKeyOverrides] = useState<Record<string, string>>({});
@@ -1396,8 +1404,18 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, []);
 
   const finishSessionNavigation = useCallback((lease: SessionNavigationLease): void => {
-    if (sessionNavigation.current.activeToken === lease.token) sessionNavigation.current.activeToken = 0;
+    if (sessionNavigation.current.activeToken !== lease.token) return;
+    sessionNavigation.current.activeToken = 0;
+    setMcpTrustOutcomeRevision((revision) => revision + 1);
   }, []);
+
+  useEffect(() => {
+    if (sessionId === null || sessionNavigation.current.activeToken !== 0) return;
+    const outcomes = mcpTrustOutcomeRows.current.get(sessionId);
+    if (outcomes === undefined) return;
+    mcpTrustOutcomeRows.current.delete(sessionId);
+    setRows((current) => [...current, ...outcomes]);
+  }, [mcpTrustOutcomeRevision, sessionId]);
 
   const closeUnadoptedSession = useCallback(async (targetId: string, owner: string, force = false): Promise<string | undefined> => {
     if (!force && targetId === owner) return undefined;
@@ -1467,6 +1485,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         const isCurrent = () => alive.current && activeSession.current === pending.sessionId
           && sessionId === pending.sessionId && sessionIdentityGeneration.current === pending.sessionGeneration;
         void (async () => {
+          let trustWriteStarted = false;
           try {
             const snapshot = await client.request('mcp.trust.list', { projectRoot: info.boundary, sessionId: pending.sessionId });
             if (!isCurrent()) return;
@@ -1475,18 +1494,22 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
               setMcpTrustPending((value) => value === pending ? null : value);
               throw new Error('mcp_server_config_changed');
             }
+            trustWriteStarted = true;
             await client.request('mcp.trust.set', {
               projectRoot: info.boundary, sessionId: pending.sessionId, server: pending.server, identityDigest: pending.identityDigest, scope: pending.scope, trusted: true,
               confirmTrust: true, confirmExternalAccess: true,
               ...(pending.scope === 'session' ? {} : { version: snapshot.version }),
             });
-            if (!isCurrent()) return;
             setMcpTrustPending((value) => value === pending ? null : value);
-            push({ kind: 'meta', text: t(`已在${pending.scope}范围信任 ${pending.server}。`, `${pending.server} is trusted at ${pending.scope} scope.`) });
+            reportMcpTrustOutcome(pending.sessionId, {
+              kind: 'meta', text: t(`已在${pending.scope}范围信任 ${pending.server}。`, `${pending.server} is trusted at ${pending.scope} scope.`),
+            });
           } catch (error) {
-            if (!isCurrent()) return;
+            if (!alive.current || (!trustWriteStarted && !isCurrent())) return;
             setMcpTrustPending((value) => value === pending ? null : value);
-            push({ kind: 'error', text: t(`MCP Server 未获信任：${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_failed'}`, `MCP server was not trusted: ${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_failed'}`) });
+            reportMcpTrustOutcome(pending.sessionId, {
+              kind: 'error', text: t(`MCP Server 未获信任：${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_failed'}`, `MCP server was not trusted: ${errorCode(error) ?? errorMessage(error) ?? 'mcp_trust_failed'}`),
+            });
           }
         })();
         return;
@@ -2552,7 +2575,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       return;
     }
     push({ kind: 'error', text: t(`未知命令：/${name}（/help 查看）`, `Unknown command: /${name} (/help to browse)`) });
-  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, externalControl, finishSessionNavigation, info, keyOverrides, keys, locale, mcpTrustPending, push, queue, queuePaused, refreshStatus, resetOrdinaryDraft, sessionId, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui]);
+  }, [app, beginSessionNavigation, changePermission, changeThinking, client, closeUnadoptedSession, externalControl, finishSessionNavigation, info, keyOverrides, keys, locale, mcpTrustPending, push, queue, queuePaused, refreshStatus, reportMcpTrustOutcome, resetOrdinaryDraft, sessionId, sessionNavigationIsCurrent, status, stdout, t, trust, openPicker, exitTui]);
 
   const chooseOption = useCallback((id: string) => {
     const choice = choices.find(item => item.id === id);
