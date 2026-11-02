@@ -1,6 +1,6 @@
 {
   "name": "ligule",
-"version": "0.1.1",
+"version": "0.1.2",
   "description": "共享会话与工具内核的命令行和终端 AI 助手。An AI agent harness for the command line and terminal.",
   "type": "module",
   "bin": {

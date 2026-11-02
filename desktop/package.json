@@ -1,7 +1,7 @@
 {
   "name": "ligule-desktop",
   "private": true,
-"version": "0.1.1",
+"version": "0.1.2",
   "description": "Ligule Electron desktop application",
   "homepage": "https://github.com/xswt442-cmd/ligule#readme",
   "main": "electron/dist/main.js",

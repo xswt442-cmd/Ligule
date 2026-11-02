@@ -33,7 +33,7 @@ npm install -g ligule
 - **受控的工具操作**：文件、命令、Skills 与 MCP 经 Permission 访问边界、Policy 风险判定和审批机制约束。
 - **三种使用入口**：CLI 适合单次任务与脚本，TUI 和桌面版适合持续工作。
 - **统一 Agent Core**：Host 组织模型与工具，Kernel 执行校验和 Policy，Session JSONL 记录可恢复的执行过程。
-- **Agent Control（外部控制）**：为本地 MCP 控制者预先授予项目专属的权限上限；控制者通过 Grant 管理会话，不能越权或绕过危险操作拒绝。
+- **Agent Control（外部控制）**：为本地 MCP 控制者预先授予项目专属的权限上限；控制者通过 Grant 管理会话，不能越权或绕过危险操作拒绝。控制器重启后可用 `ligule_run_get` 只读查询授权范围内的持久回执，无需重新取得 Session 写锁。
 
 ## Agent 框架
 

@@ -47,6 +47,21 @@ pnpm --filter ligule run verify-install -- testplace/tmp/package-check-example-1
 
 请将示例目录名替换为当前不存在的名称，并将 check-pack work root 中生成的 tarball 路径传给 `verify-install`。两项检查必须使用同一个实际归档；不要只凭工作区清单推断最终发布包。
 
+### Core 模块职责边界
+
+以下模块负责共享数据规则或投影；Host 与 Kernel 仍分别拥有生命周期和执行：
+
+| 模块 | 职责与边界 |
+| --- | --- |
+| [`errors.ts`](../../core/src/errors.ts) 与 [`kernel/error.ts`](../../core/src/kernel/error.ts) | `errors.ts` 集中定义共享错误类型和诊断；`kernel/error.ts` 保留兼容导出。 |
+| [`data-root.ts`](../../core/src/data-root.ts) 与 [`workspace-identity.ts`](../../core/src/workspace-identity.ts) | 解析用户数据根和规范化工作区身份；配置存储与工作区注册表仍各自持有状态。 |
+| [`kernel/observe.ts`](../../core/src/kernel/observe.ts) 与 [`session/spill.ts`](../../core/src/session/spill.ts) | 分别在 Kernel 与 Session 层保存单次运行的文件观察和超限结果旁路文件。 |
+| [`host/session-initial-settings.ts`](../../core/src/host/session-initial-settings.ts) | 解析并校验初始生成限制；Grant 检查、Provider 选择、信任更新和 Session 创建仍由 Host 负责。 |
+| [`host/tool-catalog.ts`](../../core/src/host/tool-catalog.ts) | 组装只读、不可执行的设置目录并关闭临时注册表；不持有活动 Session。 |
+| [`host/run-records.ts`](../../core/src/host/run-records.ts) | 投影持久 Run 回执与事件窗口；Host 仍负责调用方 scope 和授权。 |
+| [`media.ts`](../../core/src/media.ts) | 定义图像引用校验与共享限制，不负责存储或 Session 所有权。 |
+| [`tui.ts`](../../core/src/tui.ts) | 提供 CLI/TUI 适配层使用的受支持 Core 门面；实现仍留在各自职责模块中。 |
+
 ## 运行时与执行
 
 - [运行结构](#运行结构)
@@ -99,7 +114,7 @@ flowchart LR
 
 内部子代理在同一 Host 进程中创建派生 Kernel、Loop 和独立 Session JSONL，记录 ID 为父 Session 的 `.sub-N`。子代理继承父会话的配置、Provider、插件工具、Permission 与 Policy 判定实例，但不注册 `subagent` 工具；每个父轮最多同时运行三个。子模式只能收窄父模式可用工具，模型调用次数、输出、思考和循环预算不能超过父上限。子任务的 RunResult 和 Session 引用作为父工具结果返回，因此失败或取消的子记录仍可查看。
 
-外部客户端通过本地 stdio MCP 进入 Control 门面，再由它操作授权项目中的 Host Session。可信 TUI/Desktop 通过本地 Agent Control IPC 观察状态、回答交互或接管任务；Host 仍是 Session 的写入者，锁阻止另一个 Host 并发写同一记录。答复结果和控制事件以 `source=human` 或 `source=controller` 区分本机用户与 MCP 操控者；只有本机用户答复可以保存审批记忆。接管会取消当前外控轮次、清空尚未发送的外部队列、释放 Host 会话锁并发出所有权转移事件。撤销工作区信任会使当前 Host 停止基于该信任启动的受管进程；其他 Host 通过共享信任记录定期复核并停止相关进程。Session JSONL 保存消息和工具事件；operation ID、事件缓存、待处理请求和消息队列属于 Control 进程内状态，服务重启后需要从持久 Session 重新接回，旧运行编号不可继续使用。`run.wait` 必须明确指定 origin，但该字段本身不授予权限：可信本地 UI 可读取本 Session 的 human 与 controller 回执；经过认证的 Agent Control 桥接可读取 human 回执和当前 Grant 的 controller 回执；其他 Host 只能读取自己的 controller scope。Host 根据持久化 Run 归属并结合调用方上下文判定权限。若 `requestKey` 在多个可见 scope 中都匹配，返回 `run_request_key_ambiguous`；调用方应使用唯一的 `runId` 选择回执。Host 返回结果前会检查对应回执。
+外部客户端通过本地 stdio MCP 进入 Control 门面，再由它操作授权项目中的 Host Session。可信 TUI/Desktop 通过本地 Agent Control IPC 观察状态、回答交互或接管任务；Host 仍是 Session 的写入者，锁阻止另一个 Host 并发写同一记录。答复结果和控制事件以 `source=human` 或 `source=controller` 区分本机用户与 MCP 操控者；只有本机用户答复可以保存审批记忆。接管会取消当前外控轮次、清空尚未发送的外部队列、释放 Host 会话锁并发出所有权转移事件。撤销工作区信任会使当前 Host 停止基于该信任启动的受管进程；其他 Host 通过共享信任记录定期复核并停止相关进程。Session JSONL 保存消息和工具事件；operation ID、事件缓存、待处理请求和消息队列属于 Control 进程内状态。服务重启后，如需实时状态、交互、记录读取或继续工作，应重新接回持久 Session，且旧运行编号不可继续使用；授权项目中的持久回执则可直接用 `ligule_run_get` 只读查询，无需打开 Session 写入方。`run.wait` 必须明确指定 origin，但该字段本身不授予权限：可信本地 UI 可读取本 Session 的 human 与 controller 回执；经过认证的 Agent Control 桥接可读取 human 回执和当前 Grant 的 controller 回执；其他 Host 只能读取自己的 controller scope。Host 根据持久化 Run 归属并结合调用方上下文判定权限。若 `requestKey` 在多个可见 scope 中都匹配，返回 `run_request_key_ambiguous`；调用方应使用唯一的 `runId` 选择回执。Host 返回结果前会检查对应回执。
 
 ```mermaid
 flowchart LR

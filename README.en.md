@@ -33,7 +33,7 @@ npm install -g ligule
 - **Controlled tool use:** files, commands, Skills, and MCP follow Permission boundaries, Policy risk checks, and approvals.
 - **Three interfaces:** use the CLI for scripts and one-off tasks, or the TUI and desktop app for ongoing work.
 - **Shared Agent Core:** the Host coordinates models and tools; the Kernel validates and enforces Policy; recoverable Session JSONL records execution.
-- **Agent Control:** pre-authorize project-bound permission ceilings for local MCP controllers, which can manage sessions without exceeding the grant or bypassing hard denials.
+- **Agent Control:** pre-authorize project-bound permission ceilings for local MCP controllers, which can manage sessions without exceeding the grant or bypassing hard denials. After a controller restart, `ligule_run_get` reads an authorized durable receipt without reacquiring the Session writer lock.
 
 ## Agent framework
 

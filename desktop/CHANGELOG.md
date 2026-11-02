@@ -6,6 +6,18 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-02
+
+### 简体中文
+
+- 「设置 → 工具」会标明自定义 TOML 工具来源，并展示工具声明诊断；没有活动会话时，列表也会区分已发现的元数据与当前 Mode、Permission 下实际可用的工具。
+- Session 切换 Mode 时，旧工具清单会保持生效，直到新设置写入成功，避免界面和 Host 暂时显示不同的可用工具。
+
+### English
+
+- Settings → Tools identifies custom TOML tools and shows declaration diagnostics. With no active Session, it distinguishes discovered metadata from tools actually available under the current Mode and Permission.
+- During a Session Mode change, the previous tool set remains active until the new settings are persisted, keeping the UI and Host on the same available tool set.
+
 ## [0.1.1] - 2026-11-01
 
 ### 简体中文
