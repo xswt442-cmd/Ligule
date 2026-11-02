@@ -367,28 +367,7 @@ async function verifyExternalSessionControl() {
   const trust = await import(pathToFileURL(join(repositoryRoot, 'core', 'dist', 'kernel', 'workspace-trust.js')).href);
   const agentControl = await import(pathToFileURL(join(repositoryRoot, 'core', 'dist', 'host', 'agent-control.js')).href);
   const previousSessionId = sessionId;
-  const sessionQuestionDraft = 'desktop-session-question-draft-answer';
   let draftAwaySessionId = previousSessionId;
-  let sessionQuestionRun;
-  if (typeof previousSessionId === 'string') {
-    sessionQuestionRun = requestHost('run.start', { sessionId: previousSessionId, input: 'desktop-session-question-draft' })
-      .then(() => undefined, (error) => error);
-    await waitFor(`(() => [...document.querySelectorAll('.question')]
-      .some(item => item.closest('.external-control') === null && item.querySelector('.question-item') !== null))()`, 15_000, 'session_question_card_not_visible');
-    const enteredSessionQuestion = await evaluate(`(() => {
-      const card = [...document.querySelectorAll('.question')].find(item => item.closest('.external-control') === null && item.querySelector('.question-item') !== null);
-      const option = card?.querySelector('.question-option input');
-      const extra = card?.querySelector('.question-free');
-      if (option === null || option === undefined || extra === null || extra === undefined) return false;
-      option.click();
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      setter.call(extra, ${JSON.stringify(sessionQuestionDraft)});
-      extra.dispatchEvent(new Event('input', { bubbles: true }));
-      return option.checked && extra.value === ${JSON.stringify(sessionQuestionDraft)};
-    })()`);
-    assert.equal(enteredSessionQuestion, true, 'session_question_draft_setup_failed');
-    await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
-  }
   await trust.setTrusted(workspaceRoot, true, join(isolatedHome, 'tui-trust.json'));
   const grantStorePath = agentControl.delegationPathOf(isolatedHome);
   const grantBefore = await agentControl.listDelegationGrants(grantStorePath);
@@ -471,35 +450,6 @@ async function verifyExternalSessionControl() {
         && configuration !== null && composer.querySelector('details.external-session-grant') !== null
         && hasModel && hasToolMode && hasPolicy && hasPermission;
     })()`, 15_000, 'external_session_composer_or_config_missing');
-    if (typeof previousSessionId === 'string') {
-      await evaluate(`(() => {
-        const item = [...document.querySelectorAll('.session-item')].find(button => button.title.endsWith(${JSON.stringify(` · ${previousSessionId}`)}));
-        item?.click();
-        return item !== undefined;
-      })()`);
-      await waitFor(`(() => {
-        const active = document.querySelector('.session-item.active');
-        const card = [...document.querySelectorAll('.question')].find(item => item.closest('.external-control') === null && item.querySelector('.question-item') !== null);
-        return active?.title.endsWith(${JSON.stringify(` · ${previousSessionId}`)}) === true
-          && card?.querySelector('.question-option input')?.checked === true
-          && card?.querySelector('.question-free')?.value === ${JSON.stringify(sessionQuestionDraft)};
-      })()`, 10_000, 'session_question_draft_lost_after_navigation');
-      await evaluate(`(() => {
-        const card = [...document.querySelectorAll('.question')].find(item => item.closest('.external-control') === null && item.querySelector('.question-item') !== null);
-        card?.querySelector('.question-actions button[data-tone="allow"]')?.click();
-        return card !== undefined;
-      })()`);
-      await waitFor(`document.querySelector('.center')?.innerText.includes('普通会话问题已收到人类答复') === true`, 15_000, 'session_question_answer_not_recorded');
-      await waitForSessionIdle(15_000, 'session_question_turn_did_not_complete');
-      const sessionQuestionError = await sessionQuestionRun;
-      if (sessionQuestionError !== undefined) throw sessionQuestionError;
-      await evaluate(`(() => {
-        const item = [...document.querySelectorAll('.session-item')].find(button => button.title.endsWith(${JSON.stringify(` · ${observerSessionId}`)}));
-        item?.click();
-        return item !== undefined;
-      })()`);
-      await waitFor(`document.querySelector('.external-session-composer') !== null`, 10_000, 'external_session_composer_not_restored_after_question');
-    }
     const sendDisabled = await evaluate(`document.querySelector('button.send')?.disabled === true`);
     assert.equal(sendDisabled, true, 'external_session_composer_must_start_empty');
     await evaluate(`document.querySelector('.external-session-grant summary')?.click()`);
@@ -783,6 +733,84 @@ async function waitForSavedSessionInput(projectRoot, id, draft, queued, timeoutM
     await new Promise(resolvePromise => setTimeout(resolvePromise, 100));
   }
   throw Object.assign(new Error('crash_recovery_inputs_not_persisted'), { code: 'crash_recovery_inputs_not_persisted' });
+}
+
+async function verifyQuestionDraftSurvivesSessionSwitch() {
+  if (typeof sessionId !== 'string') throw Object.assign(new Error('session_question_session_missing'), { code: 'session_question_session_missing' });
+  const owner = sessionId;
+  const draft = 'desktop-session-question-draft-answer';
+  let awaySessionId;
+  void requestHost('run.start', { sessionId: owner, input: 'desktop-session-question-draft' }).catch(() => undefined);
+  let step = 'question-card';
+  try {
+    await waitFor(`(() => [...document.querySelectorAll('.question')]
+      .some(item => item.closest('.external-control') === null && item.textContent.includes('Choose a session route')))()`,
+    15_000, 'session_question_card_not_visible');
+    step = 'type-draft';
+    const entered = await evaluate(`(() => {
+      const card = [...document.querySelectorAll('.question')].find(item => item.closest('.external-control') === null
+        && item.textContent.includes('Choose a session route'));
+      const extra = card?.querySelector('.question-free');
+      if (extra === null || extra === undefined) return false;
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(extra, ${JSON.stringify(draft)});
+      extra.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ${JSON.stringify(draft)} }));
+      return extra.value === ${JSON.stringify(draft)}
+        && card?.querySelector('.question-actions button[data-tone="allow"]')?.disabled === false;
+    })()`);
+    assert.equal(entered, true, 'session_question_draft_setup_failed');
+
+    step = 'create-away-session';
+    const away = await requestHost('session.create', { projectRoot: workspaceRoot });
+    awaySessionId = away.createdSessionId;
+    if (typeof awaySessionId !== 'string') throw Object.assign(new Error('session_question_away_session_missing'), { code: 'session_question_away_session_missing' });
+    await requestHost('session.close', { sessionId: awaySessionId });
+    await waitFor(`document.querySelector('button[aria-label="刷新会话列表"]') || document.querySelector('button[aria-label="Refresh conversations"]')`,
+      10_000, 'session_rail_refresh_missing');
+    await evaluate(`(() => {
+      const button = document.querySelector('button[aria-label="刷新会话列表"], button[aria-label="Refresh conversations"]');
+      button?.click();
+      return button !== null;
+    })()`);
+    await waitFor(`[...document.querySelectorAll('.session-item')].some(item => item.title.endsWith(${JSON.stringify(` · ${awaySessionId}`)}))`,
+      10_000, 'session_question_away_session_not_listed');
+    step = 'open-away-session';
+    await evaluate(`(() => {
+      const item = [...document.querySelectorAll('.session-item')].find(button => button.title.endsWith(${JSON.stringify(` · ${awaySessionId}`)}));
+      item?.click();
+      return item !== undefined;
+    })()`);
+    await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${awaySessionId}`)}) === true
+      && document.querySelector('.question') === null`, 10_000, 'session_question_switch_away_failed');
+    step = 'reopen-owner-session';
+    await evaluate(`(() => {
+      const item = [...document.querySelectorAll('.session-item')].find(button => button.title.endsWith(${JSON.stringify(` · ${owner}`)}));
+      item?.click();
+      return item !== undefined;
+    })()`);
+    await waitFor(`(() => {
+      const card = [...document.querySelectorAll('.question')].find(item => item.closest('.external-control') === null
+        && item.textContent.includes('Choose a session route'));
+      return document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${owner}`)}) === true
+        && card?.querySelector('.question-free')?.value === ${JSON.stringify(draft)}
+        && card?.querySelector('.question-actions button[data-tone="allow"]')?.disabled === false;
+    })()`, 10_000, 'session_question_draft_lost_after_navigation');
+
+    return '普通会话问题的未提交文本跨另一条已保存会话的切换往返后仍保留';
+  } catch (error) {
+    if (error !== null && typeof error === 'object' && error.diagnostic === undefined) {
+      error.diagnostic = `normal-question-step:${step}`;
+    }
+    throw error;
+  } finally {
+    if (typeof awaySessionId === 'string') {
+      await evaluate(`(() => {
+        const item = [...document.querySelectorAll('.session-item')].find(button => button.title.endsWith(${JSON.stringify(` · ${owner}`)}));
+        item?.click();
+        return item !== undefined;
+      })()`).catch(() => undefined);
+      await requestHost('session.close', { sessionId: awaySessionId }).catch(() => undefined);
+    }
+  }
 }
 
 async function recordReport(exitCode) {
@@ -1106,6 +1134,8 @@ async function runChecks() {
       return `硬杀 Host（PID ${killedPid}）后界面恢复会话与草稿/队列；未决那一轮终态 ${last.status ?? '无'}${last.code === undefined ? '' : `/${last.code}`}，模型请求数未增加。RPC 阶段：${JSON.stringify(requestSummary)}`;
     });
   }
+
+  await check(`${providerLabel}普通会话问题草稿切换`, verifyQuestionDraftSurvivesSessionSwitch);
 
 }
 
