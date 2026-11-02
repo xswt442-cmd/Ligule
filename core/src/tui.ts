@@ -1,6 +1,7 @@
 export { loadProjectConfig } from './host/environment.js';
 export { languageOf, textOf, type Locale } from './kernel/locale.js';
-export { dataRoot, loadConfigLayers } from './kernel/config-file.js';
+export { dataRoot } from './data-root.js';
+export { loadConfigLayers } from './kernel/config-file.js';
 export { createConfigStore } from './kernel/config-store.js';
 export { createKernel } from './kernel/kernel.js';
 export { createInteractivePermissionContext, detectPermissionCapabilities } from './capability/permission-capabilities.js';

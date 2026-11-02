@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, open, realpath } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import lockfile from 'proper-lockfile';
-import { dataRoot } from '../kernel/config-file.js';
+import { dataRoot } from '../data-root.js';
 import { KernelError } from '../errors.js';
 
 export type AppContainerHandle = NativeHandle;

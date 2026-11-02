@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join, parse, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { KernelError } from '../errors.js';
-import { dataRoot } from '../kernel/config-file.js';
+import { dataRoot } from '../data-root.js';
 import { isWithin, resolveWithin } from './paths.js';
 import { boundaryOf, limitsOf, workingDirectoryOf, type CapabilityConfig } from './limits.js';
 import { spawnWindowsCommand, type OwnedWindowsCommand } from './windows-command.js';

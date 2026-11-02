@@ -3,8 +3,9 @@
 // 管理端配置层尚未接入。配置文件不保存密钥，凭据只通过环境变量读取。
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { join, isAbsolute } from 'node:path';
+import { join } from 'node:path';
 import { parse } from 'smol-toml';
+import { dataRoot } from '../data-root.js';
 import { mergeInto } from './config.js';
 import { KernelError } from './error.js';
 import type { ConfigLayer } from './config.js';
@@ -26,6 +27,7 @@ export type LoadedConfigLayers = Partial<Record<Exclude<ConfigLayer, 'managed'>,
 export const CONFIG_DIRECTORY = '.ligule';
 export const CONFIG_FILE = 'config.toml';
 export const LOCAL_CONFIG_FILE = 'config.local.toml';
+export { dataRoot } from '../data-root.js';
 
 // 项目根和用户主目录由调用方提供；项目根标记由指令加载器解析。
 // 用户主目录可显式传入，便于隔离安装和测试。
@@ -36,18 +38,6 @@ export function configPaths(projectRoot: string, userHome = homedir()): ConfigPa
     project: join(projectRoot, CONFIG_DIRECTORY, CONFIG_FILE),
     local: join(projectRoot, CONFIG_DIRECTORY, LOCAL_CONFIG_FILE),
   };
-}
-
-// `dataRoot()` 是应用数据根的唯一解析入口：使用绝对 `LIGULE_HOME`，未设置时默认为 `<主目录>/.ligule`。
-// 配置、模式、技能、模板、扩展、历史和草稿均从该目录读取。
-// 空值视为未设置；拒绝相对路径，避免数据意外写入当前工作目录。
-export function dataRoot(home = homedir(), env: NodeJS.ProcessEnv = process.env): string {
-  const written = typeof env.LIGULE_HOME === 'string' ? env.LIGULE_HOME.trim() : '';
-  if (written === '') return join(home, CONFIG_DIRECTORY);
-  if (!isAbsolute(written)) {
-    throw new KernelError('data_root_invalid', { detail: `LIGULE_HOME must name an absolute directory, got "${env.LIGULE_HOME}"` });
-  }
-  return written;
 }
 
 function errorCode(error: unknown): string | undefined {

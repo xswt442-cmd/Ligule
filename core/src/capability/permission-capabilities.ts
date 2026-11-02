@@ -9,7 +9,7 @@ import {
   type PermissionContextOptions,
   type PermissionProfileCapabilities,
 } from '../kernel/permission.js';
-import { dataRoot } from '../kernel/config-file.js';
+import { dataRoot } from '../data-root.js';
 import {
   probeLinuxSandboxIsolation,
   type LinuxSandboxProbeResult,

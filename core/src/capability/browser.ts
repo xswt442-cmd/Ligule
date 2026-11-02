@@ -4,8 +4,8 @@ import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, unlink } f
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createConfig, type ConfigLayer, type ConfigSnapshot } from '../kernel/config.js';
 import type { LoadedLayers } from '../kernel/config-store.js';
-import { dataRoot } from '../kernel/config-file.js';
-import { workspaceIdentity } from '../kernel/workspace.js';
+import { dataRoot } from '../data-root.js';
+import { workspaceIdentity } from '../workspace-identity.js';
 import { claimStorageOwner, closeStorageOwner } from './storage-gc.js';
 import { KernelError } from '../errors.js';
 import { workspaceDataDirectory, type SessionDirectoryConfig } from '../session/list.js';
