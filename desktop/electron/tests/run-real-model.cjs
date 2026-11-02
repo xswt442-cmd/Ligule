@@ -464,33 +464,39 @@ async function verifyExternalSessionControl() {
     try {
       await waitFor(`document.querySelector('.external-control .question')?.textContent.includes('Choose a route') === true`, 15_000, 'external_control_question_not_visible');
     } catch (error) {
-      const latest = await mcpClient.callTool({ name: 'ligule_run_status', arguments: { operationId, after: 0, limit: 50 } });
-      const questionPending = latest.isError !== true
-        && latest.structuredContent?.pendingInteractions?.some(item => item.type === 'question' && item.sessionId === observerSessionId) === true;
-      let desktopStatus;
-      let desktopStatusError;
+      let questionPending = false;
+      let diagnostic;
       try {
-        desktopStatus = await requestHost('session.control', {
-          projectRoot: workspaceRoot,
-          sessionId: observerSessionId,
-          request: { action: 'status', after: 0, limit: 50, waitMs: 0 },
+        const latest = await mcpClient.callTool({ name: 'ligule_run_status', arguments: { operationId, after: 0, limit: 50 } });
+        questionPending = latest.isError !== true
+          && latest.structuredContent?.pendingInteractions?.some(item => item.type === 'question' && item.sessionId === observerSessionId) === true;
+        let desktopStatus;
+        let desktopStatusError;
+        try {
+          desktopStatus = await requestHost('session.control', {
+            projectRoot: workspaceRoot,
+            sessionId: observerSessionId,
+            request: { action: 'status', after: 0, limit: 50, waitMs: 0 },
+          });
+        } catch (statusError) {
+          desktopStatusError = stableErrorCode(statusError);
+        }
+        const status = latest.structuredContent;
+        diagnostic = JSON.stringify({
+          operationState: status?.state ?? null,
+          statusSessionMatches: status?.sessionId === observerSessionId,
+          questionPending,
+          pendingTypes: status?.pendingInteractions?.map(item => item.type) ?? [],
+          desktopStatusError: desktopStatusError ?? null,
+          desktopStatusMatches: desktopStatus?.resultSessionId === observerSessionId,
+          desktopOperationState: desktopStatus?.operationState ?? null,
+          desktopPendingTypes: desktopStatus?.pendingInteractionTypes ?? [],
+          externalComposer: await evaluate(`document.querySelector('.external-session-composer') !== null`),
+          externalQuestionCount: await evaluate(`document.querySelectorAll('.external-control .question').length`),
         });
-      } catch (statusError) {
-        desktopStatusError = stableErrorCode(statusError);
+      } catch {
+        throw error;
       }
-      const status = latest.structuredContent;
-      const diagnostic = JSON.stringify({
-        operationState: status?.state ?? null,
-        statusSessionMatches: status?.sessionId === observerSessionId,
-        questionPending,
-        pendingTypes: status?.pendingInteractions?.map(item => item.type) ?? [],
-        desktopStatusError: desktopStatusError ?? null,
-        desktopStatusMatches: desktopStatus?.resultSessionId === observerSessionId,
-        desktopOperationState: desktopStatus?.operationState ?? null,
-        desktopPendingTypes: desktopStatus?.pendingInteractionTypes ?? [],
-        externalComposer: await evaluate(`document.querySelector('.external-session-composer') !== null`),
-        externalQuestionCount: await evaluate(`document.querySelectorAll('.external-control .question').length`),
-      });
       if (!questionPending) throw Object.assign(error, { code: 'external_control_question_not_pending', diagnostic });
       throw Object.assign(error, { diagnostic });
     }
