@@ -10,12 +10,22 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
+**改进**
+
 - Agent Control 的 `ligule_run_get` 可在授权项目中只读查询已保存回执；控制器重启后无需重新打开 Session 或占用写锁，任务不会因此重放。
+
+**修复**
+
 - Session 切换 Mode 时，旧工具清单会保持生效，直到新设置写入成功；自定义 TOML 工具冲突和单个 Skill 文件读取失败会报告各自诊断，不再遮蔽其他可用条目。
 
 ### English
 
+**Improved**
+
 - Agent Control `ligule_run_get` can read a persisted receipt in the authorized project without reopening the Session or taking its writer lock after a controller restart. The lookup does not replay work.
+
+**Fixed**
+
 - During a Session Mode change, the previous tool set stays active until the new settings are persisted. Conflicting TOML tools and individual unreadable Skill files report diagnostics without hiding other usable entries.
 
 ## [0.1.1] - 2026-11-01
