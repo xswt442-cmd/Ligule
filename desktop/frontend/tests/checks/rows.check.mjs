@@ -131,6 +131,17 @@ const noneRefusal = projectRecord({
 // 不提示档本来就不问，连续拒绝也不该被写成档位变化。
 assert.deepEqual(noneRefusal.notes, ['已拒绝 (none)']);
 
+const hardRefusal = projectRecord({
+  kind: 'tool',
+  tool: 'exec',
+  callId: 'c4c',
+  args: { command: 'rm -rf .' },
+  verdict: { decision: 'deny', via: 'hard-deny', capability: 'exec', level: 'auto', forced: true },
+  result: { failed: true, kind: 'refusal', code: 'policy_hard_denied', reason: '这一条被策略直接拒绝。' },
+})[0];
+assert.deepEqual(hardRefusal.notes, ['已拒绝 (auto)']);
+assert.deepEqual(hardRefusal.english.notes, ['Denied (auto)']);
+
 const repaired = projectRecord({
   kind: 'tool',
   tool: 'exec',

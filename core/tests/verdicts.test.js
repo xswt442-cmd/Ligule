@@ -73,8 +73,8 @@ test('the verdict stays out of the model view and out of the checkpoint hash', a
   }
 });
 
-// 连续拒绝只会把「自动」收紧成「逐项审批」；none/never 本来就不问，不能被显示成档位变化。
-test('a forced ask never rewrites the none or never level', () => {
+// 连续拒绝确实把 auto 收紧为 ask；none/never/ask 本来就不发生档位变化。
+test('a forced ask reports only a real policy level change', () => {
   const levels = (level) => summarizeVerdicts([
     tool(0, 'exec', { capability: 'exec', decision: 'deny', via: 'ask', level, forced: true, answer: 'deny' }, { kind: 'refusal', failed: true, code: 'policy_denied', reason: 'no', content: '' }),
   ])[0].levels;
@@ -82,4 +82,11 @@ test('a forced ask never rewrites the none or never level', () => {
   assert.deepEqual(levels('never'), { never: 1 });
   assert.deepEqual(levels('ask'), { ask: 1 });
   assert.deepEqual(levels('auto'), { 'auto→ask': 1 });
+});
+
+test('a hard denial does not report a policy level change', () => {
+  const result = summarizeVerdicts([
+    tool(0, 'exec', { capability: 'exec', decision: 'deny', via: 'hard-deny', level: 'auto', forced: true }, { kind: 'refusal', failed: true, code: 'policy_hard_denied', reason: 'no', content: '' }),
+  ]);
+  assert.deepEqual(result[0].levels, { auto: 1 });
 });

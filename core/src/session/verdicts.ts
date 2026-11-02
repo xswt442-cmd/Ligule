@@ -27,7 +27,7 @@ interface RecordedVerdict {
 function levelOf(verdict: RecordedVerdict): string {
   const level = typeof verdict.level === 'string' ? verdict.level : 'unknown';
   // 连续拒绝只会把 auto 收紧到 ask；none/never 本身不审批，ask 也没有被改变。
-  const tightened = level !== 'none' && level !== 'never' && level !== 'ask' && level !== 'unknown';
+  const tightened = verdict.via === 'ask' && level !== 'none' && level !== 'never' && level !== 'ask' && level !== 'unknown';
   return verdict.forced === true && tightened ? `${level}→ask` : level;
 }
 
