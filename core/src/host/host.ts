@@ -105,6 +105,7 @@ import { adoptSessionMode, type SessionModeState } from './session-mode.js';
 import { providerFromConfig, hostProviderFromConfig, type HostGenerationOptions, type HostProvider } from './provider.js';
 import { approvalArgsDigest, summarizeApproval } from './approval.js';
 import { runAcceptanceScope, runReceiptView, withinRunWindows } from './run-records.js';
+import { parseInitialGenerationSettings } from './session-initial-settings.js';
 export { providerFromConfig, hostProviderFromConfig } from './provider.js';
 
 interface HostConfigSnapshot extends ConfigSnapshot {
@@ -920,6 +921,7 @@ export function createHost({
     const hasProvider = params.initialProvider !== undefined;
     const hasModel = params.initialModel !== undefined;
     if (hasProvider !== hasModel) throw new KernelError('session_model_selection_invalid', { detail: 'initialProvider and initialModel must be supplied together' });
+    if (hasProvider !== hasModel) throw new KernelError('session_model_selection_invalid', { detail: 'initialProvider and initialModel must be supplied together' });
     let selection: ModelSelection | undefined;
     let model = { ...(env.generation?.model ?? env.pendingModel ?? modelConfigOf(env.config)) };
     if (hasProvider && hasModel) {
@@ -978,26 +980,12 @@ export function createHost({
         confirmedPartialWorkspaceWrite,
       };
     }
-    const options: { outputTokens?: number; thinkingEffort?: HostGenerationOptions['thinkingEffort'] } = {};
-    if (params.initialOutputTokens !== undefined) {
-      if (!Number.isSafeInteger(params.initialOutputTokens) || params.initialOutputTokens < 1) {
-        throw new KernelError('provider_output_budget_invalid');
-      }
-      options.outputTokens = boundedOutputTokens(grant, params.initialOutputTokens);
-    }
-    if (params.initialThinkingEffort !== undefined && params.initialThinkingEffort !== 'default') {
-      if (!['none', 'low', 'high', 'max'].includes(params.initialThinkingEffort)) {
-        throw new KernelError('provider_thinking_effort_invalid');
-      }
-      options.thinkingEffort = params.initialThinkingEffort as HostGenerationOptions['thinkingEffort'];
-    }
-    let loopIterations: number | undefined;
-    if (params.initialLoopIterations !== undefined) {
-      if (!Number.isSafeInteger(params.initialLoopIterations) || params.initialLoopIterations < 1) {
-        throw new KernelError('host_loop_limits_invalid', { detail: 'iterations must be a positive safe integer' });
-      }
-      loopIterations = params.initialLoopIterations;
-    }
+    const parsedGeneration = parseInitialGenerationSettings(params);
+    const options: { outputTokens?: number; thinkingEffort?: HostGenerationOptions['thinkingEffort'] } = {
+      ...(parsedGeneration.outputTokens === undefined ? {} : { outputTokens: boundedOutputTokens(grant, parsedGeneration.outputTokens) }),
+      ...(parsedGeneration.thinkingEffort === undefined ? {} : { thinkingEffort: parsedGeneration.thinkingEffort }),
+    };
+    const loopIterations = parsedGeneration.loopIterations;
     const ceiling = grant?.maxOutputTokens;
     const generationOptions = withOutputCeiling(options, ceiling);
     const persistGeneration = selection !== undefined || Object.keys(options).length > 0;
