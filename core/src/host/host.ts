@@ -39,7 +39,7 @@ import { createDecisionChain, isPolicyRule, policyArgsHash, type DecisionChain, 
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
 import { createSessionLog, type SessionLog } from '../session/session.js';
-import { createRunAcceptance, findRunReceipt, isRunAcceptance, publishRunResult, readRunResult, runPayloadDigest, runReceipts, runResultPage, type DurableRunReceipt, type RunAcceptance } from '../session/run.js';
+import { createRunAcceptance, findRunReceipt, isRunAcceptance, publishRunResult, readRunResult, runPayloadDigest, runReceipts, runResultPage, type RunAcceptance } from '../session/run.js';
 import type { SessionEvent, SessionHeader } from '../session/format.js';
 import { chooseResumeMode, listWorkspaceSessions, sessionDirectories, sessionDirectory, workspaceDataDirectory } from '../session/list.js';
 import { adoptForSessionDirectory } from '../session/adopt.js';
@@ -104,6 +104,7 @@ import type { ToolDefinition } from '../kernel/kernel.js';
 import { adoptSessionMode, type SessionModeState } from './session-mode.js';
 import { providerFromConfig, hostProviderFromConfig, type HostGenerationOptions, type HostProvider } from './provider.js';
 import { approvalArgsDigest, summarizeApproval } from './approval.js';
+import { runAcceptanceScope, runReceiptView, withinRunWindows } from './run-records.js';
 export { providerFromConfig, hostProviderFromConfig } from './provider.js';
 
 interface HostConfigSnapshot extends ConfigSnapshot {
@@ -492,32 +493,6 @@ function runProvenanceOf(trust: ControlTrust, bridge: boolean, origin: 'human' |
   const via = runChannelOf(trust, bridge);
   if (origin === 'human') return { via, resolvedBy: runOriginBasis(trust, bridge) };
   return { via, resolvedBy: scope === 'controller:local' ? 'controller-local' : 'controller-grant' };
-}
-
-/**
- * 唯一的「持久证据 + 活跃性 → 对外状态」映射。
- * 记录里的 state 是最后一次落盘的终态（或 accepted），活跃性只能由当前 Host 提供；
- * 任何对外返回 receipt 的入口都必须经过这里，避免各调用点自行拼装出不同的状态。
- */
-function runReceiptView(receipt: DurableRunReceipt, live: boolean): DurableRunReceipt & { liveness: 'alive' | 'unknown' } {
-  return { ...receipt, state: live ? 'running' : receipt.state, liveness: live ? 'alive' : 'unknown' };
-}
-
-/** 一次 Run 覆盖的事件区间：从接受该 Run 的 user 事件到下一个 user 事件之前。 */
-function withinRunWindows(events: readonly SessionEvent[], receipts: readonly import('../session/run.js').DurableRunReceipt[]): SessionEvent[] {
-  if (receipts.length === 0) return [];
-  const windows = receipts.map((receipt) => {
-    const nextUser = events.find(event => event.kind === 'user' && event.seq > receipt.userSeq);
-    return { start: receipt.userSeq, end: nextUser?.seq ?? Number.POSITIVE_INFINITY };
-  });
-  return events.filter(event => windows.some(window => event.seq > window.start && event.seq < window.end));
-}
-
-/** 一次 Run 的持久归属：授权只认这里记录的 callerScope，请求参数不能改写它。 */
-function runAcceptanceScope(events: readonly SessionEvent[], sessionId: string, runId: string): string | undefined {
-  const accepted = events.find(event => event.kind === 'user' && isRunAcceptance(event.run)
-    && event.run.sessionId === sessionId && event.run.runId === runId);
-  return accepted?.kind === 'user' && isRunAcceptance(accepted.run) ? accepted.run.callerScope : undefined;
 }
 
 /** Grant 可以同时约束 Session 的 Mode、模型与输出预算；Run 开始时复核，避免配置变更绕过上限。 */
