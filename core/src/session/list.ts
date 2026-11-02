@@ -3,7 +3,7 @@
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
-import { dataRoot } from '../kernel/config-file.js';
+import { dataRoot } from '../data-root.js';
 import { KernelError } from '../errors.js';
 import type { ModeFile } from '../kernel/modes.js';
 import { workspaceIdentity } from '../workspace-identity.js';

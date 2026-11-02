@@ -3,7 +3,7 @@ import { constants, createReadStream } from 'node:fs';
 import { copyFile, link, lstat, mkdir, open, readdir, readFile, realpath, rm, stat, utimes } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
-import { dataRoot } from '../kernel/config-file.js';
+import { dataRoot } from '../data-root.js';
 import { SPILL_NAME } from './spill.js';
 import { KernelRuntimeError } from '../errors.js';
 import { workspaceIdentity } from '../workspace-identity.js';
