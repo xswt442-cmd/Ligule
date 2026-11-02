@@ -125,7 +125,14 @@ export async function discoverSkills(directories: string[]): Promise<SkillRegist
   for (const directory of directories) {
     for (const child of await childrenOf(directory)) {
       const file = join(directory, child, SKILL_FILE);
-      const text = await readIfExists(file);
+      let text: string | undefined;
+      try {
+        text = await readIfExists(file);
+      } catch (error) {
+        const failure = error as KernelError;
+        diagnostics.push({ code: failure.code ?? 'skill_file_read_failed', detail: failure.detail ?? failure.message, path: file });
+        continue;
+      }
       if (text === undefined) continue;
       let skill: SkillEntry;
       try {

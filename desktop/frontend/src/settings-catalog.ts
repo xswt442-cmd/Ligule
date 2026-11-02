@@ -20,6 +20,7 @@ export type SettingsCatalog = {
   skillDiagnostics: { code: string }[];
   extensions: { name: string; source: string; enabled: boolean; loaded: boolean; registeredTools: string[] }[];
   extensionDiagnostics: { code: string; source: string }[];
+  customToolDiagnostics: { code: string; source: string }[];
 };
 
 export async function readSettingsCatalog(client: Client, projectRoot: string, sessionId: string | null, mode?: string): Promise<SettingsCatalog> {

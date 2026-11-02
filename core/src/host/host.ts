@@ -83,7 +83,7 @@ import { createSkillPlugin } from '../tools/skill.js';
 import { createMcpPlugin, type McpAuthorization } from '../tools/mcp.js';
 import { createSubagentPlugin } from '../tools/subagent.js';
 import { createCompactPlugin } from '../tools/compact.js';
-import { createCustomToolsPlugin, discoverCustomTools } from '../tools/custom.js';
+import { createCustomToolsPlugin, discoverCustomTools, type CustomToolDiagnostic } from '../tools/custom.js';
 import { createAskUserPlugin } from '../tools/ask-user.js';
 import { createMcpRegistry, mcpServerConfigs, type McpRegistry } from '../capability/mcp.js';
 import { discoverModels } from '../model/discovery.js';
@@ -297,6 +297,8 @@ interface HostSessionState extends HostSessionBase {
   readonly assembly: Assembly;
   readonly mcp: McpRegistry;
   readonly extensions: Awaited<ReturnType<typeof loadExtensions>>;
+  readonly customToolDiagnostics: CustomToolDiagnostic[];
+  readonly customToolNames: string[];
   readonly templates: TemplateRegistry;
   readonly loop: ReturnType<typeof createLoop>;
   readonly runDelegated: (input: string, options: DelegatedRunOptions) => Promise<DelegatedRunResult>;
@@ -843,7 +845,7 @@ export function createHost({
 
   // Settings can inspect the Host-configured runtime registry before opening a conversation.
   // Assemble metadata and check configured credential availability without running tools or connecting MCP.
-  async function settingsToolCatalog(env: ProjectEnvironment, skills: SkillRegistry): Promise<ReturnType<Kernel['catalog']>> {
+  async function settingsToolCatalog(env: ProjectEnvironment, skills: SkillRegistry, customTools: Awaited<ReturnType<typeof discoverCustomTools>>): Promise<ReturnType<Kernel['catalog']>> {
     const search = await createSearchSupport(env.config, env.layers);
     await browserForEnvironment(env);
     return await buildSettingsToolCatalog({
@@ -853,7 +855,12 @@ export function createHost({
       directory: env.directory,
       modePaths: env.modePaths,
       skills,
-      plugins,
+      plugins: [
+        ...plugins,
+        ...(customTools.tools.length === 0 ? [] : [createCustomToolsPlugin(customTools.tools, (name) => {
+          customTools.diagnostics.push({ code: 'custom_tool_name_conflicts_with_registered_tool', path: customTools.sources[name] ?? name, detail: `${name} conflicts with an already registered tool` });
+        })]),
+      ],
       searchPlugin: search.plugin,
       mcpConfigs: env.mcpConfigs,
       interactive,
@@ -1406,25 +1413,31 @@ export function createHost({
         controller.signal.removeEventListener('abort', settleAsks);
         controller.signal.removeEventListener('abort', stopBrowser);
         const browserCleanupError = await browserCleanup;
-        state.running = undefined;
         changeProgressPhase(state, connection, 'settling');
         try {
-          if (state.pending !== undefined) {
-            const next = state.pending;
-            state.pending = undefined;
-            await state.adopt(next);
-          }
-          // 当前轮次结束、接受下一条输入前应用生成设置。
-          // 这样一轮中的循环、压缩和派生执行会使用相同的提供方配置。
-          if (state.pendingGeneration !== undefined) {
-            state.generation = state.pendingGeneration;
-            state.pendingGeneration = undefined;
-            state.compaction = state.rebuildCompaction(state.generation.model);
-          }
-          if (state.pendingLoopIterations !== undefined) {
-            state.loopIterations = state.pendingLoopIterations;
-            state.pendingLoopIterations = undefined;
-          }
+          await serializeSessionConfiguration(state.id, async () => {
+            try {
+              if (state.pending !== undefined) {
+                const next = state.pending;
+                state.pending = undefined;
+                await state.adopt(next);
+              }
+              // 当前轮次结束、接受下一条输入前应用生成设置。
+              // 这样一轮中的循环、压缩和派生执行会使用相同的提供方配置。
+              if (state.pendingGeneration !== undefined) {
+                state.generation = state.pendingGeneration;
+                state.pendingGeneration = undefined;
+                state.compaction = state.rebuildCompaction(state.generation.model);
+              }
+              if (state.pendingLoopIterations !== undefined) {
+                state.loopIterations = state.pendingLoopIterations;
+                state.pendingLoopIterations = undefined;
+              }
+            } finally {
+              // Keep new submissions behind this queue until all pending settings have settled.
+              state.running = undefined;
+            }
+          });
         } finally {
           if (state.progressId === progress.id) {
             state.progress = undefined;
@@ -1442,7 +1455,7 @@ export function createHost({
     try {
       return await operation;
     } finally {
-      state.operation = undefined;
+      if (state.operation === operation) state.operation = undefined;
     }
   }
 
@@ -1983,7 +1996,11 @@ export function createHost({
     }
     const loaded = [
       ...plugins,
-      ...(customTools.tools.length === 0 ? [] : [createCustomToolsPlugin(customTools.tools)]),
+      ...(customTools.tools.length === 0 ? [] : [createCustomToolsPlugin(customTools.tools, (name) => {
+        const diagnostic = { code: 'custom_tool_name_conflicts_with_registered_tool', path: customTools.sources[name] ?? name, detail: `${name} conflicts with an already registered tool` };
+        customTools.diagnostics.push(diagnostic);
+        logger?.log?.('custom tool is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
+      })]),
       ...(skills.skills.length === 0 ? [] : [createSkillPlugin(skills, () => mcp.servers())]),
     ];
     // 加载器负责发现提示模板并处理项目优先级；模板由 Host 展开，确保所有客户端使用相同规则。
@@ -2345,7 +2362,11 @@ export function createHost({
       }
     };
     // 当前轮次和待处理审批都限定在所属会话内。
-    return Object.assign(state, { chain, kernel, assembly, extensions: installedExtensions, mcp, loop, runDelegated, templates, compaction, rebuildCompaction });
+    const customToolNames = customTools.tools.map((tool) => tool.name).filter((name) => !customTools.diagnostics.some((diagnostic) =>
+      diagnostic.code === 'custom_tool_name_conflicts_with_registered_tool' && diagnostic.path === customTools.sources[name]));
+    return Object.assign(state, { chain, kernel, assembly, extensions: installedExtensions, customToolDiagnostics: customTools.diagnostics,
+      customToolNames,
+      mcp, loop, runDelegated, templates, compaction, rebuildCompaction });
     } catch (error) {
       try {
         for (const dispose of cleanup.reverse()) await dispose();
@@ -3137,60 +3158,69 @@ export function createHost({
           }
         }
         case 'run.start': {
-          const state = open(sessionId);
-          const origin = runOriginOf(message.params.origin, 'human', mayRecordHumanRun(controlTrust, bridge));
-          const scope = origin === 'controller' ? controllerScope : 'human';
-          if (grant !== undefined) assertGrantSessionScope(grant, state);
-          const requestKey = message.params.requestKey;
-          const digest = runPayloadDigest(input, message.params.delegation);
-          const waitForOriginal = async (receipt: import('../session/run.js').DurableRunReceipt) => {
-            if (state.activeRunId === receipt.runId && state.operation !== undefined) return await state.operation;
-            if (receipt.state === 'accepted' || receipt.state === 'interrupted') throw new KernelError('run_not_active');
-            return await host.handle({ method: 'run.wait', params: {
-              sessionId, runId: receipt.runId, origin: origin ?? 'human',
-            } }, connection);
-          };
-          const pending = pendingSubmissions.get(sessionId);
-          if (pending !== undefined) {
-            if (requestKey === undefined || pending.key !== requestKey || pending.scope !== scope) {
-              throw new KernelError('run_already_running');
-            }
-            if (pending.digest !== digest) throw new KernelError('run_request_conflict');
-            return await waitForOriginal(await pending.receipt);
-          }
-          const accepted = deferred<import('../session/run.js').DurableRunReceipt>();
-          void accepted.promise.catch(() => undefined);
-          const current = { scope, key: requestKey, digest, receipt: accepted.promise };
-          pendingSubmissions.set(sessionId, current);
-          try {
-            if (requestKey !== undefined) {
-              const events = await state.session.read();
-              const existing = findRunReceipt(events, sessionId, scope, { requestKey });
-              if (existing !== undefined) {
-                const user = events.find(event => event.kind === 'user' && event.seq === existing.userSeq);
-                if (!user || !isRunAcceptance(user.run) || user.run.payloadDigest !== digest) {
-                  throw new KernelError('run_request_conflict');
-                }
-                accepted.resolve(existing);
-                return await waitForOriginal(existing);
+          const started = await serializeSessionConfiguration(sessionId, async () => {
+            const state = open(sessionId);
+            const origin = runOriginOf(message.params.origin, 'human', mayRecordHumanRun(controlTrust, bridge));
+            const scope = origin === 'controller' ? controllerScope : 'human';
+            if (grant !== undefined) assertGrantSessionScope(grant, state);
+            const requestKey = message.params.requestKey;
+            const digest = runPayloadDigest(input, message.params.delegation);
+            const waitForOriginal = async (receipt: import('../session/run.js').DurableRunReceipt) => {
+              if (state.activeRunId === receipt.runId && state.operation !== undefined) return await state.operation;
+              if (receipt.state === 'accepted' || receipt.state === 'interrupted') throw new KernelError('run_not_active');
+              return await host.handle({ method: 'run.wait', params: {
+                sessionId, runId: receipt.runId, origin: origin ?? 'human',
+              } }, connection);
+            };
+            const pending = pendingSubmissions.get(sessionId);
+            if (pending !== undefined) {
+              if (requestKey === undefined || pending.key !== requestKey || pending.scope !== scope) {
+                throw new KernelError('run_already_running');
               }
+              if (pending.digest !== digest) throw new KernelError('run_request_conflict');
+              return { wait: (async () => await waitForOriginal(await pending.receipt))() };
             }
-            runContextOf(state, message.params.delegation);
-            const run = createRunAcceptance(sessionId, input, message.params.delegation, scope, requestKey,
-              runProvenanceOf(controlTrust, bridge, origin ?? 'human', scope));
-            const work = executeRun(state, input, origin ?? 'human', message.params.delegation, run, connection, userSeq => {
-              accepted.resolve({ runId: run.runId, sessionId, userSeq, state: 'accepted', acceptedAt: run.acceptedAt,
-                ...(requestKey === undefined ? {} : { requestKey }),
-                ...(run.via === undefined ? {} : { via: run.via, resolvedBy: run.resolvedBy }) });
-            });
-            void work.catch(error => accepted.reject(error));
-            return await work;
-          } catch (error) {
-            accepted.reject(error);
-            throw error;
-          } finally {
-            if (pendingSubmissions.get(sessionId) === current) pendingSubmissions.delete(sessionId);
-          }
+            const accepted = deferred<import('../session/run.js').DurableRunReceipt>();
+            void accepted.promise.catch(() => undefined);
+            const current = { scope, key: requestKey, digest, receipt: accepted.promise };
+            pendingSubmissions.set(sessionId, current);
+            const cleanupSubmission = () => {
+              if (pendingSubmissions.get(sessionId) === current) pendingSubmissions.delete(sessionId);
+            };
+            try {
+              if (requestKey !== undefined) {
+                const events = await state.session.read();
+                const existing = findRunReceipt(events, sessionId, scope, { requestKey });
+                if (existing !== undefined) {
+                  const user = events.find(event => event.kind === 'user' && event.seq === existing.userSeq);
+                  if (!user || !isRunAcceptance(user.run) || user.run.payloadDigest !== digest) {
+                    throw new KernelError('run_request_conflict');
+                  }
+                  accepted.resolve(existing);
+                  return { wait: waitForOriginal(existing), cleanup: cleanupSubmission };
+                }
+              }
+              runContextOf(state, message.params.delegation);
+              const run = createRunAcceptance(sessionId, input, message.params.delegation, scope, requestKey,
+                runProvenanceOf(controlTrust, bridge, origin ?? 'human', scope));
+              // executeRun synchronously claims the Session before returning its Promise. The
+              // configuration queue is released only after this point, so Mode commits cannot
+              // race a new round into their persistence window.
+              const work = executeRun(state, input, origin ?? 'human', message.params.delegation, run, connection, userSeq => {
+                accepted.resolve({ runId: run.runId, sessionId, userSeq, state: 'accepted', acceptedAt: run.acceptedAt,
+                  ...(requestKey === undefined ? {} : { requestKey }),
+                  ...(run.via === undefined ? {} : { via: run.via, resolvedBy: run.resolvedBy }) });
+              });
+              void work.catch(error => accepted.reject(error));
+              return { wait: work, cleanup: cleanupSubmission };
+            } catch (error) {
+              accepted.reject(error);
+              cleanupSubmission();
+              throw error;
+            }
+          });
+          try { return await started.wait; }
+          finally { started.cleanup?.(); }
         }
         case 'storage.inspect':
         case 'storage.cleanup.preview':
@@ -3406,54 +3436,61 @@ export function createHost({
           }
         }
         case 'run.submit': {
-          const state = open(sessionId);
-          const origin = runOriginOf(message.params.origin, 'controller', mayRecordHumanRun(controlTrust, bridge));
-          const scope = origin === 'controller' ? controllerScope : 'human';
-          if (grant !== undefined) assertGrantSessionScope(grant, state);
-          const key = message.params.requestKey;
-          const digest = runPayloadDigest(input, message.params.delegation);
-          const pending = pendingSubmissions.get(sessionId);
-          if (pending !== undefined) {
-            if (key === undefined || pending.key !== key || pending.scope !== scope) throw new KernelError('run_already_running');
-            if (pending.digest !== digest) throw new KernelError('run_request_conflict');
-            const receipt = await pending.receipt;
-            const live = state.activeRunId === receipt.runId;
-            return { ...runReceiptView(receipt, live), reused: true };
-          }
-          const accepted = deferred<import('../session/run.js').DurableRunReceipt>();
-          void accepted.promise.catch(() => undefined);
-          const current = { scope, key, digest, receipt: accepted.promise };
-          pendingSubmissions.set(sessionId, current);
-          try {
-            const events = await state.session.read();
-            if (key !== undefined) {
-              const previous = findRunReceipt(events, sessionId, scope, { requestKey: key });
-              if (previous !== undefined) {
-                const user = events.find(event => event.kind === 'user' && event.seq === previous.userSeq);
-                if (!user || !isRunAcceptance(user.run) || user.run.payloadDigest !== digest) throw new KernelError('run_request_conflict');
-                accepted.resolve(previous);
-                const live = state.activeRunId === previous.runId;
-                return { ...runReceiptView(previous, live), reused: true };
-              }
+          const submission = await serializeSessionConfiguration(sessionId, async () => {
+            const state = open(sessionId);
+            const origin = runOriginOf(message.params.origin, 'controller', mayRecordHumanRun(controlTrust, bridge));
+            const scope = origin === 'controller' ? controllerScope : 'human';
+            if (grant !== undefined) assertGrantSessionScope(grant, state);
+            const key = message.params.requestKey;
+            const digest = runPayloadDigest(input, message.params.delegation);
+            const pending = pendingSubmissions.get(sessionId);
+            if (pending !== undefined) {
+              if (key === undefined || pending.key !== key || pending.scope !== scope) throw new KernelError('run_already_running');
+              if (pending.digest !== digest) throw new KernelError('run_request_conflict');
+              return {
+                wait: pending.receipt.then((receipt) => ({ ...runReceiptView(receipt, state.activeRunId === receipt.runId), reused: true })),
+              };
             }
-            runContextOf(state, message.params.delegation);
-            const run = createRunAcceptance(sessionId, input, message.params.delegation, scope, key,
-              runProvenanceOf(controlTrust, bridge, origin, scope));
-            const work = executeRun(state, input, origin, message.params.delegation, run, connection, userSeq => {
-              accepted.resolve({ runId: run.runId, sessionId, userSeq, state: 'accepted', acceptedAt: run.acceptedAt,
-                ...(run.requestKey === undefined ? {} : { requestKey: run.requestKey }),
-                ...(run.via === undefined ? {} : { via: run.via, resolvedBy: run.resolvedBy }) });
-            });
-            void work.catch(error => accepted.reject(error));
-            const receipt = await accepted.promise;
-            const live = state.activeRunId === receipt.runId;
-            return { ...runReceiptView(receipt, live), reused: false };
-          } catch (error) {
-            accepted.reject(error);
-            throw error;
-          } finally {
-            if (pendingSubmissions.get(sessionId) === current) pendingSubmissions.delete(sessionId);
-          }
+            const accepted = deferred<import('../session/run.js').DurableRunReceipt>();
+            void accepted.promise.catch(() => undefined);
+            const current = { scope, key, digest, receipt: accepted.promise };
+            pendingSubmissions.set(sessionId, current);
+            const cleanupSubmission = () => {
+              if (pendingSubmissions.get(sessionId) === current) pendingSubmissions.delete(sessionId);
+            };
+            try {
+              const events = await state.session.read();
+              if (key !== undefined) {
+                const previous = findRunReceipt(events, sessionId, scope, { requestKey: key });
+                if (previous !== undefined) {
+                  const user = events.find(event => event.kind === 'user' && event.seq === previous.userSeq);
+                  if (!user || !isRunAcceptance(user.run) || user.run.payloadDigest !== digest) throw new KernelError('run_request_conflict');
+                  accepted.resolve(previous);
+                  const live = state.activeRunId === previous.runId;
+                  return { wait: Promise.resolve({ ...runReceiptView(previous, live), reused: true }), cleanup: cleanupSubmission };
+                }
+              }
+              runContextOf(state, message.params.delegation);
+              const run = createRunAcceptance(sessionId, input, message.params.delegation, scope, key,
+                runProvenanceOf(controlTrust, bridge, origin, scope));
+              const work = executeRun(state, input, origin, message.params.delegation, run, connection, userSeq => {
+                accepted.resolve({ runId: run.runId, sessionId, userSeq, state: 'accepted', acceptedAt: run.acceptedAt,
+                  ...(run.requestKey === undefined ? {} : { requestKey: run.requestKey }),
+                  ...(run.via === undefined ? {} : { via: run.via, resolvedBy: run.resolvedBy }) });
+              });
+              void work.catch(error => accepted.reject(error));
+              return {
+                wait: accepted.promise.then((receipt) => ({ ...runReceiptView(receipt, state.activeRunId === receipt.runId), reused: false })),
+                cleanup: cleanupSubmission,
+              };
+            } catch (error) {
+              accepted.reject(error);
+              cleanupSubmission();
+              throw error;
+            }
+          });
+          try { return await submission.wait; }
+          finally { submission.cleanup?.(); }
         }
         case 'run.wait': {
           const state = open(sessionId);
@@ -3872,7 +3909,13 @@ export function createHost({
             });
           }
           const extensionTools = new Set(session?.extensions.loaded.flatMap((extension) => extension.tools) ?? []);
-          const registeredTools = session?.kernel.catalog() ?? await settingsToolCatalog(env, skills);
+          const extensionDiagnosticSource = (path: string) => env.extensions.installNames?.[resolve(path)] ?? basename(path);
+          const customTools = session === undefined
+            ? await discoverCustomTools(join(dataRoot(), 'tools'))
+            : { tools: [], diagnostics: session.customToolDiagnostics, sources: {} };
+          const registeredTools = session?.kernel.catalog() ?? await settingsToolCatalog(env, skills, customTools);
+          const customToolNames = new Set(session?.customToolNames ?? customTools.tools.map((tool) => tool.name).filter((name) =>
+            !customTools.diagnostics.some((diagnostic) => diagnostic.code === 'custom_tool_name_conflicts_with_registered_tool' && diagnostic.path === customTools.sources[name])));
           const activeTools = session === undefined ? null : new Set(session.kernel.manifest().map((tool) => tool.name));
           const declaredTools = mode?.tools ?? [];
           const includedTools = declaredTools === '*' ? null : new Set(declaredTools);
@@ -3890,6 +3933,7 @@ export function createHost({
             tools: registeredTools.map((tool) => ({
               ...tool,
               source: extensionTools.has(tool.name) ? 'extension'
+                : customToolNames.has(tool.name) ? 'custom'
                 : tool.name.startsWith('mcp.') ? 'mcp'
                   : tool.name.startsWith('skill') ? 'skill' : 'builtin',
               includedInMode: tool.disclosure || includedTools === null || includedTools.has(tool.name),
@@ -3898,7 +3942,11 @@ export function createHost({
             skills: skills.skills.map((skill) => ({ name: skill.name, description: skill.description, requires: skill.requires, source: skillSource(skill.root) })),
             skillDiagnostics: skills.diagnostics.map((diagnostic) => ({ code: diagnostic.code })),
             extensions,
-            extensionDiagnostics: env.extensions.ignored.map((diagnostic) => ({ code: diagnostic.code, source: diagnostic.path })),
+            extensionDiagnostics: [
+              ...env.extensions.ignored,
+              ...(session === undefined ? [] : session.extensions.diagnostics),
+            ].map((diagnostic) => ({ code: diagnostic.code, source: extensionDiagnosticSource(diagnostic.path) })),
+            customToolDiagnostics: customTools.diagnostics.map((diagnostic) => ({ code: diagnostic.code, source: basename(diagnostic.path) })),
           };
         }
         case 'mcp.trust.set': {

@@ -179,9 +179,68 @@ For `web_search`, `query` must be non-empty text of 1–128 Unicode characters. 
 
 A tool mode selects the tool manifest and prompt fragments visible to the model. It does not change Permission, Policy, or an Agent Control Grant. The bundled `minimal` mode is the default; `full` includes every tool registered in the current Host. Mode files are resolved in project, user, then bundled order; a higher-priority file replaces the complete lower-priority file with the same name.
 
+#### Minimal user DIY examples
+
+Create `skills/release-check/SKILL.md` under the data root. Use `ligule skills` to inspect discovery, then ask the model to activate the named Skill:
+
+```markdown
+---
+name: release-check
+description: Check a proposed release against the repository's release guide.
+---
+Read the release guide first. Report the exact files and checks that need attention.
+```
+
+Skills and their supporting files are instructions disclosed to the model on demand; they grant no permission. An open Session keeps the Skill registry it discovered at creation. Removing the file affects subsequent discovery.
+
+A user mode in `<data-root>/modes/read-review.toml` can offer only the read tool:
+
+```toml
+tools = ["read"]
+prompt = []
+```
+
+Selecting `read-review` only makes the already registered `read` tool visible to the model; it does not change Permission, Policy, or a Grant. Select another mode to stop using it.
+
+Place a plain-text prompt template in `<data-root>/prompts/review.md` and invoke it as `/review core/src` in an interactive input:
+
+```markdown
+---
+description: Review a requested source area.
+argument-hint: [scope]
+---
+Review $ARGUMENTS against the repository's documented contracts.
+```
+
+The expanded text is recorded as ordinary user input; the template does not execute code or bypass tool decisions.
+
 Place a TOML file in the `tools/` directory of the data root to declare your own command tool: `description` explains the purpose, `command` is the executable without arguments, the `args` array uses `{parameter}` placeholders (one whole entry each) that are replaced by the values the model provides, and `parameters` describes the argument schema (the same supported subset as built-in tools). A placeholder replaces exactly one argument entry, so model input never enters shell syntax; execution goes through the same permission and approval chain as Shell commands, and declaring a tool grants no additional permission. Declared tools are not part of any mode by default: list the name in a mode file (or use `tools = "*"`) to offer them to the model. Invalid files are reported as diagnostics and skipped without blocking other tools.
 
+For example, declare a read-only workspace status query in `tools/git-summary.toml`:
+
+```toml
+description = "Show a short summary of Git changes in the workspace."
+command = "git"
+args = ["status", "--short"]
+parameters = { type = "object", properties = {} }
+```
+
+Add `git-summary` to a Mode's `tools` list, then create a Session or switch to that mode to offer it to the model. Git commands still require a trusted workspace and per-call approval.
+
 Code extensions install into the `extensions/` directory of the data root: either a single `.js` file or one directory containing an `index.js` entry (one directory, one package). Extensions run as code inside the Host process and load only in full-access sessions with unrestricted network; `ligule extensions` lists the paths that would load and their diagnostics. An installed extension can be disabled through `/extensions [on|off <name>]` in the TUI or the toggle on the Desktop settings tools page, recorded in `extensions-state.json` in the data root and effective the next time the Host starts; extension paths declared by configuration layers are not affected by the registry.
+
+An extension that registers only a prompt fragment can look like this (for example, `extensions/review-hint.js`):
+
+```js
+export default function reviewHint(host) {
+  host.registerPrompt({
+    name: 'review-hint',
+    text: 'Check file boundaries and preserve the current permission policy.',
+  });
+}
+```
+
+Select `review-hint` in a Mode's `prompt` list to include the fragment. The extension itself is still executable JavaScript with Host process privileges; it is not sandboxed. Install only code from a source you trust, and load it only in a Session that meets the Permission conditions above. Disable an installed extension with `/extensions off review-hint`; the change takes effect on the next Host start.
 
 When the selected mode includes the `subagent` tool, the model can delegate independent work to internal child runs. Each child runs in the same Host process with its own persistent Session record. A parent can run three children at once by default; `[loop].maxConcurrentSubagents` can set this limit from 1 to 8 when the Session is created. Children cannot create further children. They inherit the parent Provider, Permission, and Policy decision chain. A child mode can only narrow the parent's tool set, and model-call, output, thinking, and loop budgets cannot exceed the parent limits. Independent tool calls run concurrently up to the project `[loop].maxParallelTools` limit, which defaults to 4 and ranges from 1 to 32; child runs inherit this limit. This tool limit can constrain child concurrency further. When an output schema is requested, the child must submit a value that passes validation; invalid submissions can be corrected within the existing iteration budget. A child that ends without a valid submission fails, while its Session record and completed tool side effects remain. Use `/sub <seq>` in the TUI or the subtask list in Desktop to inspect child records; Markdown export includes them. Failed or cancelled children still retain an inspectable Session reference.
 

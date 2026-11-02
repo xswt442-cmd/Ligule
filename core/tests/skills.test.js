@@ -92,6 +92,21 @@ test('a header that cannot be read is reported by its own code instead of half l
   });
 });
 
+test('one unreadable Skill file is diagnosed without preventing other Skills from loading', async () => {
+  await withSkills(async ({ directories, place }) => {
+    const broken = join(directories[0], 'broken', 'SKILL.md');
+    await mkdir(broken, { recursive: true });
+    await place(0, 'usable', `${header({ name: 'usable' })}body\n`);
+
+    const registry = await discoverSkills(directories);
+
+    assert.deepEqual(registry.skills.map((skill) => skill.name), ['usable']);
+    assert.equal(registry.diagnostics.length, 1);
+    assert.equal(registry.diagnostics[0].code, 'skill_file_read_failed');
+    assert.equal(registry.diagnostics[0].path, broken);
+  });
+});
+
 test('the catalog inlines every name and description until the budget is spent', async () => {
   await withSkills(async ({ directories, place }) => {
     await place(0, 'pdf-tools', `${header({ name: 'pdf-tools', description: 'read a report' })}body\n`);

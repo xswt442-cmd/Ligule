@@ -9,7 +9,7 @@ import { mkdtemp, mkdir, readFile, realpath, rm, stat, symlink, writeFile } from
 import { join, dirname } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CAPABILITIES, METHODS, NOTIFICATIONS, providerFromConfig, hostProviderFromConfig, resolveShell, serveHost, sessionDirectory } from '../core/dist/index.js';
+import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CAPABILITIES, METHODS, NOTIFICATIONS, providerFromConfig, hostProviderFromConfig, resolveShell, serveHost, sessionDirectory, minimalPlugin } from '../core/dist/index.js';
 import { detectPermissionCapabilities } from '../core/dist/capability/permission-capabilities.js';
 import { createPermissionContext } from '../core/dist/kernel/permission.js';
 import { createHost, shownConfigOf } from '../core/dist/host/host.js';
@@ -999,6 +999,53 @@ test('settings.catalog mirrors Host-owned custom tool plugins without opening a 
     assert.ok(catalog.tools.some((tool) => tool.name === 'fixture_lookup' && tool.description === 'Read one fixture value.'));
     assert.equal(catalog.tools.some((tool) => tool.name === 'read'), false, 'the no-session catalog does not invent default plugins absent from this Host');
   }, undefined, { permissionControl: true, plugins: [customPlugin] });
+});
+
+test('settings.catalog shows discovered TOML tools and built-in name conflicts without opening a session', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-settings-custom-tools-'));
+  const previousHome = process.env.LIGULE_HOME;
+  const previousUserProfile = process.env.USERPROFILE;
+  const previousOsHome = process.env.HOME;
+  const data = join(root, 'data');
+  const tools = join(data, 'tools');
+  await mkdir(tools, { recursive: true });
+  await writeFile(join(tools, 'custom-lookup.toml'), `name = "custom-lookup"
+description = "Look up a fixture value."
+command = "echo"
+args = ["ok"]
+parameters = { type = "object", properties = {} }
+`);
+  await writeFile(join(tools, 'shadow-read.toml'), `name = "read"
+description = "Conflicts with built-in read."
+command = "echo"
+args = ["ok"]
+parameters = { type = "object", properties = {} }
+`);
+  process.env.LIGULE_HOME = data;
+  process.env.USERPROFILE = data;
+  process.env.HOME = data;
+  try {
+    await withInProcessHost(async (connection, { sessionId }) => {
+      const catalog = await connection.request('settings.catalog', {});
+      assert.ok(catalog.tools.some((tool) => tool.name === 'custom-lookup' && tool.source === 'custom'));
+      assert.ok(catalog.tools.some((tool) => tool.name === 'read' && tool.source === 'builtin'));
+      assert.deepEqual(catalog.customToolDiagnostics, [
+        { code: 'custom_tool_name_conflicts_with_registered_tool', source: 'shadow-read.toml' },
+      ]);
+      const active = await connection.request('settings.catalog', { sessionId });
+      assert.ok(active.tools.some((tool) => tool.name === 'custom-lookup' && tool.source === 'custom'));
+      assert.ok(active.tools.some((tool) => tool.name === 'read' && tool.source === 'builtin'));
+      assert.deepEqual(active.customToolDiagnostics, catalog.customToolDiagnostics);
+    }, undefined, { permissionControl: true, plugins: [minimalPlugin] });
+  } finally {
+    if (previousHome === undefined) delete process.env.LIGULE_HOME;
+    else process.env.LIGULE_HOME = previousHome;
+    if (previousUserProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = previousUserProfile;
+    if (previousOsHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousOsHome;
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 // 配置写入由 Host 校验字段和配置层；文件被其他进程修改后应返回冲突，而不覆盖对方的内容。

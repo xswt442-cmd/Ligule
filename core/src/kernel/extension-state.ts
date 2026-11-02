@@ -1,6 +1,6 @@
 // 扩展启停登记：数据根下的持久状态，记录用户显式停用的已安装扩展。
 // 登记只过滤安装目录的发现结果；配置层显式声明的路径不受其约束。
-// 读取失败按空登记处理（等同没有停用任何扩展），同时把原因交回调用方报告。
+// 读取失败时已安装扩展全部停用，同时把原因交回环境装载器报告。
 import { randomUUID } from 'node:crypto';
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';

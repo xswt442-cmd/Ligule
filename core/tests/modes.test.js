@@ -327,6 +327,8 @@ test('a switch asked for during a round takes effect only once that round ends',
       assert.deepEqual(requests[1].tools.map((entry) => entry.name), ['compact', 'find', 'read']);
       const { events } = await connection.request('session.read', { sessionId });
       assert.deepEqual(events.filter((event) => event.kind === 'mode').map((event) => event.name), ['readonly', 'wide']);
+      assert.deepEqual(events.filter((event) => event.kind === 'mode').at(-1).tools, ['compact', 'find', 'read'],
+        'a successful wider mode records the final tools instead of the temporary intersection');
     } finally {
       release?.();
       pair.client.output.end();

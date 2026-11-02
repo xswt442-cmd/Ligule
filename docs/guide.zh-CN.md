@@ -179,9 +179,68 @@ serviceId = "deepseek"
 
 工具模式选择交给模型的工具清单和提示片段，不会更改 Permission、Policy 或 Agent Control Grant。随包提供的 `minimal` 是默认模式；`full` 会包含当前 Host 注册的全部工具。模式文件按项目、用户、随包的顺序查找；高优先级文件完整替代低优先级同名文件。
 
+#### 用户 DIY 最小示例
+
+在用户数据根中创建 `skills/release-check/SKILL.md`，可用 `ligule skills` 检查发现结果，然后让模型按名称激活技能：
+
+```markdown
+---
+name: release-check
+description: Check a proposed release against the repository's release guide.
+---
+Read the release guide first. Report the exact files and checks that need attention.
+```
+
+技能和支持文件只作为说明按需提供给模型；它们不授予权限。已打开的 Session 保持创建时发现的技能注册表；删除技能文件会影响后续发现。
+
+在用户数据根 `modes/read-review.toml` 中可创建只提供读取工具的用户模式：
+
+```toml
+tools = ["read"]
+prompt = []
+```
+
+选择 `read-review` 只让模型看到已登记的 `read` 工具，不会改变 Permission、Policy 或 Grant；切换到其他模式即可停用。
+
+在用户数据根 `prompts/review.md` 中放置纯文本提示模板，可在交互输入中用 `/review core/src` 调用：
+
+```markdown
+---
+description: Review a requested source area.
+argument-hint: [scope]
+---
+Review $ARGUMENTS against the repository's documented contracts.
+```
+
+模板展开后的内容作为普通用户输入记录；模板本身不执行代码或绕过工具判定。
+
 在用户数据根的 `tools/` 目录放置一个 TOML 文件即可声明自己的命令工具：`description` 说明用途，`command` 是不带参数的可执行文件，`args` 数组用 `{参数名}` 占位符（独占一项）在调用时替换为模型提供的参数，`parameters` 描述参数模式（受支持子集与内置工具相同）。占位符只替换整个参数位，模型输入不进入 shell 语法；执行按 Shell 命令走同一权限与审批链路，声明一个工具不授予任何额外权限。声明的工具默认不进入模式清单：需要在模式文件中列出其名称（或使用 `tools = "*"`）才会提供给模型。无效文件以诊断报告并跳过，不阻塞其他工具。
 
+例如在 `tools/git-summary.toml` 中声明只读的工作区状态查询：
+
+```toml
+description = "Show a short summary of Git changes in the workspace."
+command = "git"
+args = ["status", "--short"]
+parameters = { type = "object", properties = {} }
+```
+
+把 `git-summary` 加到某个 Mode 的 `tools` 列表后，重新创建或切换到该模式即可供模型使用。Git 命令仍需可信工作区和逐次审批。
+
 代码型扩展安装在用户数据根的 `extensions/` 目录：单个 `.js` 文件，或一个包含 `index.js` 的目录（一目录一包）。扩展以 Host 进程内代码运行，只有 full-access 且不受限网络的会话才会加载；`ligule extensions` 列出当前会加载的路径与诊断。已安装扩展可以停用：终端 `/extensions [on|off <名称>]`、桌面设置工具页的开关写入数据根的 `extensions-state.json`，下次启动生效；配置层显式声明的扩展路径不受登记影响。
+
+只注册提示片段的扩展示例（例如 `extensions/review-hint.js`）：
+
+```js
+export default function reviewHint(host) {
+  host.registerPrompt({
+    name: 'review-hint',
+    text: 'Check file boundaries and preserve the current permission policy.',
+  });
+}
+```
+
+在 Mode 的 `prompt` 列表选择 `review-hint` 后片段才会注入提示词。扩展本身仍是拥有 Host 进程权限的可执行 JavaScript，不是沙箱；只从你信任的来源安装，并且只在满足上述会话 Permission 条件时加载。通过 `/extensions off review-hint` 停用已安装扩展，下次 Host 启动生效。
 
 在包含 `subagent` 工具的模式中，模型可以把互相独立的工作委派给内部子代理。每个子代理在同一 Host 进程中运行，但拥有独立的子会话记录。父会话默认最多并行三个子代理，可在创建会话时通过 `[loop].maxConcurrentSubagents` 将上限设为 1 至 8；子代理不能继续创建子代理。子任务沿用父会话的 Provider、Permission 和 Policy 判定，模式只能进一步缩小工具范围，模型调用次数、输出、思考和循环预算不能高于父会话。独立工具调用按项目 `[loop].maxParallelTools` 上限并发执行，默认值为 4，范围为 1 至 32；子代理沿用此上限，工具并发上限也可能进一步限制子代理并发。通过输出 schema 要求结构化结果时，子代理必须提交并通过验证；无效提交可在本轮现有迭代预算内纠正。子代理若未提交有效结果便结束，会以失败状态保留 Session 记录和已完成的工具副作用。TUI 可用 `/sub <序号>` 查看子记录；桌面会话菜单提供子任务列表，Markdown 导出会包含子会话记录。失败或取消的子任务仍会保留可查看的会话引用。
 

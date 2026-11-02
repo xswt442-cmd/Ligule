@@ -49,7 +49,8 @@ export function ToolsSettings({ client, projectRoot, sessionId }: { client: Clie
 
   const sourceText = (source: string) => source === 'extension' ? t('扩展', 'Extension')
     : source === 'skill' ? t('技能', 'Skill')
-      : source === 'mcp' ? 'MCP' : t('内置', 'Built in');
+      : source === 'custom' ? t('自定义工具', 'Custom tool')
+        : source === 'mcp' ? 'MCP' : t('内置', 'Built in');
   return <div className="tools-settings">
     {failure !== '' && <p className="session-note" data-tone="bad">{t('工具目录读取失败。', 'Could not read the tools catalog.')} <code>{failure}</code></p>}
     <section className="catalog-section">
@@ -63,7 +64,7 @@ export function ToolsSettings({ client, projectRoot, sessionId }: { client: Clie
       </label>
       {catalog?.sessionMode !== null && catalog?.sessionMode !== undefined && <p className="catalog-current">{t(`当前会话：${catalog.sessionMode.name}（${catalog.sessionMode.layer}）`, `Current conversation: ${catalog.sessionMode.name} (${catalog.sessionMode.layer})`)}</p>}
       {catalog?.pendingMode !== null && catalog?.pendingMode !== undefined && <p className="catalog-current">{t(`待切换：${catalog.pendingMode}`, `Pending session change: ${catalog.pendingMode}`)}</p>}
-      {catalog !== null && !catalog.sessionActive && <p className="catalog-current">{t('当前没有活动会话；工具列表显示项目运行时的基础登记信息。', 'No conversation is active; the catalog shows the project runtime’s base registrations.')}</p>}
+      {catalog !== null && !catalog.sessionActive && <p className="catalog-current">{t('当前没有活动会话；列表显示 Host 基础工具及已发现的自定义工具元数据，实际可用工具以 Session 的 Permission 和 Mode 为准。', 'No conversation is active; the list shows Host base tools and discovered custom tool metadata. Actual availability depends on the Session Permission and Mode.')}</p>}
       {chosen !== null && chosen !== undefined ? <>
         <p className="catalog-current">{t(`来源：${chosen.layer} · 工具：${chosen.tools === '*' ? '全部已登记工具' : chosen.tools.length} · 提示片段：${chosen.prompt === '*' ? '全部' : chosen.prompt.length}`, `Source: ${chosen.layer} · Tools: ${chosen.tools === '*' ? 'all registered tools' : chosen.tools.length} · Prompt fragments: ${chosen.prompt === '*' ? 'all' : chosen.prompt.length}`)}</p>
         <details className="catalog-fold" open>
@@ -102,6 +103,7 @@ export function ToolsSettings({ client, projectRoot, sessionId }: { client: Clie
     <details className="catalog-fold all-tools">
       <summary>{t(`所有已登记工具（${tools?.length ?? 0}）`, `All registered tools (${tools?.length ?? 0})`)}</summary>
       <CatalogToolList tools={tools} sourceText={sourceText} empty={t('当前没有已登记工具。', 'No tools are registered in this runtime.')} />
+      {(catalog?.customToolDiagnostics.length ?? 0) > 0 && <ul className="catalog-list">{catalog?.customToolDiagnostics.map((item, index) => <li key={`${item.code}:${item.source}:${index}`}><code>{item.code}</code><span>{item.source}</span></li>)}</ul>}
     </details>
     <details className="catalog-fold">
       <summary>{t(`扩展（${catalog?.extensions.length ?? 0}）`, `Extensions (${catalog?.extensions.length ?? 0})`)}</summary>

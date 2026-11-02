@@ -21,7 +21,7 @@ export async function loadProjectConfig(projectRoot: string, flags: string[] = [
     user,
   }, {
     projectRoot,
-    disabled: state.unavailable === undefined ? state.disabled : undefined,
+    disabled: state.unavailable === undefined ? state.disabled : null,
   });
   if (state.invalid !== undefined) {
     extensions.ignored.push({ code: 'extension_state_invalid', path: 'extensions-state.json', detail: state.invalid });

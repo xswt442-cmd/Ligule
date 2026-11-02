@@ -25,6 +25,16 @@ async function settleCancellation(sessionDirectory, sessionId, within = 15_000) 
   }
 }
 
+function within(promise, milliseconds, detail) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${detail} timed out after ${milliseconds}ms`)), milliseconds);
+    }),
+  ]).finally(() => clearTimeout(timer));
+}
+
 test('a replayed request key returns the original run after a Host restart', async () => {
   await withTuiHost(async (context) => {
     const first = await context.client.request('run.submit', { sessionId: context.sessionId, input: 'replay me', requestKey: 'replay-key' });
@@ -104,6 +114,56 @@ test('a replayed request key on the direct UI path returns the same execution', 
     assert.equal(replayed.runId, first.runId);
     assert.equal(replayed.text, first.text);
     assert.equal(replayed.completedBy, first.completedBy);
+    assert.equal((await acceptances(context.sessionDirectory, context.sessionId)).length, 1);
+  });
+});
+
+test('concurrent direct UI starts reuse one keyed run and reject a conflicting submission', async () => {
+  let releaseModel;
+  let modelStarted;
+  const started = new Promise((resolve) => { modelStarted = resolve; });
+  const blocked = new Promise((resolve) => { releaseModel = resolve; });
+  let firstRequest = true;
+  try {
+    await withTuiHost(async (context) => {
+      const params = { sessionId: context.sessionId, input: 'one direct logical task', requestKey: 'direct-concurrent-key' };
+      const first = context.client.request('run.start', params);
+      await started;
+      const duplicate = context.client.request('run.start', params);
+      await assert.rejects(
+        context.client.request('run.start', { ...params, requestKey: 'other-direct-key' }),
+        { code: 'run_already_running' },
+      );
+      releaseModel();
+      const [original, reused] = await Promise.all([first, duplicate]);
+
+      assert.equal(reused.runId, original.runId);
+      assert.equal(context.providerRequests.length, 1);
+      assert.equal((await acceptances(context.sessionDirectory, context.sessionId)).length, 1);
+    }, {
+      beforeResponse: async () => {
+        if (!firstRequest) return;
+        firstRequest = false;
+        modelStarted();
+        await blocked;
+      },
+    });
+  } finally {
+    releaseModel?.();
+  }
+});
+
+test('run.submit releases the configuration queue when template expansion fails before Acceptance', async () => {
+  await withTuiHost(async (context) => {
+    await assert.rejects(
+      within(context.client.request('run.submit', { sessionId: context.sessionId, input: '/missing-template' }), 5_000, 'template failure'),
+      { code: 'template_unknown' },
+    );
+    assert.equal((await context.client.request('status.get', { sessionId: context.sessionId })).running, false);
+
+    const next = await within(context.client.request('run.submit', { sessionId: context.sessionId, input: 'a valid next run' }), 5_000, 'next run acceptance');
+    assert.ok(next.state === 'accepted' || next.state === 'running');
+    await context.client.request('run.wait', { sessionId: context.sessionId, runId: next.runId });
     assert.equal((await acceptances(context.sessionDirectory, context.sessionId)).length, 1);
   });
 });

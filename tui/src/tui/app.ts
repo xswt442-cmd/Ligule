@@ -390,7 +390,7 @@ interface TuiRequestResults {
   readonly 'mcp.trust.tools': McpToolsSnapshot;
   readonly 'config.set': { readonly version: string; readonly created: boolean; readonly [key: string]: unknown };
   readonly 'extensions.set': { readonly name: string; readonly enabled: boolean; readonly applies: string };
-  readonly 'settings.catalog': { readonly extensions: { readonly name: string; readonly source: string; readonly enabled: boolean; readonly loaded: boolean; readonly registeredTools: readonly string[] }[]; readonly extensionDiagnostics: readonly { readonly code: string; readonly source: string }[] };
+  readonly 'settings.catalog': { readonly tools: readonly { readonly name: string; readonly description: string; readonly source: string }[]; readonly extensions: { readonly name: string; readonly source: string; readonly enabled: boolean; readonly loaded: boolean; readonly registeredTools: readonly string[] }[]; readonly extensionDiagnostics: readonly { readonly code: string; readonly source: string }[]; readonly customToolDiagnostics: readonly { readonly code: string; readonly source: string }[] };
   readonly 'session.compact': { readonly sessionId: string; readonly [key: string]: unknown };
 }
 
@@ -1605,6 +1605,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             : catalog.extensions.map((extension) => `${extension.name} · ${extension.source === 'user-installed' ? t('用户安装', 'user installed') : t('用户配置', 'user configured')} · ${extension.enabled ? t('已启用', 'enabled') : t('已停用（下次启动不加载）', 'disabled (will not load next start)')} · ${extension.loaded ? t('已加载', 'loaded') : t('未加载', 'not loaded')}${extension.registeredTools.length === 0 ? '' : ` · ${extension.registeredTools.join(', ')}`}`);
           if (catalog.extensionDiagnostics.length > 0) {
             lines.push(t(`诊断：${catalog.extensionDiagnostics.map((item) => `${item.code}(${item.source})`).join('、')}`, `Diagnostics: ${catalog.extensionDiagnostics.map((item) => `${item.code}(${item.source})`).join(', ')}`));
+          }
+          if (catalog.customToolDiagnostics.length > 0) {
+            lines.push(t(`自定义工具诊断：${catalog.customToolDiagnostics.map((item) => `${item.code}(${item.source})`).join('、')}`, `Custom tool diagnostics: ${catalog.customToolDiagnostics.map((item) => `${item.code}(${item.source})`).join(', ')}`));
+          }
+          const customTools = catalog.tools.filter((tool) => tool.source === 'custom');
+          if (customTools.length > 0) {
+            lines.push(t(`自定义工具：${customTools.map((tool) => tool.name).join('、')}`, `Custom tools: ${customTools.map((tool) => tool.name).join(', ')}`));
           }
           push({ kind: 'meta', text: lines.join('\n') });
         } catch (error) {

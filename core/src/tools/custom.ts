@@ -168,19 +168,21 @@ function buildCustomTool(spec: CustomToolSpec): ToolDefinition {
 }
 
 /** 发现数据根 tools/ 目录下的声明式工具；目录不存在时返回空表。 */
-export async function discoverCustomTools(directory: string): Promise<{ tools: ToolDefinition[]; diagnostics: CustomToolDiagnostic[] }> {
+export async function discoverCustomTools(directory: string): Promise<{ tools: ToolDefinition[]; diagnostics: CustomToolDiagnostic[]; sources: Record<string, string> }> {
   let files: string[];
   try {
     files = await readdir(directory);
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { tools: [], diagnostics: [] };
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { tools: [], diagnostics: [], sources: {} };
     return {
       tools: [],
       diagnostics: [{ code: 'custom_tools_read_failed', path: directory, detail: (error as Error).message }],
+      sources: {},
     };
   }
   const tools: ToolDefinition[] = [];
   const diagnostics: CustomToolDiagnostic[] = [];
+  const sources: Record<string, string> = {};
   const taken = new Set<string>();
   for (const file of files.sort()) {
     if (!file.endsWith('.toml')) continue;
@@ -193,6 +195,7 @@ export async function discoverCustomTools(directory: string): Promise<{ tools: T
       }
       taken.add(spec.name);
       tools.push(buildCustomTool(spec));
+      sources[spec.name] = path;
     } catch (error) {
       const detail = typeof (error as { detail?: unknown }).detail === 'string' && (error as { detail: string }).detail !== ''
         ? (error as { detail: string }).detail
@@ -204,10 +207,10 @@ export async function discoverCustomTools(directory: string): Promise<{ tools: T
       });
     }
   }
-  return { tools, diagnostics };
+  return { tools, diagnostics, sources };
 }
 
-export function createCustomToolsPlugin(tools: readonly ToolDefinition[]) {
+export function createCustomToolsPlugin(tools: readonly ToolDefinition[], onConflict?: (name: string) => void) {
   return {
     name: 'ligule-custom-tools',
     setup(kernel: { register(tool: ToolDefinition): () => void }) {
@@ -220,6 +223,7 @@ export function createCustomToolsPlugin(tools: readonly ToolDefinition[]) {
             // 与已登记工具（例如内置 read）重名时跳过该声明，不影响其他工具与会话构建；
             // 其他登记错误仍向外抛出。
             if (!(error instanceof KernelError) || error.code !== 'tool_already_registered') throw error;
+            onConflict?.(tool.name);
           }
         }
       } catch (error) {
