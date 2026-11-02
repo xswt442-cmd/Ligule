@@ -196,6 +196,7 @@ async function createFixture(name: string, exitOnStdinEnd: boolean): Promise<{ r
   await Promise.all([mkdir(capability, { recursive: true }), mkdir(kernel, { recursive: true }), mkdir(hostDirectory, { recursive: true })]);
   await Promise.all([
     copyFile(join(VENDORED_CORE_DIST, 'capability', 'win32-job.js'), join(capability, 'win32-job.js')),
+    copyFile(join(VENDORED_CORE_DIST, 'errors.js'), join(root, 'dist', 'errors.js')),
     copyFile(join(VENDORED_CORE_DIST, 'kernel', 'error.js'), join(kernel, 'error.js')),
     symlink(RUNTIME_NODE_MODULES, join(root, 'dist', 'node_modules'), 'junction'),
   ]);
