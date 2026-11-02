@@ -5,7 +5,7 @@ import { basename, dirname, join, resolve, isAbsolute } from 'node:path';
 import lockfile from 'proper-lockfile';
 import { dataRoot } from './config-file.js';
 import { KernelError, KernelRuntimeError } from './error.js';
-import { workspaceIdentity } from './workspace.js';
+import { workspaceIdentity } from '../workspace-identity.js';
 
 type TrustDocument = { version: 1; directories: string[] };
 

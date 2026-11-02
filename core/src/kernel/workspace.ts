@@ -2,13 +2,14 @@
 // 身份基于目录，不基于路径文本；大小写、分隔符、盘符、尾斜杠和链接等别名会归一为同一身份。
 // 登记表保存在应用数据根目录中，界面仅作为读取方，不能因隐藏工作区而删除登记。
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { realpathSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import lockfile from 'proper-lockfile';
 import { dataRoot } from './config-file.js';
 import { KernelError, KernelRuntimeError } from './error.js';
+import { canonicalWorkspaceOf } from '../workspace-identity.js';
+export { trimTrailingSeparators, workspaceIdentity } from '../workspace-identity.js';
 
 export const REGISTRY_VERSION = 1;
 
@@ -30,49 +31,12 @@ export type WorkspaceRegistry = {
 };
 
 /** 返回用于比较目录身份的规范路径；不在此处检查目录是否存在或可读。 */
-function canonicalOf(directory: string): { identity: string; directory: string } {
-  if (typeof directory !== 'string' || directory.trim() === '') {
-    throw new KernelError('workspace_directory_required', { detail: String(directory) });
-  }
-  const asked = resolve(directory);
-  let real = asked;
-  try {
-    real = realpathSync(asked);
-  } catch {
-    real = asked;
-  }
-  const unrooted = real.startsWith('\\\\?\\') ? real.slice(4) : real;
-  if (process.platform === 'win32') {
-    const stripped = trimTrailingSeparators(unrooted, 'windows');
-    const rooted = /^[A-Za-z]:$/.test(stripped) ? `${stripped}\\` : stripped;
-    // Windows 路径比较不区分盘符或目录名称大小写。
-    return { identity: rooted.toLowerCase(), directory: rooted };
-  }
-  const rooted = trimTrailingSeparators(unrooted);
-  return { identity: rooted === '' ? '/' : rooted, directory: rooted };
-}
-
 /**
  * 去掉结尾的路径分隔符。
  *
  * 逐字符扫描而不是用正则：`/\/+$/` 这类模式在每个起点重扫同一串分隔符，
  * 由输入控制的路径会退化成多项式时间（CodeQL js/polynomial-redos）。
  */
-export function trimTrailingSeparators(value: string, kinds: 'slash' | 'windows' = 'slash'): string {
-  let end = value.length;
-  while (end > 0) {
-    const last = value[end - 1];
-    if (last !== '/' && (kinds === 'slash' || last !== '\\')) break;
-    end -= 1;
-  }
-  return value.slice(0, end);
-}
-
-/** 生成供登记表、缓存和记录筛选共用的目录身份键。 */
-export function workspaceIdentity(directory: string): string {
-  return canonicalOf(directory).identity;
-}
-
 export function registryPathOf(home = homedir()): string {
   return join(dataRoot(home), 'workspaces.json');
 }
@@ -196,7 +160,7 @@ function mutateRegistry(path: string, mutate: (registry: WorkspaceRegistry) => v
 
 /** 登记最近使用的工作区；同一身份只保留一条记录。 */
 export function registerWorkspace(directory: string, { path = registryPathOf(), name = undefined as string | undefined, now = new Date().toISOString() } = {}): Promise<WorkspaceRegistry> {
-  const canonical = canonicalOf(directory);
+  const canonical = canonicalWorkspaceOf(directory);
   return mutateRegistry(path, (registry) => {
     upsertEntry(registry, canonical, name, now);
   });
@@ -212,7 +176,7 @@ export function setDefaultWorkspace(directory: string | null, { path = registryP
       registry.default = null;
     });
   }
-  const canonical = canonicalOf(directory);
+  const canonical = canonicalWorkspaceOf(directory);
   return mutateRegistry(path, (registry) => {
     upsertEntry(registry, canonical, name, now);
     registry.default = canonical.identity;
@@ -221,7 +185,7 @@ export function setDefaultWorkspace(directory: string | null, { path = registryP
 
 /** 移除一条工作区登记；项目目录、项目文件与会话记录保持不变。 */
 export function unregisterWorkspace(directory: string, { path = registryPathOf() } = {}): Promise<WorkspaceRegistry> {
-  const canonical = canonicalOf(directory);
+  const canonical = canonicalWorkspaceOf(directory);
   return mutateRegistry(path, (registry) => {
     if (registry.default === canonical.identity) {
       throw new KernelError('workspace_default_cannot_remove', { detail: canonical.directory });

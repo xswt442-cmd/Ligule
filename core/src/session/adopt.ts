@@ -6,7 +6,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { dataRoot } from '../kernel/config-file.js';
 import { SPILL_NAME } from './spill.js';
 import { KernelRuntimeError } from '../errors.js';
-import { workspaceIdentity } from '../kernel/workspace.js';
+import { workspaceIdentity } from '../workspace-identity.js';
 import { acquireSessionLock } from './lock.js';
 import { isRunResultRef } from './run.js';
 import { parseSessionBytes, type ReadSessionRecord } from './record.js';

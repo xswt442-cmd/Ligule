@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { KernelError } from '../errors.js';
-import { workspaceIdentity } from '../kernel/workspace.js';
+import { workspaceIdentity } from '../workspace-identity.js';
 import { createSessionHeader, type SessionModeIdentity } from './format.js';
 import { createCheckpointFile, loadCheckpointFile, writeCheckpointFile } from './checkpoint.js';
 import { parseSessionBytes } from './record.js';
