@@ -55,7 +55,7 @@ Windows 路径示例：
 - `ligule_session_read`：分页读取会话记录。
 - `ligule_run_cancel`：按 `operationId` 取消相应任务。
 
-推荐顺序是先创建或接回会话，再读取 `ligule_session_configure`。若希望服务端等待，可用 `ligule_run`；若要立即取回控制权，则用 `ligule_run_start`，之后通过 `ligule_run_await` 等待或用 `ligule_run_status` 轮询。两种等待超时都不会取消任务；根据 `phase`、`waitingFor` 和 `pendingInteractions` 继续等待或审阅后答复。完成后用 `ligule_session_read` 查看新增记录。状态通知通过 MCP logging 尽力发送；通知不可用时轮询仍可读取同一状态。需要停止时调用 `ligule_run_cancel`。工具参数以运行中的 `tools/list` schema 为准。进程内 `operationId` 失效后使用 `ligule_run_get` 查询持久结果。
+推荐顺序是开始或继续工作前先创建或接回会话，再读取 `ligule_session_configure`。若希望服务端等待，可用 `ligule_run`；若要立即取回控制权，则用 `ligule_run_start`，之后通过 `ligule_run_await` 等待或用 `ligule_run_status` 轮询。两种等待超时都不会取消任务；根据 `phase`、`waitingFor` 和 `pendingInteractions` 继续等待或审阅后答复。完成后用 `ligule_session_read` 查看新增记录。状态通知通过 MCP logging 尽力发送；通知不可用时轮询仍可读取同一状态。需要停止时调用 `ligule_run_cancel`。工具参数以运行中的 `tools/list` schema 为准。进程重启后，可直接使用已有 `sessionId` 和 `runId`（或 `requestKey`）调用 `ligule_run_get`；无需先 `ligule_session_open`，也不会取得 Session 写锁。
 
 ## 操控者授权与会话设置
 
@@ -87,7 +87,7 @@ Windows 路径示例：
 
 `ligule_run`、`ligule_run_start` 可附带 1～128 字符的 `requestKey`，字符限定为 ASCII 字母、数字及 `.`、`_`、`:`、`-`。每个逻辑任务生成一个新键；响应丢失后沿用原键重试。同一工作区、Session 与授权调用方范围内，同键、相同输入及委派参数会复用原 `runId`；参数变化返回 `run_request_conflict`。之后默认设置变化不会改变原请求身份。不提供键则每次都是新任务。键不是跨会话访问凭据，接受记录仍在时不会自动过期。
 
-Host 会先把 Session 用户事件同步保存，再返回接受回执。`runId` 可跨控制器重启读取；`operationId` 只用于当前进程的查询、等待与取消。`ligule_run_get` 传入 `sessionId` 和 `runId`、`requestKey` 二者之一；不传 `offset` 只返回回执，传入后额外读取至多 8,192 个 UTF-16 字符的已校验终态 JSON，使用 `nextOffset` 继续读取。完整结果文件最多 16 MiB，跟随 Session 记录目录及其显式覆盖设置。结果文件缺失或变化会返回 `run_result_unavailable`。
+Host 会先把 Session 用户事件同步保存，再返回接受回执。`runId` 可跨控制器重启读取；`operationId` 只用于当前进程的查询、等待与取消。`ligule_run_get` 可只读查询授权项目中已有 Session 的记录，不会打开写入方；Host 仍会校验项目归属、有效 Grant 和调用方可见的 Run 范围。调用时传入 `sessionId` 和 `runId`、`requestKey` 二者之一；不传 `offset` 只返回回执，传入后额外读取至多 8,192 个 UTF-16 字符的已校验终态 JSON，使用 `nextOffset` 继续读取。完整结果文件最多 16 MiB，跟随 Session 记录目录及其显式覆盖设置。结果文件缺失或变化会返回 `run_result_unavailable`。
 
 只读回执查询不会接管写锁或运行模型。原所有者不可联系时，未完成接受记录的存活状态为未知；只有合法取得写锁的 Session 恢复流程才能把它标记为 `interrupted`。中断任务和同键重试不会自动重放工具；内存消息队列与待决审批也不会在重启后恢复。旧记录与不带键的调用保持兼容。
 

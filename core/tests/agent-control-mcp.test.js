@@ -104,6 +104,8 @@ test('a real stdio MCP process uses its grant ceiling and detects revocation', a
       assert.ok(listed.tools.some((tool) => tool.name === 'ligule_session_create'));
       assert.ok(listed.tools.some((tool) => tool.name === 'ligule_run_await'));
       assert.equal(listed.tools.some((tool) => tool.name.includes('agent-control.create')), false);
+      const receiptTool = listed.tools.find((tool) => tool.name === 'ligule_run_get');
+      assert.match(receiptTool?.description ?? '', /without opening its writer/u);
 
       const made = await client.callTool({
         name: 'ligule_session_create',
@@ -113,11 +115,11 @@ test('a real stdio MCP process uses its grant ceiling and detects revocation', a
       const sessionId = made.structuredContent.sessionId;
       assert.equal(typeof sessionId, 'string');
 
-      const unownedRun = await client.callTool({ name: 'ligule_run_get', arguments: {
+      const missingSessionRun = await client.callTool({ name: 'ligule_run_get', arguments: {
         sessionId: 'session-not-opened-by-this-control', runId: 'run-not-owned',
       } });
-      assert.equal(unownedRun.isError, true);
-      assert.equal(codeOf(unownedRun), 'session_not_open');
+      assert.equal(missingSessionRun.isError, true);
+      assert.equal(codeOf(missingSessionRun), 'session_not_found');
 
       const config = await client.callTool({ name: 'ligule_session_configure', arguments: { sessionId } });
       assert.equal(config.isError, undefined, `${JSON.stringify(config)}\n${stderr()}`);
@@ -382,6 +384,15 @@ test('Desktop human input and question answers reach the single MCP-owned real H
       assert.equal(humanResult.isError, undefined, `${JSON.stringify(humanResult)}\n${stderr()}`);
       assert.equal(humanResult.structuredContent.receipt.runId, humanRunId);
       assert.equal(JSON.parse(humanResult.structuredContent.result.json).state, 'completed');
+
+      const closed = await client.callTool({ name: 'ligule_session_close', arguments: { sessionId } });
+      assert.equal(closed.isError, undefined, `${JSON.stringify(closed)}\n${stderr()}`);
+      const receiptAfterClose = await client.callTool({ name: 'ligule_run_get', arguments: {
+        sessionId, runId: humanRunId, offset: 0,
+      } });
+      assert.equal(receiptAfterClose.isError, undefined, `${JSON.stringify(receiptAfterClose)}\n${stderr()}`);
+      assert.equal(receiptAfterClose.structuredContent.receipt.runId, humanRunId);
+      assert.equal(JSON.parse(receiptAfterClose.structuredContent.result.json).state, 'completed');
     } finally {
       await host?.release();
       await client.close();
