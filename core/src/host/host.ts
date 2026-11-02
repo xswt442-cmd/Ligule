@@ -2966,9 +2966,11 @@ export function createHost({
         case 'session.close': {
           const state = sessions.get(sessionId);
           if (state === undefined) throw new KernelError('session_not_open', { detail: sessionId });
-          // 关闭前必须由客户端明确取消运行中的轮次，确保结果已记录。
+          // 关闭前必须等整个轮次（含最终化）结束，确保结果和待应用配置都已记录。
           if (state.permissionChanging) throw new KernelError('permission_change_in_progress', { detail: sessionId });
-          if (state.running !== undefined) throw new KernelError('run_already_running', { detail: sessionId });
+          if (state.running !== undefined || state.operation !== undefined) {
+            throw new KernelError('run_already_running', { detail: sessionId });
+          }
           await retire(state);
           evictEnvironment(state.environment);
           return { sessionId };

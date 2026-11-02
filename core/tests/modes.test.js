@@ -3,15 +3,16 @@
 // 提供方只用来把请求体交回来看见 tools 那一栏，没有假实现。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { setTimeout } from 'node:timers/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import {
   applyMode, createConfig, createConnection, createKernel, createMemoryConnectionPair, createSkillPlugin, DEFAULT_MODE,
-  loadAssembly, loadMode, MESSAGES_CAPABILITIES, minimalPlugin, modeDirectories, serveHost,
+  loadAssembly, loadMode, MESSAGES_CAPABILITIES, minimalPlugin, modeDirectories, serveHost, createSessionLog,
 } from '../dist/index.js';
+import { createHost } from '../dist/host/host.js';
 import { resolveModeSelection } from '../dist/kernel/modes.js';
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
@@ -330,6 +331,96 @@ test('a switch asked for during a round takes effect only once that round ends',
       release?.();
       pair.client.output.end();
       host.release();
+    }
+  });
+});
+
+test('session close cannot retire a session while execute is settling a pending mode', async () => {
+  await withLayout(async ({ directories, projectRoot }) => {
+    await writeMode(directories, 'user', 'readonly', complete('["read"]'));
+    await writeMode(directories, 'user', 'wide', complete('["read", "find"]'));
+    const sessionDirectory = join(projectRoot, '.ligule', 'sessions');
+    const sessionId = 'settling-mode-session';
+    const seeded = createSessionLog({ directory: sessionDirectory, id: sessionId, meta: { projectRoot } });
+    try {
+      for (let round = 0; round < 3; round += 1) {
+        await seeded.append({ kind: 'user', text: `question ${round} ${'x'.repeat(4_000)}` });
+        await seeded.append({ kind: 'assistant', text: `answer ${round} ${'y'.repeat(4_000)}`, toolCalls: [] });
+      }
+    } finally {
+      await seeded.close();
+    }
+    const config = createConfig({
+      user: {
+        boundary: projectRoot,
+        host: { sessionDirectory },
+        model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' },
+        limits: { contextTokens: 5_000, compactThresholdRatio: 0.8, compactRetainRatio: 0.05, resultBytes: 16_000 },
+        policy: { mode: 'ask' },
+      },
+    });
+    let releaseSummary;
+    let summaryStarted;
+    const started = new Promise((resolve) => { summaryStarted = resolve; });
+    const summaryResponse = new Promise((resolve) => { releaseSummary = resolve; });
+    const provider = {
+      capabilities: MESSAGES_CAPABILITIES,
+      model: 'test-model',
+      async *stream(request) {
+        if (String(request.messages?.[0]?.text ?? '').startsWith('Write a summary')) {
+          summaryStarted();
+          await summaryResponse;
+          yield { type: 'text', text: 'A concise summary of the completed turns.' };
+        } else {
+          yield { type: 'text', text: 'ok' };
+        }
+      },
+    };
+    let host;
+    let closeAttempt;
+    let releaseHost;
+    let settlingObserved = false;
+    const connection = {
+      request: async () => { throw new Error('unexpected_host_request'); },
+      notify(message) {
+        if (message.notify !== 'progress' || message.sessionId !== sessionId || message.progress?.phase !== 'settling') return;
+        settlingObserved = true;
+        closeAttempt = host.handle({ method: 'session.close', params: { sessionId } }, connection).then(
+          (value) => ({ value }),
+          (error) => ({ error }),
+        );
+        // host.handle 的 activeDelegation await 已排入 close continuation；先让它登记 retire，再启动 shutdown。
+        queueMicrotask(() => { releaseHost = host.release(); });
+      },
+    };
+    host = createHost({
+      config,
+      provider,
+      policy: config.policy,
+      modeName: 'readonly',
+      modePaths: directories,
+      skillRegistry: { skills: [], diagnostics: [] },
+    });
+
+    try {
+      await host.handle({ method: 'session.open', params: { sessionId, projectRoot } }, connection);
+      const running = host.handle({ method: 'session.compact', params: { sessionId } }, connection);
+      await started;
+      const mode = await host.handle({ method: 'mode.set', params: { sessionId, name: 'wide' } }, connection);
+      assert.equal(mode.pending, 'wide');
+
+      releaseSummary();
+      await running;
+      assert.equal(settlingObserved, true);
+      assert.equal((await closeAttempt).error?.code, 'run_already_running');
+      await releaseHost;
+
+      const events = (await readFile(join(sessionDirectory, `${sessionId}.jsonl`), 'utf8'))
+        .trim().split('\n').map((line) => JSON.parse(line));
+      assert.deepEqual(events.filter((event) => event.kind === 'mode').map((event) => event.name), ['readonly', 'wide']);
+    } finally {
+      releaseSummary();
+      await host.release();
     }
   });
 });
