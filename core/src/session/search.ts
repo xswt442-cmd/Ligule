@@ -4,7 +4,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { KernelError } from '../errors.js';
-import { SPILL_NAME } from '../kernel/result.js';
+import { SPILL_NAME } from './spill.js';
 import { listSessions } from './list.js';
 import type { SessionEvent } from './format.js';
 import { foldLabel } from './format.js';

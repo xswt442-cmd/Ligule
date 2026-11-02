@@ -4,7 +4,7 @@ import { copyFile, link, lstat, mkdir, open, readdir, readFile, realpath, rm, st
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname, join, resolve } from 'node:path';
 import { dataRoot } from '../kernel/config-file.js';
-import { SPILL_NAME } from '../kernel/result.js';
+import { SPILL_NAME } from './spill.js';
 import { KernelRuntimeError } from '../errors.js';
 import { workspaceIdentity } from '../kernel/workspace.js';
 import { acquireSessionLock } from './lock.js';

@@ -4,7 +4,8 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { KernelError } from '../kernel/error.js';
-import { resultLimit, SPILL_NAME } from '../kernel/result.js';
+import { resultLimit } from '../kernel/result.js';
+import { SPILL_NAME } from '../session/spill.js';
 import { loadCheckpointFile, type CompactionBlock } from '../session/checkpoint.js';
 import { compressibleRange, flatten, SUMMARY_SPILL_NAME } from '../session/compaction.js';
 import { estimateTokens, type ProviderCacheUsage } from '../session/usage.js';

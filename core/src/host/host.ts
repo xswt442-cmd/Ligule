@@ -56,7 +56,7 @@ import { controllerScopeOf, mayRecordHumanRun, maySetPermission, requirePermissi
 import { usageEvent } from '../session/usage.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel } from '../session/format.js';
-import { SPILL_NAME } from '../kernel/result.js';
+import { SPILL_NAME } from '../session/spill.js';
 import { assertNoLegacyTrashConfig, boundaryOf, limitsOf, workingDirectoryOf } from '../capability/limits.js';
 import { resolveWithin } from '../capability/paths.js';
 import { createManagedProcessRegistry, managedProcessPlugin, type ManagedProcessRegistry } from '../capability/managed-process.js';

@@ -3,7 +3,7 @@
 // 超长触发只在服务端报告上下文超限后执行；一次运行最多压缩并重试一次。原始事件日志保持不变。
 import { createHash } from 'node:crypto';
 import { createBlock, createCheckpointFile, loadCheckpointFile, PROJECTED_KINDS, writeCheckpointFile, type CompactionBlock } from './checkpoint.js';
-import { spillContent } from '../kernel/result.js';
+import { spillContent } from './spill.js';
 import { KernelError } from '../errors.js';
 import type { SessionEvent } from './format.js';
 import { estimateRequest, estimateTokens, usageEvent, type ProviderCacheUsage } from './usage.js';
