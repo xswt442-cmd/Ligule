@@ -6,7 +6,7 @@
 // 该工具通过插件注册，不属于 Kernel 内置能力。每个父会话最多同时运行三个派生任务。
 import { randomUUID } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
-import { createKernel } from '../kernel/kernel.js';
+import { createKernel, type Kernel } from '../kernel/kernel.js';
 import { createLoop, DEFAULT_LOOP_LIMITS, type LoopLimits } from '../kernel/loop.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { createSessionLog } from '../session/session.js';
@@ -21,7 +21,7 @@ import {
 import { createConfig } from '../kernel/config.js';
 import { createDecisionChain } from '../kernel/policy.js';
 import { createLogger } from '../kernel/log.js';
-import { loadAssembly } from '../kernel/assembly.js';
+import { loadAssembly, type Plugin } from '../kernel/assembly.js';
 import { KernelError, KernelRuntimeError } from '../kernel/error.js';
 import { runSummary } from '../kernel/run-summary.js';
 import type { TaskBudget } from '../kernel/task-budget.js';
@@ -64,6 +64,8 @@ export interface SubagentDeps {
   sessionId: string;
   logger?: Parameters<typeof createLogger>[0];
   plugins: Parameters<typeof loadAssembly>[1];
+  /** Custom user tools inherit into the child after its built-ins have registered. */
+  customToolPlugin?: Plugin<Kernel>;
   modePaths?: ModeDirectories;
   modeFile?: () => ModeFile | undefined;
   promptFragments?: () => readonly ModePromptFragment[];
@@ -253,6 +255,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
                   supportsImages: () => provider.imageInput === true,
                   authorize: authorizeScreenCapture,
                 })] : []),
+                ...(deps.customToolPlugin === undefined ? [] : [deps.customToolPlugin]),
               ]);
               disposeAssembly = () => assembly.dispose();
               let structuredSubmitted = false;

@@ -1021,21 +1021,31 @@ command = "echo"
 args = ["ok"]
 parameters = { type = "object", properties = {} }
 `);
+  await writeFile(join(tools, 'shadow-present.toml'), `name = "present"
+description = "Conflicts with the built-in present tool."
+command = "echo"
+args = ["ok"]
+parameters = { type = "object", properties = {} }
+`);
   process.env.LIGULE_HOME = data;
   process.env.USERPROFILE = data;
   process.env.HOME = data;
   try {
-    await withInProcessHost(async (connection, { sessionId }) => {
+    await withInProcessHost(async (connection) => {
       const catalog = await connection.request('settings.catalog', {});
       assert.ok(catalog.tools.some((tool) => tool.name === 'custom-lookup' && tool.source === 'custom'));
       assert.ok(catalog.tools.some((tool) => tool.name === 'read' && tool.source === 'builtin'));
       assert.deepEqual(catalog.customToolDiagnostics, [
+        { code: 'custom_tool_name_conflicts_with_registered_tool', source: 'shadow-present.toml' },
         { code: 'custom_tool_name_conflicts_with_registered_tool', source: 'shadow-read.toml' },
       ]);
+      const { sessionId } = await connection.request('session.create', {});
       const active = await connection.request('settings.catalog', { sessionId });
       assert.ok(active.tools.some((tool) => tool.name === 'custom-lookup' && tool.source === 'custom'));
+      assert.ok(active.tools.some((tool) => tool.name === 'present' && tool.source === 'builtin'));
       assert.ok(active.tools.some((tool) => tool.name === 'read' && tool.source === 'builtin'));
       assert.deepEqual(active.customToolDiagnostics, catalog.customToolDiagnostics);
+      await connection.request('session.close', { sessionId });
     }, undefined, { permissionControl: true, plugins: [minimalPlugin] });
   } finally {
     if (previousHome === undefined) delete process.env.LIGULE_HOME;

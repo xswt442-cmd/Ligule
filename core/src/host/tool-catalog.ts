@@ -29,13 +29,14 @@ interface SettingsToolCatalogOptions {
   readonly modePaths?: ModeDirectories;
   readonly skills: SkillRegistry;
   readonly plugins: readonly Plugin<Kernel>[];
+  readonly customToolPlugin?: Plugin<Kernel>;
   readonly searchPlugin?: Plugin<Kernel>;
   readonly mcpConfigs: ReturnType<typeof mcpServerConfigs>;
   readonly interactive: boolean;
 }
 
 export async function settingsToolCatalog({ config, provider, policy, directory, modePaths, skills, plugins,
-  searchPlugin, mcpConfigs, interactive }: SettingsToolCatalogOptions): Promise<ReturnType<Kernel['catalog']>> {
+  customToolPlugin, searchPlugin, mcpConfigs, interactive }: SettingsToolCatalogOptions): Promise<ReturnType<Kernel['catalog']>> {
   const kernel = createKernel({ config });
   const mcp = createMcpRegistry(mcpConfigs, { toolPolicy: browserToolPolicy });
   const managedProcesses = createManagedProcessRegistry();
@@ -62,8 +63,10 @@ export async function settingsToolCatalog({ config, provider, policy, directory,
       directory,
       sessionId: 'settings-catalog',
       plugins: basePlugins,
+      customToolPlugin,
       modePaths,
     }),
+    ...(customToolPlugin === undefined ? [] : [customToolPlugin]),
   ];
   const assembly = loadAssembly(kernel, catalogPlugins);
   try {

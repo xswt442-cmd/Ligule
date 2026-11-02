@@ -843,11 +843,24 @@ export function createHost({
     return [...servers, ...(browser.server === undefined ? [] : [browser.server])];
   }
 
+  function customToolsPluginOf(customTools: Awaited<ReturnType<typeof discoverCustomTools>>) {
+    if (customTools.tools.length === 0) return undefined;
+    return createCustomToolsPlugin(customTools.tools, (name) => {
+      const path = customTools.sources[name] ?? name;
+      const code = 'custom_tool_name_conflicts_with_registered_tool';
+      if (!customTools.diagnostics.some((diagnostic) => diagnostic.code === code && diagnostic.path === path)) {
+        customTools.diagnostics.push({ code, path, detail: `${name} conflicts with an already registered tool` });
+        logger?.log?.('custom tool is not loaded', { code, path });
+      }
+    });
+  }
+
   // Settings can inspect the Host-configured runtime registry before opening a conversation.
   // Assemble metadata and check configured credential availability without running tools or connecting MCP.
   async function settingsToolCatalog(env: ProjectEnvironment, skills: SkillRegistry, customTools: Awaited<ReturnType<typeof discoverCustomTools>>): Promise<ReturnType<Kernel['catalog']>> {
     const search = await createSearchSupport(env.config, env.layers);
     await browserForEnvironment(env);
+    const customToolPlugin = customToolsPluginOf(customTools);
     return await buildSettingsToolCatalog({
       config: env.config,
       provider: env.provider,
@@ -855,12 +868,8 @@ export function createHost({
       directory: env.directory,
       modePaths: env.modePaths,
       skills,
-      plugins: [
-        ...plugins,
-        ...(customTools.tools.length === 0 ? [] : [createCustomToolsPlugin(customTools.tools, (name) => {
-          customTools.diagnostics.push({ code: 'custom_tool_name_conflicts_with_registered_tool', path: customTools.sources[name] ?? name, detail: `${name} conflicts with an already registered tool` });
-        })]),
-      ],
+      plugins,
+      customToolPlugin,
       searchPlugin: search.plugin,
       mcpConfigs: env.mcpConfigs,
       interactive,
@@ -1994,13 +2003,10 @@ export function createHost({
     for (const diagnostic of customTools.diagnostics) {
       logger?.log?.('custom tool is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
     }
+    const customToolPlugin = customToolsPluginOf(customTools);
+    const childCustomToolPlugin = customTools.tools.length === 0 ? undefined : createCustomToolsPlugin(customTools.tools);
     const loaded = [
       ...plugins,
-      ...(customTools.tools.length === 0 ? [] : [createCustomToolsPlugin(customTools.tools, (name) => {
-        const diagnostic = { code: 'custom_tool_name_conflicts_with_registered_tool', path: customTools.sources[name] ?? name, detail: `${name} conflicts with an already registered tool` };
-        customTools.diagnostics.push(diagnostic);
-        logger?.log?.('custom tool is not loaded', { code: diagnostic.code, path: diagnostic.path, reason: diagnostic.detail });
-      })]),
       ...(skills.skills.length === 0 ? [] : [createSkillPlugin(skills, () => mcp.servers())]),
     ];
     // 加载器负责发现提示模板并处理项目优先级；模板由 Host 展开，确保所有客户端使用相同规则。
@@ -2061,7 +2067,9 @@ export function createHost({
       session,
       directory,
       id,
-    }), createSubagentPlugin({
+    }),
+      ...(customToolPlugin === undefined ? [] : [customToolPlugin]),
+      createSubagentPlugin({
       config,
       provider: live,
       chain,
@@ -2070,6 +2078,7 @@ export function createHost({
       sessionId: id,
       logger,
       plugins: basePlugins,
+      customToolPlugin: childCustomToolPlugin,
       authorizeScreenCapture,
       taskBudget: () => state.taskBudget,
       telemetry,
