@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ApprovalCard, type Ask } from './ApprovalCard';
 import { QuestionCard, type QuestionAsk, type QuestionDrafts } from './QuestionCard';
 import { Modal } from './ui';
@@ -119,6 +119,7 @@ export function ExternalSessionControlPanel({ client, sessionId, projectRoot, ve
   const [note, setNote] = useState<{ text: string; bad: boolean } | null>(null);
   const [confirmTakeover, setConfirmTakeover] = useState(false);
   const [approvalDetails, setApprovalDetails] = useState<Record<string, { args?: Record<string, unknown>; error?: string; loading?: boolean }>>({});
+  const observedExternalControl = useRef(false);
 
   useEffect(() => {
     let disposed = false;
@@ -161,6 +162,7 @@ export function ExternalSessionControlPanel({ client, sessionId, projectRoot, ve
           else if (event.kind === 'session.event' && typeof event.eventKind === 'string') onSessionEvent(event.eventKind);
         }
         cursor = Math.max(cursor, result.nextCursor);
+        observedExternalControl.current = true;
         setSnapshot(result);
         onRuntimeAvailability(sessionId, true);
         setNote((current) => current?.bad === true ? null : current);
@@ -232,7 +234,9 @@ export function ExternalSessionControlPanel({ client, sessionId, projectRoot, ve
   const project = projectRoot.split(/[\\/]/u).filter(Boolean).at(-1) ?? '';
   const phase = phaseLabel(snapshot, t);
 
-  if (snapshot === null) return null;
+  if (snapshot === null) return !observedExternalControl.current || note === null ? null : <section className="external-control" aria-label={t('外控会话控制', 'External session controls')}>
+    <p className="external-control-note bad" role="alert">{note.text}</p>
+  </section>;
 
   return <section className="external-control" aria-label={t('外控会话控制', 'External session controls')}>
     <div className="external-control-head">
@@ -308,15 +312,16 @@ function networkName(value: string | undefined, t: (chinese: string, english: st
   }
 }
 
-export function ExternalSessionComposer({ client, sessionId, projectRoot }: {
+export function ExternalSessionComposer({ client, sessionId, projectRoot, draft, onDraftChange }: {
   client: Client;
   sessionId: string;
   projectRoot: string;
+  draft: string;
+  onDraftChange: (draft: string) => void;
 }) {
   const t = useText();
   const [status, setStatus] = useState<Status | null>(null);
   const [configurationFailed, setConfigurationFailed] = useState(false);
-  const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ text: string; bad: boolean } | null>(null);
 
@@ -360,7 +365,7 @@ export function ExternalSessionComposer({ client, sessionId, projectRoot }: {
         sessionId,
         request: { action: 'send', input: draft },
       }, 35_000) as { queued?: boolean };
-      setDraft('');
+      onDraftChange('');
       setNote({
         text: result.queued === true
           ? t('消息已加入外控会话队列。', 'Message queued for the external session.')
@@ -422,7 +427,7 @@ export function ExternalSessionComposer({ client, sessionId, projectRoot }: {
       rows={2}
       aria-label={t('发送消息到外控会话', 'Send a message to the external session')}
       placeholder={t('给外控 Agent 补充信息', 'Send guidance to the external agent')}
-      onChange={(event) => setDraft(event.target.value)}
+      onChange={(event) => onDraftChange(event.target.value)}
       onKeyDown={(event) => {
         if (event.nativeEvent.isComposing || event.key !== 'Enter' || event.shiftKey) return;
         event.preventDefault();

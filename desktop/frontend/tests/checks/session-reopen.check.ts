@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { reopenSessionWriter } from '../../src/session-reopen.ts';
+import { requestIsCurrent } from '../../src/request-identity.ts';
 
 const code = (error: unknown): string => (error as { code?: string }).code ?? String(error);
 const locked = (failure: string): boolean => failure === 'session_locked';
@@ -110,4 +111,11 @@ test('reopening does not continue with a stale session after an open resolves', 
   current = false;
   resolveOpen();
   assert.deepEqual(await pending, { kind: 'cancelled' });
+});
+
+test('a new open generation invalidates a delayed request even after returning to its Session', () => {
+  const original = { scope: 'session-a', generation: 7 };
+  assert.equal(requestIsCurrent(original, 'session-a', 7), true);
+  assert.equal(requestIsCurrent(original, 'session-b', 8), false);
+  assert.equal(requestIsCurrent(original, 'session-a', 9), false, 'A→B→A is a new request generation');
 });

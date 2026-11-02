@@ -12,6 +12,7 @@ import { QuitSheet } from './components/QuitSheet';
 import { holdReasons, report as reportEdit, type EditGate } from './edit-gate';
 import { approvalSession, toApprovalAsk, type ApprovalRequestParams } from './approval-request';
 import { reopenSessionWriter } from './session-reopen';
+import { requestIsCurrent, type RequestIdentity } from './request-identity';
 import { blockedSessions, type QuitInput, type QuitRow } from './quit';
 import { SessionRail } from './components/SessionRail';
 import type { SearchHit } from './components/rail/types';
@@ -37,6 +38,7 @@ import { LocaleProvider, localeOf } from './locale';
 import { notificationOf, notificationTarget, type NotificationKind, type NotificationTarget } from './notifications';
 import { SessionStreamBuffer } from './session-stream';
 import { observeExternalSession } from './external-session-observation';
+import { externalSessionDraftFor, updateExternalSessionDrafts, type ExternalSessionDrafts } from './external-session-drafts';
 import { Composer } from './components/Composer';
 import { ExternalSessionComposer, ExternalSessionControlPanel } from './components/ExternalSessionControlPanel';
 import type { MentionState } from './mentions';
@@ -230,6 +232,7 @@ export function App({ transport }: { transport: Transport }) {
   const [writerLockNoticeSessionId, setWriterLockNoticeSessionId] = useState<string | null>(null);
   const [sessionWriterActive, setSessionWriterActive] = useState(false);
   const [externalControlSessionId, setExternalControlSessionId] = useState<string | null>(null);
+  const [externalSessionDrafts, setExternalSessionDrafts] = useState<ExternalSessionDrafts>(() => new Map());
   const saveWarned = useRef(false);
   // Host 重连期间暂停发送队列，也不触发轮次结束后的自动发送。
   const reconnecting = useRef(false);
@@ -368,6 +371,7 @@ export function App({ transport }: { transport: Transport }) {
   const opening = useRef<string | null>(null);
   // 每次打开会话都生成新的请求编号，避免 A→B→A 时旧请求释放新请求的输入保护。
   const openRequest = useRef(0);
+  const renderedSessionRequest: RequestIdentity = { scope: sessionId, generation: openRequest.current };
   // 短暂高亮定位目标，帮助用户在长转录中确认跳转位置。
   const [flash, setFlash] = useState<number | null>(null);
   // 按调用 ID 记录派发时间，用于计算工具运行耗时。
@@ -432,13 +436,17 @@ export function App({ transport }: { transport: Transport }) {
   // Host 进程的启动和重启由 Electron 壳负责。
   const beat = useCallback(async (timeoutMs = 5_000) => {
     if (sessionId === null) return;
+    const request: RequestIdentity = { scope: sessionId, generation: openRequest.current };
+    const isCurrent = () => requestIsCurrent(request, active.current, openRequest.current);
     try {
       if (readOnlySessionId === sessionId) {
         await client.call('session.observe', { projectRoot, sessionId, limit: 1 }, timeoutMs);
       } else await client.call('status.get', { sessionId }, timeoutMs);
+      if (!isCurrent()) return;
       connectionLost.current = false;
       setLink(null);
     } catch (error) {
+      if (!isCurrent()) return;
       if (!connectionLost.current) notify('disconnected');
       connectionLost.current = true;
       setLink(code(error));
@@ -679,14 +687,16 @@ export function App({ transport }: { transport: Transport }) {
   }, [client, notify, transport]);
 
   const refreshStatus = useCallback(async (id: string) => {
+    const request: RequestIdentity = { scope: id, generation: openRequest.current };
+    const isCurrent = () => requestIsCurrent(request, active.current, openRequest.current);
     try {
       const next = await client.call('status.get', { sessionId: id }) as Status;
       // 用户已切换会话时，不将该请求的响应写入当前会话状态。
-      if (active.current !== id) return;
+      if (!isCurrent()) return;
       setStatus(next);
       setTaskSnapshotAt(Date.now());
     } catch (error) {
-      if (active.current === id) setRows((current) => [...current, metaRow('error', `无法读取状态：${code(error)}`, `Could not load status: ${code(error)}`)]);
+      if (isCurrent()) setRows((current) => [...current, metaRow('error', `无法读取状态：${code(error)}`, `Could not load status: ${code(error)}`)]);
     }
   }, [client]);
 
@@ -983,6 +993,8 @@ export function App({ transport }: { transport: Transport }) {
   // 新 Host 通过 `session.open` 恢复当前会话，并将暂停队列移回草稿，不自动发送。
   const reconnect = useCallback(async () => {
     if (reconnecting.current) return;
+    const request: RequestIdentity = { scope: sessionId, generation: openRequest.current };
+    const isCurrent = () => requestIsCurrent(request, active.current, openRequest.current);
     reconnecting.current = true;
     client.discard('host_restarted');
     setAsks([]);
@@ -993,7 +1005,7 @@ export function App({ transport }: { transport: Transport }) {
       try {
         await transport.restart?.();
       } catch (error) {
-        setRows((current) => [...current, metaRow('error', `无法启动后端：${code(error)}`, `Could not start the host: ${code(error)}`)]);
+        if (isCurrent()) setRows((current) => [...current, metaRow('error', `无法启动后端：${code(error)}`, `Could not start the host: ${code(error)}`)]);
         return;
       }
       // Host restart invalidates an in-flight preference write. Reload its version and saved values
@@ -1014,8 +1026,8 @@ export function App({ transport }: { transport: Transport }) {
       );
       prefsSettled.current = refreshedPreferences;
       await refreshedPreferences;
+      if (!isCurrent()) return;
       if (sessionId !== null) {
-        if (active.current !== sessionId) return;
         // Host 被强制结束后，记录锁可能要等租约过期；重试预算比租约略长，仍拿不到就明确提示。
         await reopenSessionWriter({
           open: () => client.call('session.open', projectRoot === '' ? { sessionId } : { sessionId, projectRoot }, 60_000).then(() => undefined),
@@ -1024,17 +1036,19 @@ export function App({ transport }: { transport: Transport }) {
           now: () => Date.now(),
           sleep: (ms) => new Promise((done) => setTimeout(done, ms)),
           budgetMs: 15_000,
-          isCurrent: () => active.current === sessionId,
+          isCurrent,
         });
-        if (active.current !== sessionId) return;
+        if (!isCurrent()) return;
         await openSession(sessionId, undefined, true);
       } else {
         try {
           await client.call('workspaces.list', {}, 60_000);
+          if (!isCurrent()) return;
           connectionLost.current = false;
           setLink(null);
           setSessionsRevision((current) => current + 1);
         } catch (error) {
+          if (!isCurrent()) return;
           setLink(code(error));
           setRows((current) => [...current, metaRow('error', `无法重新连接后端：${code(error)}`, `Could not reconnect to the host: ${code(error)}`)]);
         }
@@ -1680,7 +1694,8 @@ export function App({ transport }: { transport: Transport }) {
         {running && <span className="running-label" aria-live="polite" title={progressLabel}><span className="status-dot" /><span className="running-detail">{progressLabel}</span></span>}
         {status?.usage && <UsageMeter usage={status.usage} running={running} seconds={seconds} />}
         {sessionId !== null && <BrowserControl key={`${sessionId}:${observingExternalSession ? 'read-only' : 'managed'}`} client={client} sessionId={sessionId} browser={status?.browser}
-        readOnly={observingExternalSession} onStatus={(next) => { if (active.current === next.sessionId) { setStatus(next); setTaskSnapshotAt(Date.now()); } }} />}
+        readOnly={observingExternalSession} onStatus={(next) => { if (next.sessionId === renderedSessionRequest.scope
+          && requestIsCurrent(renderedSessionRequest, active.current, openRequest.current)) { setStatus(next); setTaskSnapshotAt(Date.now()); } }} />}
         <button className="icon-button" type="button" title={`${t('命令面板', 'Command palette')} (${formatKeys(CURRENT['palette'])})`} aria-label={t('命令面板', 'Command palette')} onClick={() => setPaletteOpen(true)}><Icon name="search" size={17} /></button>
         {sessionId !== null && <SessionActions key={sessionId} client={client} sessionId={sessionId} name={sessionLabel.name} archived={sessionLabel.archived}
           readOnly={observingExternalSession}
@@ -1700,8 +1715,8 @@ export function App({ transport }: { transport: Transport }) {
             : t('另一个 Host 正在写入此会话。当前为只读观察；锁释放后可重新打开会话。', 'Another Host is writing to this conversation. This view is read-only; reopen it after the lock clears.')
           : t('此会话当前没有活动写入者。刷新会话可重新打开并取得控制权。', 'This session has no active writer. Refresh to reopen it and take control.')}
           {writerLockNoticeSessionId === sessionId && <> {t(
-            '先前的宿主仍持有会话写入锁；锁释放后重新打开会话即可恢复写入。',
-            'The previous Host still holds the session writer lock. Reopen the conversation after it clears to regain write access.',
+            '会话写入锁仍被占用；锁释放后重新打开会话即可恢复写入。',
+            'The session writer lock is still held. Reopen the conversation after it clears to regain write access.',
           )}</>}</span>
         <button type="button" onClick={() => { if (sessionId !== null) void openSession(sessionId, undefined, false, projectRoot); }}>
           {sessionWriterActive ? t('刷新观察', 'Refresh view') : t('重新打开', 'Reopen session')}
@@ -1781,7 +1796,9 @@ export function App({ transport }: { transport: Transport }) {
       </div>}
 
       {observingExternalSession && sessionWriterActive && externalControlSessionId === sessionId && sessionId !== null
-        ? <ExternalSessionComposer client={client} sessionId={sessionId} projectRoot={projectRoot} />
+        ? <ExternalSessionComposer key={`external-session-composer:${sessionId}`} client={client} sessionId={sessionId} projectRoot={projectRoot}
+            draft={externalSessionDraftFor(externalSessionDrafts, sessionId)}
+            onDraftChange={(value) => setExternalSessionDrafts((current) => updateExternalSessionDrafts(current, sessionId, value))} />
         : <Composer
         client={client}
         sessionId={sessionId}
@@ -1826,7 +1843,8 @@ export function App({ transport }: { transport: Transport }) {
           setNewSessionPermission(target);
           setNewSessionPermissionConfirmations(confirmations);
         }}
-        onPermissionStatus={(next) => { if (active.current === next.sessionId) { setStatus(next); setTaskSnapshotAt(Date.now()); } }}
+        onPermissionStatus={(next) => { if (next.sessionId === renderedSessionRequest.scope
+          && requestIsCurrent(renderedSessionRequest, active.current, openRequest.current)) { setStatus(next); setTaskSnapshotAt(Date.now()); } }}
         onStop={() => void cancel()}
         onSend={() => void send()}
       />}
@@ -1856,7 +1874,8 @@ export function App({ transport }: { transport: Transport }) {
       keyNotice={keyNotice}
       link={link}
       logs={diagnosticLogs}
-      onStatus={(next) => { if (active.current === next.sessionId) { setStatus(next); setTaskSnapshotAt(Date.now()); } }}
+      onStatus={(next) => { if (next.sessionId === renderedSessionRequest.scope
+        && requestIsCurrent(renderedSessionRequest, active.current, openRequest.current)) { setStatus(next); setTaskSnapshotAt(Date.now()); } }}
       counts={panelProps.counts}
       waiting={panelProps.waiting}
       onReconnect={() => void reconnect()}

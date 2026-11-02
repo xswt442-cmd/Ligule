@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { code, type Client } from '../protocol';
 import { useText } from '../locale';
 import { Icon } from './Icon';
@@ -7,6 +7,7 @@ import { GrantOverview } from './GrantOverview';
 import { applyGrantPreset, grantPreset, grantPresets, type GrantPresetId } from '../agent-control-presets';
 import type { Grant, NetworkLimit, PermissionProfile, PolicySelection } from './agent-control-types';
 import { createGrantRequest, emptyGrantDraft, grantDraftFlags, grantReady, grantState, limitsReady, sameProjectPath, type GrantDraft } from '../agent-control-draft';
+import { requestIsCurrent } from '../request-identity';
 type Snapshot = { version: string; grants: Grant[] };
 type WorkspaceRoster = { default: string | null; workspaces: { identity: string; directory: string; name: string }[] };
 type McpTool = { name: string; description: string; digest: string };
@@ -34,6 +35,9 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
   const [mcpDetailsOpen, setMcpDetailsOpen] = useState(false);
   const [workspaceRoster, setWorkspaceRoster] = useState<WorkspaceRoster>({ default: null, workspaces: [] });
   const [selectedProject, setSelectedProject] = useState(projectRoot.trim());
+  const selectedProjectRef = useRef(projectRoot.trim());
+  const projectGeneration = useRef(0);
+  const loadGeneration = useRef(0);
   const [selectedGrantId, setSelectedGrantId] = useState('');
   const project = selectedProject.trim();
   const { profileExceeds, networkExceeds, policyMissing, mcpLimitInvalid, invalidExpiry } = grantDraftFlags(draft);
@@ -51,9 +55,25 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
     return () => onEdit('');
   }, [held, onEdit]);
 
+  const selectProject = useCallback((directory: string) => {
+    const next = directory.trim();
+    if (selectedProjectRef.current !== next) {
+      selectedProjectRef.current = next;
+      projectGeneration.current += 1;
+      loadGeneration.current += 1;
+      setMcpTools({});
+      setMcpServers([]);
+      setMcpLoading(null);
+    }
+    setSelectedProject(directory);
+    setSelectedGrantId('');
+    setNote(null);
+  }, []);
+
   useEffect(() => {
-    setSelectedProject((current) => current === '' ? projectRoot.trim() : current);
-  }, [projectRoot]);
+    const root = projectRoot.trim();
+    if (selectedProjectRef.current === '' && root !== '') selectProject(root);
+  }, [projectRoot, selectProject]);
 
   const resetAdvancedDetails = () => {
     setPolicyDetailsOpen(false);
@@ -62,16 +82,25 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
   };
 
   const load = useCallback(async (keepNote = false) => {
+    const request = ++loadGeneration.current;
+    const scope = { scope: project, generation: projectGeneration.current };
+    const isCurrent = () => request === loadGeneration.current
+      && requestIsCurrent(scope, selectedProjectRef.current, projectGeneration.current);
     try {
       const result = await client.call('agent-control.list', {}, 15_000) as Snapshot;
+      if (!isCurrent()) return;
       setSnapshot(result);
       const roster = await client.call('workspaces.list', {}, 15_000).catch(() => null) as WorkspaceRoster | null;
+      if (!isCurrent()) return;
       if (roster !== null) {
         setWorkspaceRoster(roster);
         if (project === '') {
           const preferred = roster.workspaces.find((workspace) => workspace.identity === roster.default)?.directory
             ?? roster.workspaces[0]?.directory ?? '';
-          if (preferred !== '') setSelectedProject(preferred);
+          if (preferred !== '') {
+            selectProject(preferred);
+            return;
+          }
         }
       }
       const ownGrants = result.grants.filter((grant) => sameProjectPath(grant.projectRoot, project));
@@ -80,17 +109,20 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
       setMcpTools({});
       try {
         const mcp = await client.call('mcp.trust.list', project === '' ? {} : { projectRoot: project }, 15_000) as { servers: McpServer[] };
+        if (!isCurrent()) return;
         setMcpServers(mcp.servers);
       } catch (error) {
+        if (!isCurrent()) return;
         setMcpServers([]);
         setNote({ text: t('外控授权已读取；MCP 信任清单暂不可用。', 'Agent Control grants loaded; the MCP trust list is unavailable.'), code: code(error), bad: true });
         return;
       }
-      if (!keepNote) setNote(null);
+      if (!keepNote && isCurrent()) setNote(null);
     } catch (error) {
+      if (!isCurrent()) return;
       setNote({ text: t('无法读取本机外控授权。', 'Could not read local Agent Control grants.'), code: code(error), bad: true });
     }
-  }, [client, project, t]);
+  }, [client, project, selectProject, t]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -101,17 +133,21 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
   };
 
   const loadMcpTools = async (server: McpServer) => {
+    const request = { scope: project, generation: projectGeneration.current };
+    const isCurrent = () => requestIsCurrent(request, selectedProjectRef.current, projectGeneration.current);
     setMcpLoading(server.name);
     setNote(null);
     try {
       const result = await client.call('mcp.trust.tools', project === ''
         ? { server: server.name }
         : { projectRoot: project, server: server.name }, 30_000) as McpTools;
+      if (!isCurrent()) return;
       setMcpTools(current => ({ ...current, [server.name]: result }));
     } catch (error) {
+      if (!isCurrent()) return;
       setNote({ text: t(`无法读取 ${server.name} 的工具清单。`, `Could not read tools from ${server.name}.`), code: code(error), bad: true });
     } finally {
-      setMcpLoading(null);
+      if (isCurrent()) setMcpLoading(null);
     }
   };
 
@@ -232,9 +268,7 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
     <Group title={t('查看授权', 'Inspect grants')}>
       <Row label={t('工作区', 'Workspace')} note={t('只改变本页查看范围，不切换任何会话。', 'Changes this page’s view only; it does not switch any conversation.')}>
         <select value={project} disabled={busy || dirty} aria-label={t('查看外控授权的工作区', 'Workspace to inspect grants for')} onChange={(event) => {
-          setSelectedProject(event.target.value);
-          setSelectedGrantId('');
-          setNote(null);
+          selectProject(event.target.value);
         }}>
           {project === '' && <option value="">{t('Host 项目', 'Host project')}</option>}
           {workspaceOptions.map((workspace) => <option key={`${workspace.identity}:${workspace.directory}`} value={workspace.directory}>

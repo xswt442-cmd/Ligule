@@ -1510,7 +1510,7 @@ async function runChecks() {
         problems.push('ordinary_host_misidentified_as_external_agent');
       }
       const lockNoticeVisible = observed.statusBanners.some(text =>
-        /先前的宿主仍持有会话写入锁|previous Host still holds the session writer lock/u.test(text));
+        /会话写入锁仍被占用|session writer lock is still held/u.test(text));
       if (!lockNoticeVisible) problems.push('readonly_lock_notice_missing');
 
       const lockedAppHost = await hostProcessFor(applicationProcess.pid);

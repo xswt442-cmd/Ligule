@@ -77,7 +77,8 @@ async function check(name, action) {
     note(name, '通过', detail);
   } catch (error) {
     failed = true;
-    note(name, '失败', `交互未达到预期，位置 ${safeErrorLocation(error)}；只记录稳定错误码。`, stableErrorCode(error));
+    const diagnostic = typeof error?.diagnostic === 'string' ? `诊断：${error.diagnostic}。` : '';
+    note(name, '失败', `交互未达到预期，位置 ${safeErrorLocation(error)}；只记录稳定错误码。${diagnostic}`, stableErrorCode(error));
   }
 }
 
@@ -216,6 +217,10 @@ async function createApplication() {
         if (typeof frame.notify === 'string') safe.notify = frame.notify;
         if (typeof frame.sessionId === 'string') safe.sessionId = frame.sessionId;
         if (frame.result && typeof frame.result.sessionId === 'string') safe.createdSessionId = frame.result.sessionId;
+        if (frame.result && typeof frame.result.sessionId === 'string') safe.resultSessionId = frame.result.sessionId;
+        if (frame.result && typeof frame.result.operationId === 'string') safe.operationId = frame.result.operationId;
+        if (frame.result && typeof frame.result.state === 'string') safe.operationState = frame.result.state;
+        if (frame.result && Array.isArray(frame.result.pendingInteractions)) safe.pendingInteractionTypes = frame.result.pendingInteractions.map(item => item.type);
         if (frame.error && typeof frame.error.code === 'string') safe.errorCode = frame.error.code;
         if (frame.event && typeof frame.event.type === 'string') safe.deltaType = frame.event.type;
         if (frame.method === 'approval.request') safe.approvalTool = frame.params?.tool;
@@ -413,8 +418,41 @@ async function verifyExternalSessionControl() {
       input: 'desktop-external-control-question',
     } });
     if (started.isError === true) throw Object.assign(new Error(`external_control_run_start_failed:${mcpStderr.slice(-500)}`), { code: JSON.parse(started.content?.[0]?.text ?? '{}').code ?? 'external_control_run_start_failed' });
-
-    await waitFor(`document.querySelector('.external-control .question')?.textContent.includes('Choose a route') === true`, 15_000, 'external_control_question_not_visible');
+    const operationId = started.structuredContent?.operationId;
+    if (typeof operationId !== 'string') throw Object.assign(new Error('external_control_operation_id_missing'), { code: 'external_control_operation_id_missing' });
+    try {
+      await waitFor(`document.querySelector('.external-control .question')?.textContent.includes('Choose a route') === true`, 15_000, 'external_control_question_not_visible');
+    } catch (error) {
+      const latest = await mcpClient.callTool({ name: 'ligule_run_status', arguments: { operationId, after: 0, limit: 50 } });
+      const questionPending = latest.isError !== true
+        && latest.structuredContent?.pendingInteractions?.some(item => item.type === 'question' && item.sessionId === observerSessionId) === true;
+      let desktopStatus;
+      let desktopStatusError;
+      try {
+        desktopStatus = await requestHost('session.control', {
+          projectRoot: workspaceRoot,
+          sessionId: observerSessionId,
+          request: { action: 'status', after: 0, limit: 50, waitMs: 0 },
+        });
+      } catch (statusError) {
+        desktopStatusError = stableErrorCode(statusError);
+      }
+      const status = latest.structuredContent;
+      const diagnostic = JSON.stringify({
+        operationState: status?.state ?? null,
+        statusSessionMatches: status?.sessionId === observerSessionId,
+        questionPending,
+        pendingTypes: status?.pendingInteractions?.map(item => item.type) ?? [],
+        desktopStatusError: desktopStatusError ?? null,
+        desktopStatusMatches: desktopStatus?.resultSessionId === observerSessionId,
+        desktopOperationState: desktopStatus?.operationState ?? null,
+        desktopPendingTypes: desktopStatus?.pendingInteractionTypes ?? [],
+        externalComposer: await evaluate(`document.querySelector('.external-session-composer') !== null`),
+        externalQuestionCount: await evaluate(`document.querySelectorAll('.external-control .question').length`),
+      });
+      if (!questionPending) throw Object.assign(error, { code: 'external_control_question_not_pending', diagnostic });
+      throw Object.assign(error, { diagnostic });
+    }
     await waitFor(`(() => {
       const source = document.querySelector('.row.question[data-source="controller"] .question-source')?.textContent ?? '';
       return source.includes('外部 Agent') || source.includes('External agent');
@@ -606,6 +644,7 @@ async function recordReport(exitCode) {
 }
 
 async function runChecks() {
+  const externalControlOnly = process.env.LIGULE_EXTERNAL_CONTROL_ONLY === '1';
   const preferences = mainWindow.webContents.getLastWebPreferences();
   assert.equal(preferences.sandbox, true);
   assert.equal(preferences.contextIsolation, true);
@@ -616,6 +655,10 @@ async function runChecks() {
 
   // 新会话默认只读；审批用例先通过真实设置控件授予工作区文件工具写入权限。
   await selectNewSessionPermission('workspace-write');
+  if (externalControlOnly) {
+    await check('MCP 外控会话的人类观察、干预与接管', verifyExternalSessionControl);
+    return;
+  }
 
   await check(`${providerLabel}工具审批拒绝`, async () => {
     await enterAndSend('请调用 create 工具，在项目根目录创建 model-denial-proof.txt，内容只写 DENIED。必须先调用工具，再简短说明结果。');

@@ -37,6 +37,7 @@ const PROOF_FILES = [
   { name: 'model-allow-proof.txt', content: 'ALLOWED' },
 ];
 const providerLabel = '本地 stub 模型';
+const externalControlOnly = process.argv.includes('--external-control-only');
 const providerRequests = [];
 // 启用后只记录新请求而不返回响应，用于验证界面在请求等待期间的行为。
 let hangRequests = false;
@@ -272,6 +273,7 @@ environment.LIGULE_MODEL_PROVIDER_LABEL = providerLabel;
 environment.LIGULE_MODEL_EVIDENCE_NAME = 'stub-model';
 environment.LIGULE_STUB_CONTROL = `http://127.0.0.1:${server.address().port}/stub`;
 environment.LIGULE_EXTERNAL_CONTROL_TEST = '1';
+if (externalControlOnly) environment.LIGULE_EXTERNAL_CONTROL_ONLY = '1';
 
 async function registerIsolatedWorkspace() {
   const preflight = spawn(node, [hostEntry, cli], {
@@ -379,7 +381,7 @@ for (const line of standardOutput.split(/\r?\n/u)) {
 }
 
 const report = {
-  command: `${relative(repositoryRoot, node)} desktop/electron/tests/run-stub-model.mjs`,
+  command: `${relative(repositoryRoot, node)} desktop/electron/tests/run-stub-model.mjs${externalControlOnly ? ' --external-control-only' : ''}`,
   provider: 'local-stub',
   providerNote: '本地 stub 模型：只验证 Desktop 窗口、审批与取消联动，不构成真实模型验收。',
   platform: process.platform,
