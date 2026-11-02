@@ -6,7 +6,7 @@ import { createConfig, type ConfigSnapshot } from './config.js';
 import { createLogger, type Logger, type LoggerBackend } from './log.js';
 import { failureOf, refusalOf, resultLimit, resultOf, spillContent } from './result.js';
 import { VERDICT_FIELDS, type DecisionChain, type PolicyMode } from './policy.js';
-import { createObservationLog, type ObservationLog } from '../session/observe.js';
+import { createObservationLog, type ObservationLog } from './observe.js';
 import { resolveTarget, type NetworkTarget } from '../capability/network.js';
 import { resolveShell, withNativeExitCode, type ShellKind, type ShellSelection } from '../capability/shell.js';
 import { assertSupportedSchema, validateArgs } from './schema.js';

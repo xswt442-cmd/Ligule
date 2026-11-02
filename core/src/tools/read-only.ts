@@ -8,7 +8,7 @@ import { matchesName } from '../kernel/match.js';
 import { boundaryOf, limitsOf, skippedDirectories, workingDirectoryOf } from '../capability/limits.js';
 import { resolveWithin } from '../capability/paths.js';
 import { resolveRipgrep, searchWithRipgrep } from '../capability/ripgrep.js';
-import { versionOf } from '../session/observe.js';
+import { versionOf } from '../kernel/observe.js';
 import { kindOfTarget, marker, readExisting, toPosix, walkFiles } from './common.js';
 
 interface ReadArguments { path: string; offsetBytes?: number }

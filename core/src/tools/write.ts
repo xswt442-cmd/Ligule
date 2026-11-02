@@ -7,7 +7,7 @@ import type { ToolContext, ToolDefinition } from '../kernel/kernel.js';
 import { assertNoLegacyTrashConfig, boundaryOf, workingDirectoryOf } from '../capability/limits.js';
 import { resolveWithin } from '../capability/paths.js';
 import { resolveRecycler } from '../capability/recycle.js';
-import { versionOf } from '../session/observe.js';
+import { versionOf } from '../kernel/observe.js';
 import { errorCode, errorMessage, toPosix } from './common.js';
 
 interface CreateArguments { path: string; content: string }
