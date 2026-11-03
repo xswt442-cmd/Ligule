@@ -5,7 +5,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { arch, platform, release } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { benchmarkTimeoutMs, countsOf, positiveInteger, prepareRunDirectory, timeoutBasis } from './lib.ts';
+import { benchmarkTimeoutMs, countsOf, positiveInteger, prepareRunDirectory, providerUrlProblem, runProcess, safeProviderUrl, timeoutBasis } from './lib.ts';
 import { outputDirectoryFor, writeManifest } from './manifest.ts';
 import type { ManifestPlan, RunIdentity } from './manifest.ts';
 
@@ -86,19 +86,22 @@ async function currentTrialNames(harborDirectory: string): Promise<string[]> {
   return names;
 }
 
-function trialContainerNames(trialNames: readonly string[]): string[] {
+function trialContainerNames(trialNames: readonly string[]): { names: string[]; error?: string } {
   const listed = spawnSync('docker', ['ps', '--format', '{{.Names}}|{{.Label "com.docker.compose.project"}}'], {
     encoding: 'utf8', windowsHide: true, timeout: 30_000,
   });
-  if (listed.status !== 0) return [];
+  if (listed.error !== undefined || listed.status !== 0) {
+    return { names: [], error: `${listed.error?.message ?? ''}${listed.stderr ?? ''}`.trim().slice(0, 500) || 'docker_ps_failed' };
+  }
   const current = new Set(trialNames.map((name) => name.toLowerCase()));
-  return (listed.stdout ?? '').split(/\r?\n/u).flatMap((line) => {
+  const names = (listed.stdout ?? '').split(/\r?\n/u).flatMap((line) => {
     const [name, project = ''] = line.split('|');
     if (!name.includes('__env-main-')) return [];
     const lowerName = name.toLowerCase();
     const lowerProject = project.toLowerCase();
     return [...current].some((trial) => lowerName.startsWith(`${trial}__`) || lowerProject.startsWith(`${trial}__env`)) ? [name] : [];
   });
+  return { names };
 }
 
 function removeContainers(names: readonly string[]): { removed: string[]; failed: string[] } {
@@ -112,7 +115,7 @@ function removeContainers(names: readonly string[]): { removed: string[]; failed
   return { removed, failed };
 }
 
-async function runReport(runDirectory: string, apiKey: string): Promise<{
+async function runReport(runDirectory: string, apiKey: string, timeoutMs: number): Promise<{
   directory: string;
   json: string;
   markdown: string | null;
@@ -121,18 +124,18 @@ async function runReport(runDirectory: string, apiKey: string): Promise<{
   stderr: string;
 }> {
   const directory = outputDirectoryFor(runDirectory);
-  const execution = spawnSync('uv', [
+  const execution = await runProcess('uv', [
     'run', '--no-project', '--with', `harbor==${HARBOR_VERSION}`,
     'python', 'evals/report/report.py', runDirectory, '--output-dir', directory,
   ], {
     cwd: repository,
-    encoding: 'utf8',
-    windowsHide: true,
-    maxBuffer: 32 * 1024 * 1024,
     env: harborEnvironment(apiKey),
+    timeoutMs,
+    maxBytes: 32 * 1024 * 1024,
   });
+  if (execution.timedOut) throw new Error(`report_timeout:${timeoutMs}`);
   if (execution.status !== 0) {
-    throw new Error(`report_failed:${execution.status ?? execution.signal ?? 'unknown'}:${(execution.stderr ?? '').slice(-2_000)}`);
+    throw new Error(`report_failed:${execution.status ?? execution.signal ?? 'unknown'}:${execution.stderr.slice(-2_000)}`);
   }
   const json = join(directory, 'report.json');
   const files = await readdir(directory);
@@ -143,8 +146,8 @@ async function runReport(runDirectory: string, apiKey: string): Promise<{
     json,
     markdown: markdownName === null ? null : join(directory, markdownName),
     summary: report.summary ?? {},
-    stdout: execution.stdout ?? '',
-    stderr: execution.stderr ?? '',
+    stdout: execution.stdout,
+    stderr: execution.stderr,
   };
 }
 
@@ -157,6 +160,7 @@ async function main(): Promise<void> {
   if (tasks.length === 0) throw new Error('no benchmark tasks selected');
   const timeoutOverride = positiveInteger(option('timeout-ms') ?? process.env.LIGULE_BENCH_TOTAL_TIMEOUT_MS, 'total_timeout_ms');
   const timeoutMs = benchmarkTimeoutMs(plan, tasks.length, timeoutOverride);
+  const reportTimeoutMs = positiveInteger(process.env.LIGULE_BENCH_REPORT_TIMEOUT_MS, 'report_timeout_ms') ?? 10 * 60 * 1000;
   const force = process.argv.includes('--force');
   const collectOnly = process.argv.includes('--collect-only');
   const tarball = option('tarball') ?? process.env.LIGULE_BENCH_TARBALL;
@@ -184,20 +188,30 @@ async function main(): Promise<void> {
       : undefined;
     if (prior === undefined) throw new Error('collect_only_missing_run_json');
     if (prior.identity?.gitSha === null || prior.identity?.gitSha === undefined) throw new Error('collect_only_missing_identity');
+    const priorTaskIds = prior.tasks?.map((task) => task.id).sort();
+    if (requestedTasks !== undefined && priorTaskIds !== undefined
+      && JSON.stringify([...requestedTasks].sort()) !== JSON.stringify(priorTaskIds)) {
+      throw new Error(`collect_tasks_mismatch:saved=${priorTaskIds.join(',')}:requested=${requestedTasks.join(',')}`);
+    }
     const collectedPlan = prior.plan === undefined ? { ...plan, tasks } : { ...prior.plan, tasks: prior.tasks ?? prior.plan.tasks };
+    const jobDefinition = JSON.parse(await readFile(jobPath, 'utf8')) as { job_name?: unknown };
+    if (typeof jobDefinition.job_name !== 'string' || jobDefinition.job_name === '') throw new Error('collect_only_missing_job_name');
     const collectedModel = prior.model?.model ?? model ?? undefined;
     const collectedBaseUrl = prior.model?.baseUrl ?? baseUrl ?? undefined;
     const state = existsSync(join(runDirectory, 'run-state.json'))
-      ? JSON.parse(await readFile(join(runDirectory, 'run-state.json'), 'utf8')) as { started?: string; finished?: string }
+      ? JSON.parse(await readFile(join(runDirectory, 'run-state.json'), 'utf8')) as { started?: string; finished?: string; status?: string }
       : {};
+    if (state.status === 'running' && !process.argv.includes('--collect-running')) {
+      throw new Error('active_benchmark_run: stop it or pass --collect-running for a read-only snapshot');
+    }
     const startedAt = prior.started ?? state.started ?? new Date().toISOString();
     const finishedAt = prior.finished ?? state.finished ?? new Date().toISOString();
     const manifest = await writeManifest({
-      runDirectory, plan: collectedPlan, identity: prior.identity, model: collectedModel, baseUrl: collectedBaseUrl, jobPath,
-      startedAt, finishedAt,
+      runDirectory, plan: collectedPlan, identity: prior.identity, model: collectedModel, baseUrl: safeProviderUrl(collectedBaseUrl) ?? undefined,
+      jobPath, jobName: jobDefinition.job_name, startedAt, finishedAt,
     });
     let report;
-    try { report = await runReport(runDirectory, apiKey ?? 'unused-for-collection'); }
+    try { report = await runReport(runDirectory, apiKey ?? 'unused-for-collection', reportTimeoutMs); }
     catch (error) {
       await writeFile(join(runDirectory, 'collection.json'), `${JSON.stringify({
         collectedAt: new Date().toISOString(), manifest: manifest.path, attempts: manifest.attempts, notRun: manifest.notRun,
@@ -226,7 +240,10 @@ async function main(): Promise<void> {
     uv: commandAvailable('uv', ['--version']),
     tarball: { ok: tarball !== undefined && existsSync(tarball), detail: tarball === undefined ? 'LIGULE_BENCH_TARBALL is unset' : resolve(tarball) },
     providerKey: { ok: typeof apiKey === 'string' && apiKey !== '', detail: apiKey === undefined || apiKey === '' ? 'LIGULE_API_KEY is unset' : 'set (value not recorded)' },
-    providerBaseUrl: { ok: typeof baseUrl === 'string' && baseUrl !== '', detail: baseUrl ?? 'LIGULE_BENCH_BASE_URL is unset' },
+    providerBaseUrl: {
+      ok: providerUrlProblem(baseUrl) === undefined,
+      detail: providerUrlProblem(baseUrl) ?? safeProviderUrl(baseUrl) ?? 'LIGULE_BENCH_BASE_URL is invalid',
+    },
     providerModel: { ok: typeof model === 'string' && model !== '', detail: model ?? 'LIGULE_BENCH_MODEL is unset' },
     nodeRuntime: {
       ok: (nodeRuntime === undefined && nodeRuntimeSha256 === undefined)
@@ -260,7 +277,12 @@ async function main(): Promise<void> {
     checks,
     tarball: tarball === undefined ? null : resolve(tarball),
     tarballSha256: tarball === undefined || !existsSync(tarball) ? null : await sha256(tarball),
-    model: { api, baseUrl: baseUrl ?? null, model: model ?? null },
+    sourceProvenance: {
+      benchmarkGitSha: identity.gitSha,
+      tarballSourceSha: null,
+      note: 'git_sha identifies the benchmark checkout; the tarball is identified by SHA-256 only.',
+    },
+    model: { api, baseUrl: safeProviderUrl(baseUrl), model: model ?? null },
   };
   if (blocked.length > 0) {
     const record = { ...baseRecord, executionStatus: 'blocked', blocked: blocked.map(([name, check]) => ({ name, detail: check.detail })) };
@@ -350,22 +372,18 @@ async function main(): Promise<void> {
     command: ['uv', ...args],
   }, null, 2)}\n`, 'utf8');
 
-  const execution = spawnSync('uv', args, {
+  const execution = await runProcess('uv', args, {
     cwd: repository,
-    encoding: 'utf8',
-    windowsHide: true,
-    maxBuffer: 64 * 1024 * 1024,
-    timeout: timeoutMs,
-    killSignal: 'SIGKILL',
     env: harborEnvironment(apiKey as string),
+    timeoutMs,
   });
   const finished = new Date().toISOString();
-  const timedOut = (execution.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT';
+  const timedOut = execution.timedOut;
   const executionStatus: ExecutionStatus = timedOut ? 'timed_out' : execution.status === 0 ? 'completed' : 'failed';
   const stdoutPath = join(runDirectory, 'harbor.stdout.log');
   const stderrPath = join(runDirectory, 'harbor.stderr.log');
-  await writeFile(stdoutPath, execution.stdout ?? '', 'utf8');
-  await writeFile(stderrPath, `${execution.stderr ?? ''}${execution.error === undefined ? '' : `\n${execution.error.message}`}\n`, 'utf8');
+  await writeFile(stdoutPath, execution.stdout, 'utf8');
+  await writeFile(stderrPath, `${execution.stderr}${execution.error === undefined ? '' : `\n${execution.error}`}\n`, 'utf8');
   await writeFile(join(runDirectory, 'run-state.json'), `${JSON.stringify({
     status: executionStatus,
     timedOut,
@@ -374,17 +392,23 @@ async function main(): Promise<void> {
     timeoutMs,
     exitCode: execution.status,
     signal: execution.signal,
-    error: execution.error?.message ?? null,
+    error: execution.error ?? null,
+    terminationPending: execution.terminationPending,
   }, null, 2)}\n`, 'utf8');
 
-  const leftovers = executionStatus === 'completed' ? [] : trialContainerNames(await currentTrialNames(harborDirectory));
-  const cleanup = leftovers.length === 0 ? { removed: [], failed: [] } : removeContainers(leftovers);
+  const enumerated = executionStatus === 'completed'
+    ? { names: [] as string[], error: undefined }
+    : trialContainerNames(await currentTrialNames(harborDirectory));
+  const cleanup = enumerated.names.length === 0
+    ? { removed: [], failed: [], enumerationError: enumerated.error ?? null }
+    : { ...removeContainers(enumerated.names), enumerationError: enumerated.error ?? null };
 
   let manifest;
   let manifestError: string | undefined;
   try {
     manifest = await writeManifest({
-      runDirectory, plan: { ...plan, tasks }, identity, model, baseUrl, jobPath, startedAt: started, finishedAt: finished,
+      runDirectory, plan: { ...plan, tasks }, identity, model, baseUrl: safeProviderUrl(baseUrl) ?? undefined,
+      jobPath, jobName: job.job_name, startedAt: started, finishedAt: finished,
     });
   } catch (error) {
     manifestError = error instanceof Error ? error.message : String(error);
@@ -393,7 +417,7 @@ async function main(): Promise<void> {
   let report;
   let reportError: string | undefined;
   if (manifest !== undefined) {
-    try { report = await runReport(runDirectory, apiKey as string); }
+    try { report = await runReport(runDirectory, apiKey as string, reportTimeoutMs); }
     catch (error) { reportError = error instanceof Error ? error.message : String(error); }
   }
   const taskCounts = report === undefined ? undefined : countsOf(report.summary);
@@ -407,7 +431,8 @@ async function main(): Promise<void> {
     timeoutBasis: timeoutBasis(plan, tasks.length),
     exitCode: execution.status,
     signal: execution.signal,
-    error: execution.error?.message ?? null,
+    error: execution.error ?? null,
+    terminationPending: execution.terminationPending,
     jobPath,
     harborDirectory,
     stdout: stdoutPath,

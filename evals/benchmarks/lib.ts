@@ -1,7 +1,101 @@
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, rename } from 'node:fs/promises';
+import { mkdir, readFile, rename } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { TaskCounts } from './manifest.ts';
+
+export type ProcessResult = {
+  status: number | null;
+  signal: NodeJS.Signals | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  terminationPending: boolean;
+  error?: string;
+};
+
+export async function runProcess(
+  command: string,
+  args: readonly string[],
+  { cwd, env, timeoutMs, maxBytes = 64 * 1024 * 1024 }: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    timeoutMs: number;
+    maxBytes?: number;
+  },
+): Promise<ProcessResult> {
+  return new Promise((resolveRun) => {
+    const child = spawn(command, [...args], {
+      cwd,
+      env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      detached: process.platform !== 'win32',
+    });
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    let terminationPending = false;
+    let settled = false;
+    const append = (current: string, chunk: Buffer): string => {
+      const next = current + chunk.toString('utf8');
+      return next.length > maxBytes ? next.slice(next.length - maxBytes) : next;
+    };
+    child.stdout.on('data', (chunk: Buffer) => { stdout = append(stdout, chunk); });
+    child.stderr.on('data', (chunk: Buffer) => { stderr = append(stderr, chunk); });
+    const finish = (status: number | null, signal: NodeJS.Signals | null, error?: string): void => {
+      if (settled) return;
+      settled = true;
+      resolveRun({ status, signal, stdout, stderr, timedOut, terminationPending, ...(error === undefined ? {} : { error }) });
+    };
+    const killTree = (): void => {
+      timedOut = true;
+      if (process.platform === 'win32') {
+        if (child.pid !== undefined) {
+          spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: 30_000 });
+        }
+      } else {
+        try { if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL'); }
+        catch { try { child.kill('SIGKILL'); } catch { /* already exited */ } }
+      }
+      setTimeout(() => { terminationPending = true; finish(null, 'SIGKILL'); }, 10_000).unref();
+    };
+    const timer = setTimeout(killTree, timeoutMs);
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      finish(null, null, error.message);
+    });
+    child.once('close', (status, signal) => {
+      clearTimeout(timer);
+      finish(status, signal);
+    });
+  });
+}
+
+export function safeProviderUrl(value: string | undefined): string | null {
+  if (value === undefined) return null;
+  try {
+    const url = new URL(value);
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+export function providerUrlProblem(value: string | undefined): string | undefined {
+  if (value === undefined) return 'LIGULE_BENCH_BASE_URL is unset';
+  let url: URL;
+  try { url = new URL(value); } catch { return 'LIGULE_BENCH_BASE_URL is invalid'; }
+  if (url.username !== '' || url.password !== '') return 'LIGULE_BENCH_BASE_URL must not contain URL credentials';
+  for (const key of url.searchParams.keys()) {
+    if (/(?:key|token|secret|auth|password)/iu.test(key)) return `LIGULE_BENCH_BASE_URL must not contain credential query parameter ${key}`;
+  }
+  return undefined;
+}
 
 export function positiveInteger(value: string | undefined, name: string): number | undefined {
   if (value === undefined) return undefined;
@@ -59,6 +153,23 @@ export async function prepareRunDirectory(requested: string | undefined, force: 
   const directory = resolve(requested);
   if (existsSync(directory)) {
     if (!force) throw new Error(`output_directory_exists:${directory}; pass --force to preserve it as a previous run`);
+    const runFile = resolve(directory, 'run.json');
+    if (!existsSync(runFile)) throw new Error(`output_directory_not_benchmark_run:${directory}`);
+    let record: { identity?: unknown; plan?: unknown; executionStatus?: unknown };
+    try { record = JSON.parse(await readFile(runFile, 'utf8')) as typeof record; }
+    catch { throw new Error(`output_directory_not_benchmark_run:${directory}:invalid_run_json`); }
+    if (record.identity === undefined || (record.plan === undefined && record.executionStatus !== 'blocked')) {
+      throw new Error(`output_directory_not_benchmark_run:${directory}`);
+    }
+    const stateFile = resolve(directory, 'run-state.json');
+    if (existsSync(stateFile)) {
+      try {
+        const state = JSON.parse(await readFile(stateFile, 'utf8')) as { status?: unknown };
+        if (state.status === 'running') throw new Error(`active_benchmark_run:${directory}; stop it or use --collect-only`);
+      } catch (error) {
+        if (error instanceof Error && error.message.startsWith('active_benchmark_run:')) throw error;
+      }
+    }
     const previous = `${directory}.previous-${stamp}`;
     await rename(directory, previous);
     process.stdout.write(`Preserved existing output at ${previous}\n`);

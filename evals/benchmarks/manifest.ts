@@ -60,6 +60,7 @@ export async function writeManifest({
   model,
   baseUrl,
   jobPath,
+  jobName,
   startedAt,
   finishedAt,
 }: {
@@ -69,12 +70,17 @@ export async function writeManifest({
   model: string | undefined;
   baseUrl: string | undefined;
   jobPath: string;
+  jobName: string;
   startedAt: string;
   finishedAt: string;
 }): Promise<ManifestResult> {
   if (identity.gitSha === null) throw new Error('manifest_requires_git_sha');
-  const harborDirectory = join(runDirectory, 'harbor');
-  const trialFiles = existsSync(harborDirectory) ? await findFiles(harborDirectory, 'result.json') : [];
+  const jobDirectory = join(runDirectory, 'harbor', jobName);
+  if (!existsSync(jobDirectory)) throw new Error(`harbor_job_missing:${jobName}`);
+  const trialFiles = await findFiles(jobDirectory, 'result.json');
+  const trialDirectories = (await readdir(jobDirectory, { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory() && entry.name.includes('__'))
+    .map((entry) => entry.name);
   const trials = new Map<string, { path: string; result: HarborTrial }[]>();
   for (const path of trialFiles) {
     if (!trialResultPath(runDirectory, path)) continue;
@@ -94,15 +100,18 @@ export async function writeManifest({
   const attempts: Record<string, unknown>[] = [];
   for (const task of plan.tasks) {
     const taskTrials = (trials.get(task.id) ?? []).sort((left, right) => String(left.result.trial_name).localeCompare(String(right.result.trial_name)));
-    if (taskTrials.length === 0) {
-      attempts.push({
-        task_id: task.id, category: task.category, attempt: 1,
-        trial_name: null, harbor_task_id: null, result_file: null,
-        trajectory_file: null, artifact_files: [], not_run_reason: 'harbor_not_completed',
-      });
-      continue;
-    }
-    taskTrials.slice(0, plan.attempts_per_task).forEach((trial, index) => {
+    const taskTrialDirectories = trialDirectories.filter((name) => name.startsWith(`${task.id}__`)).sort();
+    for (let index = 0; index < plan.attempts_per_task; index += 1) {
+      const trial = taskTrials[index];
+      if (trial === undefined) {
+        attempts.push({
+          task_id: task.id, category: task.category, attempt: index + 1,
+          trial_name: null, harbor_task_id: null, result_file: null,
+          trajectory_file: null, artifact_files: [],
+          not_run_reason: taskTrialDirectories[index] === undefined ? 'harbor_not_completed' : 'trial_started_result_missing',
+        });
+        continue;
+      }
       const resultDirectory = join(trial.path, '..');
       const trajectory = join(resultDirectory, 'agent', 'trajectory.json');
       attempts.push({
@@ -116,7 +125,7 @@ export async function writeManifest({
         artifact_files: [],
         not_run_reason: null,
       });
-    });
+    }
   }
 
   const configBytes = await readFile(jobPath);

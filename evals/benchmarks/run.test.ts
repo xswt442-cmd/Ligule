@@ -61,6 +61,8 @@ test('run directories refuse silent overwrite and preserve previous evidence wit
     await writeFile(join(existing, 'marker.txt'), 'old evidence\n', 'utf8');
     await assert.rejects(() => prepareRunDirectory(existing, false, join(root, 'unused')), /output_directory_exists/u);
     assert.equal(await readFile(join(existing, 'marker.txt'), 'utf8'), 'old evidence\n');
+    await assert.rejects(() => prepareRunDirectory(existing, true, join(root, 'unused')), /output_directory_not_benchmark_run/u);
+    await writeFile(join(existing, 'run.json'), `${JSON.stringify({ identity: IDENTITY, plan: {}, executionStatus: 'completed' })}\n`, 'utf8');
     const fresh = await prepareRunDirectory(existing, true, join(root, 'unused'));
     assert.equal(fresh, existing);
     await assert.rejects(() => readFile(join(existing, 'marker.txt'), 'utf8'), { code: 'ENOENT' });
@@ -68,6 +70,11 @@ test('run directories refuse silent overwrite and preserve previous evidence wit
     const previous = siblings.find((name) => name.startsWith('run.previous-'));
     assert.ok(previous);
     assert.equal(await readFile(join(root, previous, 'marker.txt'), 'utf8'), 'old evidence\n');
+    const active = join(root, 'active');
+    await mkdir(active);
+    await writeFile(join(active, 'run.json'), `${JSON.stringify({ identity: IDENTITY, plan: {}, executionStatus: 'running' })}\n`, 'utf8');
+    await writeFile(join(active, 'run-state.json'), '{"status":"running"}\n', 'utf8');
+    await assert.rejects(() => prepareRunDirectory(active, true, join(root, 'unused')), /active_benchmark_run/u);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -98,8 +105,45 @@ test('the manifest rejects malformed trial results instead of hiding them as not
     };
     await assert.rejects(() => writeManifest({
       runDirectory, plan, identity: IDENTITY, model: 'fixture-model', baseUrl: 'https://provider.invalid/v1',
-      jobPath: job, startedAt: '2026-01-01T00:00:00.000Z', finishedAt: '2026-01-01T00:01:00.000Z',
+      jobPath: job, jobName: 'job-1', startedAt: '2026-01-01T00:00:00.000Z', finishedAt: '2026-01-01T00:01:00.000Z',
     }), /malformed_harbor_result/u);
+  } finally {
+    await rm(runDirectory, { recursive: true, force: true });
+  }
+});
+
+test('repeated attempts keep the planned denominator and distinguish started-without-result', async () => {
+  const runDirectory = await mkdtemp(join(tmpdir(), 'ligule-manifest-attempts-'));
+  try {
+    const job = join(runDirectory, 'job.json');
+    await writeFile(job, '{}\n', 'utf8');
+    const first = join(runDirectory, 'harbor', 'job-1', 'repeat__1');
+    const second = join(runDirectory, 'harbor', 'job-1', 'repeat__2');
+    await mkdir(first, { recursive: true });
+    await mkdir(join(second, 'agent'), { recursive: true });
+    await writeFile(join(first, 'result.json'), `${JSON.stringify({
+      task_name: 'repeat', trial_name: 'repeat__1', task_id: { path: 'task' },
+    })}\n`, 'utf8');
+    const plan = {
+      dataset: { name: 'terminal-bench', version: '2.0' },
+      tasks: [{ id: 'repeat', category: 'fixture', covers: 'repeat' }],
+      attempts_per_task: 2,
+      concurrency: 1,
+      model: { model_calls: 1, timeout_ms: 1, request_timeout_ms: 1 },
+      verifier: { reward_key: 'reward', pass_threshold: 1 },
+    };
+    const result = await writeManifest({
+      runDirectory, plan, identity: IDENTITY, model: 'fixture-model', baseUrl: 'https://provider.invalid/v1',
+      jobPath: job, jobName: 'job-1', startedAt: '2026-01-01T00:00:00.000Z', finishedAt: '2026-01-01T00:01:00.000Z',
+    });
+    assert.equal(result.attempts, 2);
+    assert.equal(result.notRun, 1);
+    const manifest = JSON.parse(await readFile(join(runDirectory, 'manifest.json'), 'utf8')) as {
+      attempts: Record<string, unknown>[];
+    };
+    const secondAttempt = manifest.attempts.find((attempt) => attempt.attempt === 2);
+    assert.equal(secondAttempt?.result_file, null);
+    assert.equal(secondAttempt?.not_run_reason, 'trial_started_result_missing');
   } finally {
     await rm(runDirectory, { recursive: true, force: true });
   }
@@ -140,7 +184,7 @@ test('the manifest records attempts without inventing task outcomes', async () =
     };
     const result = await writeManifest({
       runDirectory, plan, identity: IDENTITY, model: 'fixture-model', baseUrl: 'https://provider.invalid/v1',
-      jobPath: job, startedAt: '2026-01-01T00:00:00.000Z', finishedAt: '2026-01-01T01:00:00.000Z',
+      jobPath: job, jobName: 'job-1', startedAt: '2026-01-01T00:00:00.000Z', finishedAt: '2026-01-01T01:00:00.000Z',
     });
     assert.deepEqual({ attempts: result.attempts, notRun: result.notRun }, { attempts: 4, notRun: 1 });
     const manifest = JSON.parse(await readFile(join(runDirectory, 'manifest.json'), 'utf8')) as {
