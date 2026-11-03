@@ -14,7 +14,7 @@ import {
 } from '@ligule/core/tui.js';
 import { providerDiagnosticText, runtimeFailureText } from './tui/errors.js';
 import { configureTerminalColors } from './tui/output.js';
-import { isPolicyMode, isPolicyRule, type ConfigSnapshot, type Connection, type ModeDirectories, type PolicyMode, type PolicyRule, type PolicyThresholds } from '@ligule/core/tui.js';
+import { isPolicyRule, readPersistedPolicyMode, type ConfigSnapshot, type Connection, type ModeDirectories, type PolicyMode, type PolicyRule, type PolicyThresholds } from '@ligule/core/tui.js';
 interface CliPolicy extends Record<string, unknown> {
   readonly mode?: PolicyMode;
   readonly rules?: PolicyRule[];
@@ -74,8 +74,10 @@ function responseCount(value: Record<string, unknown>, field: string): number {
 
 function policyOf(value: unknown): CliPolicy | undefined {
   if (value === undefined || !isRecord(value)) return undefined;
-  const mode = value.mode;
-  if (mode !== undefined && !isPolicyMode(mode)) throw new KernelError('policy_mode_unknown');
+  // 保存的配置按它自己的语义标记解释：缺少标记的旧 `none`/旧 `never` 只降级为 `ask`，
+  // 不会因为这次升级就变成“跳过全部审批”。
+  const mode = readPersistedPolicyMode(value.mode, value.semantics);
+  if (value.mode !== undefined && mode === undefined) throw new KernelError('policy_mode_unknown');
   let rules: PolicyRule[] | undefined;
   if (value.rules !== undefined) {
     if (!Array.isArray(value.rules) || !value.rules.every(isPolicyRule)) throw new KernelError('policy_rules_invalid');

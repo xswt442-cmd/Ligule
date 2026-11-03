@@ -1682,6 +1682,65 @@ test('/policy changes the session setting and updates the bottom configuration l
   }
 }));
 
+test('/policy never asks for confirmation before it turns approvals off', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { App } = await import('../dist/tui/app.js');
+  const stdout = new PassThrough() as unknown as FakeOutput;
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
+  const instance = render(createElement(App, {
+    client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const strip = (text: string) => text.replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '').replace(/[\r\n]+/g, '');
+  const lastFrame = () => completeFrame(painted);
+  const spoken = (text: string) => strip(painted).includes(text);
+  const type = async (line: string) => {
+    stdin.write(line);
+    await waitFor(() => lastFrame().includes(`› ${line}`), { within: 10_000, read: lastFrame });
+    stdin.write('\r');
+  };
+  const policyOf = async () => (await (client as TuiClient).request('status.get', { sessionId })).policy;
+  // 输出是累积的：用出现次数确认「又开了一次面板」，而不是匹配上一次残留的文字。
+  const count = (text: string) => strip(painted).split(text).length - 1;
+  const before = await policyOf();
+  // 选择面板用方向键 + 回车驱动：确认面板的第一项是确认，第二项是取消。
+  const choose = async (label: string, steps: number) => {
+    for (let index = 0; index < steps; index += 1) stdin.write('\u001b[B');
+    // 面板是增量重绘的：整段输出里出现选中标记就说明方向键已经生效。
+    await waitFor(() => spoken(`› ${label}`), { within: 10_000, read: () => strip(painted).slice(-800) });
+    stdin.write('\r');
+  };
+  try {
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
+    // 命令行入口和选择器入口一样，都必须先弹确认。
+    const first = count('确认完全不审批');
+    await type('/policy never');
+    await waitFor(() => count('确认完全不审批') > first, { read: () => strip(painted).slice(-700) });
+    assert.equal(await policyOf(), before, 'the mode changed before the confirmation');
+    assert.equal(requests.some((request) => request.method === 'policy.set'), false);
+    await choose('取消', 1);
+    // 取消不产生状态变化：留一点时间让可能的请求发出去，再断言没有变更。
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    assert.equal(await policyOf(), before, 'cancelling the confirmation still changed the mode');
+    assert.equal(requests.some((request) => request.method === 'policy.set'), false);
+
+    const second = count('确认完全不审批');
+    await type('/policy never');
+    await waitFor(() => count('确认完全不审批') > second, { read: () => strip(painted).slice(-700) });
+    await choose('我确认跳过所有审批', 0);
+    await waitFor(() => requests.some((request) => request.method === 'policy.set' && request.params.mode === 'never'), { read: () => strip(painted).slice(-700) });
+    await waitFor(() => spoken('当前会话审批方式：never'), { read: () => strip(painted).slice(-700) });
+    assert.equal(await policyOf(), 'never');
+  } finally {
+    instance.unmount();
+  }
+}));
+
 test('/control creates a project-bound grant through the interactive wizard', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
   const { createElement } = await import('react');
   const { render } = await import('ink');

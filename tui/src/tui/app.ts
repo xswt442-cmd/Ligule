@@ -2387,6 +2387,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'error', text: t('用法：/policy always|ask|auto|never|reset（旧 none 等同 ask）', 'Usage: /policy always|ask|auto|never|reset (legacy none equals ask)') });
           return;
         }
+        // 命令行不能绕过二次确认：选择“完全不审批”与选择器走同一条确认路径。
+        if (asked === 'never') { openPicker('policy-confirm-never'); return; }
         const changed = await client.request('policy.set', { sessionId, mode: asked }).catch((error: unknown) => requestFailure(error, 'policy_change_failed'));
         if ('code' in changed) {
           push({ kind: 'error', text: t(`无法修改审批方式：${changed.code}`, `Could not change approval mode: ${changed.code}`) });
