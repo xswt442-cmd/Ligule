@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import type { TaskCounts } from './manifest.ts';
 
 export type ProcessResult = {
+  pid?: number;
   status: number | null;
   signal: NodeJS.Signals | null;
   stdout: string;
@@ -20,11 +21,14 @@ export async function activeBenchmarkOwner(directory: string): Promise<string | 
   for (const name of ['run-state.json', 'collect-state.json']) {
     const path = resolve(directory, name);
     if (!existsSync(path)) continue;
-    let state: { status?: unknown; pid?: unknown };
+    let state: { status?: unknown; pid?: unknown; harborPid?: unknown };
     try { state = JSON.parse(await readFile(path, 'utf8')) as typeof state; }
     catch { throw new Error(`run_state_invalid:${path}`); }
-    if ((state.status === 'running' || state.status === 'collecting') && isProcessAlive(state.pid)) {
-      return `${name}:${state.status}:pid=${String(state.pid)}`;
+    if (state.status === 'running' || state.status === 'collecting') {
+      if (isProcessAlive(state.pid)) return `${name}:${state.status}:pid=${String(state.pid)}`;
+      if (isProcessAlive(state.harborPid) || isProcessGroupAlive(state.harborPid)) {
+        return `${name}:${state.status}:harborPid=${String(state.harborPid)}`;
+      }
     }
   }
   return undefined;
@@ -40,14 +44,25 @@ export function isProcessAlive(pid: unknown): boolean {
   }
 }
 
+function isProcessGroupAlive(pid: unknown): boolean {
+  if (process.platform === 'win32' || typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
 export async function runProcess(
   command: string,
   args: readonly string[],
-  { cwd, env, timeoutMs, maxBytes = 64 * 1024 * 1024 }: {
+  { cwd, env, timeoutMs, maxBytes = 64 * 1024 * 1024, onSpawn }: {
     cwd: string;
     env: NodeJS.ProcessEnv;
     timeoutMs: number;
     maxBytes?: number;
+    onSpawn?: (pid: number | undefined) => void;
   },
 ): Promise<ProcessResult> {
   return new Promise((resolveRun) => {
@@ -58,6 +73,7 @@ export async function runProcess(
       windowsHide: true,
       detached: process.platform !== 'win32',
     });
+    onSpawn?.(child.pid);
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -76,7 +92,7 @@ export async function runProcess(
       settled = true;
       process.off('SIGINT', onInterrupt);
       process.off('SIGTERM', onInterrupt);
-      resolveRun({ status, signal, stdout, stderr, timedOut, interrupted, terminationPending, ...(terminationError === undefined ? {} : { terminationError }), ...(error === undefined ? {} : { error }) });
+      resolveRun({ pid: child.pid, status, signal, stdout, stderr, timedOut, interrupted, terminationPending, ...(terminationError === undefined ? {} : { terminationError }), ...(error === undefined ? {} : { error }) });
     };
     const killTree = (): void => {
       if (process.platform === 'win32') {

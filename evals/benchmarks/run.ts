@@ -372,6 +372,7 @@ async function main(): Promise<void> {
   await writeFile(join(runDirectory, 'run-state.json'), `${JSON.stringify({
     status: 'running',
     pid: process.pid,
+    harborPid: null,
     started,
     timeoutMs,
     timeoutBasis: timeoutBasis(plan, tasks.length),
@@ -384,6 +385,11 @@ async function main(): Promise<void> {
     cwd: repository,
     env: harborEnvironment(apiKey as string),
     timeoutMs,
+    onSpawn: (pid) => {
+      void writeFile(join(runDirectory, 'run-state.json'), `${JSON.stringify({
+        status: 'running', pid: process.pid, harborPid: pid ?? null, started, timeoutMs,
+      }, null, 2)}\n`, 'utf8');
+    },
   });
   const finished = new Date().toISOString();
   const timedOut = execution.timedOut;
@@ -397,6 +403,7 @@ async function main(): Promise<void> {
   await writeFile(join(runDirectory, 'run-state.json'), `${JSON.stringify({
     status: 'collecting',
     pid: process.pid,
+    harborPid: execution.pid ?? null,
     executionStatus,
     timedOut,
     interrupted: execution.interrupted,
@@ -440,6 +447,7 @@ async function main(): Promise<void> {
     executionStatus,
     timedOut,
     interrupted: execution.interrupted,
+    harborPid: execution.pid ?? null,
     started,
     finished,
     timeoutMs,
@@ -471,6 +479,7 @@ async function main(): Promise<void> {
   await writeFile(join(runDirectory, 'run-state.json'), `${JSON.stringify({
     status: 'finished',
     pid: process.pid,
+    harborPid: execution.pid ?? null,
     executionStatus,
     timedOut,
     interrupted: execution.interrupted,

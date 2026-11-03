@@ -75,6 +75,13 @@ test('run directories refuse silent overwrite and preserve previous evidence wit
     await writeFile(join(active, 'run.json'), `${JSON.stringify({ identity: IDENTITY, plan: {}, executionStatus: 'running' })}\n`, 'utf8');
     await writeFile(join(active, 'run-state.json'), `${JSON.stringify({ status: 'collecting', pid: process.pid })}\n`, 'utf8');
     await assert.rejects(() => prepareRunDirectory(active, true, join(root, 'unused')), /active_benchmark_run/u);
+    const orphanedRunner = join(root, 'orphaned-runner');
+    await mkdir(orphanedRunner);
+    await writeFile(join(orphanedRunner, 'run.json'), `${JSON.stringify({ identity: IDENTITY, plan: {}, executionStatus: 'running' })}\n`, 'utf8');
+    await writeFile(join(orphanedRunner, 'run-state.json'), `${JSON.stringify({
+      status: 'collecting', pid: 999_999_999, harborPid: process.pid,
+    })}\n`, 'utf8');
+    await assert.rejects(() => prepareRunDirectory(orphanedRunner, true, join(root, 'unused')), /active_benchmark_run/u);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
