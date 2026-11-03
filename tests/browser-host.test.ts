@@ -9,21 +9,43 @@ import { providerFromConfig } from '../core/dist/host/provider.js';
 import { createMediaStore } from '../core/dist/capability/media.js';
 import { BROWSER_SERVER } from '../core/dist/capability/browser-policy.js';
 import { workspaceDataDirectory } from '../core/dist/session/list.js';
+import type { Server } from 'node:http';
+import type { Connection } from '../core/dist/host/connection.js';
+import type { Host, HostOptions } from '../core/dist/host/host.js';
+import type { MemoryConnectionPair } from '../core/dist/host/memory.js';
+import type { ConfigSnapshot } from '../core/dist/kernel/config.js';
 
 const browserEntry = process.env.LIGULE_PLAYWRIGHT_MCP_ENTRY;
 const browserExecutable = process.env.LIGULE_BROWSER_EXE;
 const backendUnavailable = browserEntry === undefined || browserEntry === ''
   || browserExecutable === undefined || browserExecutable === '';
 
-function deferred() {
-  let resolvePromise;
-  let rejectPromise;
-  const promise = new Promise((resolve, reject) => { resolvePromise = resolve; rejectPromise = reject; });
+type PlanStep = { text?: string; name?: string; args?: unknown; serverTool?: string; hold?: boolean };
+type BrowserTestConfig = ConfigSnapshot & { boundary: string; policy: NonNullable<HostOptions['policy']> };
+type BrowserStatus = { browser: { connected: boolean; paused: boolean } };
+type BrowserContext = {
+  root: string;
+  dataRoot: string;
+  config: BrowserTestConfig;
+  connection: Connection;
+  pageHits: (string | undefined)[];
+  pageOrigin: string;
+  setPlan(steps: PlanStep[]): void;
+  controllerWaiting: ReturnType<typeof deferred<unknown>>;
+  controllerClosed: ReturnType<typeof deferred<void>>;
+  getPlanLength(): number;
+  getControllerFailure(): unknown;
+};
+
+function deferred<T = void>() {
+  let resolvePromise!: (value: T | PromiseLike<T>) => void;
+  let rejectPromise!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolve, reject) => { resolvePromise = resolve; rejectPromise = reject; });
   return { promise, resolve: resolvePromise, reject: rejectPromise };
 }
 
-async function waitFor(promise, label, milliseconds = 15_000) {
-  let timer;
+async function waitFor(promise: Promise<unknown>, label: string, milliseconds = 15_000) {
+  let timer: NodeJS.Timeout | undefined;
   try {
     return await Promise.race([promise, new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error(`${label} timed out`)), milliseconds);
@@ -31,15 +53,17 @@ async function waitFor(promise, label, milliseconds = 15_000) {
   } finally { clearTimeout(timer); }
 }
 
-async function listen(server) {
-  await new Promise((resolveListen, reject) => {
+async function listen(server: Server): Promise<string> {
+  await new Promise<void>((resolveListen, reject) => {
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', resolveListen);
+    server.listen(0, '127.0.0.1', () => resolveListen());
   });
-  return `http://127.0.0.1:${server.address().port}`;
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('browser_test_address_missing');
+  return `http://127.0.0.1:${address.port}`;
 }
 
-function completion(step, id) {
+function completion(step: PlanStep, id: number) {
   if (step.text !== undefined) {
     return { choices: [{ index: 0, message: { role: 'assistant', content: step.text }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
   }
@@ -48,7 +72,7 @@ function completion(step, id) {
   }] }, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 1, completion_tokens: 1 } };
 }
 
-function serverCallPlan(tool, args) {
+function serverCallPlan(tool: string, args: unknown): PlanStep[] {
   return [
     { name: 'mcp.inspect', args: { server: BROWSER_SERVER, tool } },
     { name: 'mcp.call', serverTool: tool, args },
@@ -56,7 +80,7 @@ function serverCallPlan(tool, args) {
   ];
 }
 
-async function withBrowserHost(run, { denyTool = 'browser_close' } = {}) {
+async function withBrowserHost(run: (context: BrowserContext) => Promise<void>, { denyTool = 'browser_close' }: { denyTool?: string } = {}) {
   const scratch = join(process.cwd(), 'testplace');
   await mkdir(scratch, { recursive: true });
   const root = await mkdtemp(join(scratch, 'browser-host-'));
@@ -67,7 +91,7 @@ async function withBrowserHost(run, { denyTool = 'browser_close' } = {}) {
   process.env.LIGULE_HOME = dataRoot;
   process.env[keyName] = randomBytes(24).toString('hex');
 
-  const pageHits = [];
+  const pageHits: (string | undefined)[] = [];
   const page = createServer((request, response) => {
     pageHits.push(request.url);
     if (request.method === 'GET' && request.url === '/') {
@@ -79,11 +103,11 @@ async function withBrowserHost(run, { denyTool = 'browser_close' } = {}) {
     response.end();
   });
   let controllerOrigin;
-  let plan = [];
+  let plan: PlanStep[] = [];
   let responseId = 0;
-  let controllerFailure;
-  const controllerWaiting = deferred();
-  const controllerClosed = deferred();
+  let controllerFailure: unknown;
+  const controllerWaiting = deferred<unknown>();
+  const controllerClosed = deferred<void>();
   const controller = createServer(async (request, response) => {
     try {
       const chunks = [];
@@ -120,9 +144,8 @@ async function withBrowserHost(run, { denyTool = 'browser_close' } = {}) {
     }
   });
 
-  let host;
-  let pair;
-  let connection;
+  let host: Host | undefined;
+  let pair: MemoryConnectionPair | undefined;
   try {
     const pageOrigin = await listen(page);
     controllerOrigin = await listen(controller);
@@ -156,14 +179,14 @@ async function withBrowserHost(run, { denyTool = 'browser_close' } = {}) {
         mode: 'none',
         rules: denyTool === undefined ? [] : [{ tool: `mcp:${BROWSER_SERVER}/${denyTool}`, decision: 'deny', reason: 'browser host test denial' }],
       },
-    } });
+    } }) as BrowserTestConfig;
     pair = createMemoryConnectionPair();
-    host = serveHost({ ...pair.host, config, provider: providerFromConfig(config), policy: config.policy,
+    host = serveHost({ ...pair.host, config: config as ConfigSnapshot, provider: providerFromConfig(config), policy: config.policy,
       modeName: 'full', modePaths: modeDirectories(root, resolve('core/modes')), permissionControl: true,
       permission: createPermissionContext('full-access', 'unrestricted', {
         filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
       }) });
-    connection = createConnection(pair.client);
+    const connection = createConnection(pair.client);
     await run({ root, dataRoot, config, connection, pageHits, pageOrigin, setPlan: (steps) => { plan = [...steps]; },
       controllerWaiting, controllerClosed, getPlanLength: () => plan.length, getControllerFailure: () => controllerFailure,
     });
@@ -192,16 +215,16 @@ test('real Browser Host enforces trust, Permission, Policy, filtering and sticky
   skip: backendUnavailable ? 'set LIGULE_PLAYWRIGHT_MCP_ENTRY and LIGULE_BROWSER_EXE for headless backend integration' : false,
 }, async () => {
   await withBrowserHost(async ({ root, connection, pageHits, pageOrigin, setPlan, getPlanLength, getControllerFailure }) => {
-    const sessionId = (await connection.request('session.create', { projectRoot: root })).sessionId;
-    const trustList = await connection.request('mcp.trust.list', { projectRoot: root, sessionId });
+    const sessionId = (await connection.request('session.create', { projectRoot: root }) as { sessionId: string }).sessionId;
+    const trustList = await connection.request('mcp.trust.list', { projectRoot: root, sessionId }) as { servers: { name: string; identityDigest: string }[] };
     const browser = trustList.servers.find((item) => item.name === BROWSER_SERVER);
     assert.ok(browser);
-    assert.deepEqual((await connection.request('status.get', { sessionId })).browser.connected, false);
+    assert.deepEqual((await connection.request('status.get', { sessionId }) as BrowserStatus).browser.connected, false);
     await assert.rejects(
       connection.request('mcp.trust.tools', { projectRoot: root, sessionId, server: BROWSER_SERVER }),
       { code: 'mcp_server_untrusted' },
     );
-    assert.equal((await connection.request('status.get', { sessionId })).browser.connected, false);
+    assert.equal((await connection.request('status.get', { sessionId }) as BrowserStatus).browser.connected, false);
 
     await connection.request('mcp.trust.set', { projectRoot: root, sessionId, server: BROWSER_SERVER,
       identityDigest: browser.identityDigest, scope: 'session', trusted: true, confirmTrust: true, confirmExternalAccess: true });
@@ -210,11 +233,11 @@ test('real Browser Host enforces trust, Permission, Policy, filtering and sticky
       connection.request('mcp.trust.tools', { projectRoot: root, sessionId, server: BROWSER_SERVER }),
       { code: 'permission_external_access_requires_full_access' },
     );
-    assert.equal((await connection.request('status.get', { sessionId })).browser.connected, false);
+    assert.equal((await connection.request('status.get', { sessionId }) as BrowserStatus).browser.connected, false);
 
     await connection.request('permission.set', { sessionId, permissionProfile: 'full-access', permissionNetwork: 'unrestricted',
       confirmFullAccess: true, confirmNetwork: true });
-    const tools = await connection.request('mcp.trust.tools', { projectRoot: root, sessionId, server: BROWSER_SERVER });
+    const tools = await connection.request('mcp.trust.tools', { projectRoot: root, sessionId, server: BROWSER_SERVER }) as { tools: { name: string }[] };
     const names = tools.tools.map((item) => item.name);
     assert.ok(names.includes('browser_navigate'));
     assert.ok(names.includes('browser_take_screenshot'));
@@ -229,7 +252,7 @@ test('real Browser Host enforces trust, Permission, Policy, filtering and sticky
     assert.deepEqual(pageHits, [], 'the policy denial happens before the browser tool is called');
     let raw = await readFile(join(root, 'sessions', `${sessionId}.jsonl`), 'utf8');
     assert.ok(raw.includes('policy_denied'));
-    assert.equal((await connection.request('status.get', { sessionId })).browser.connected, true,
+    assert.equal((await connection.request('status.get', { sessionId }) as BrowserStatus).browser.connected, true,
       'the trusted tool listing connected the MCP server but the denied call did not navigate the page');
 
     setPlan(serverCallPlan('browser_take_screenshot', { scale: 'css', type: 'png', target: 'body' }));
@@ -240,7 +263,7 @@ test('real Browser Host enforces trust, Permission, Policy, filtering and sticky
     assert.deepEqual(pageHits, []);
 
     await connection.request('browser.stop', { sessionId });
-    let browserStatus = (await connection.request('status.get', { sessionId })).browser;
+    let browserStatus = (await connection.request('status.get', { sessionId }) as BrowserStatus).browser;
     assert.equal(browserStatus.paused, true);
     assert.equal(browserStatus.connected, false);
     await assert.rejects(
@@ -248,7 +271,7 @@ test('real Browser Host enforces trust, Permission, Policy, filtering and sticky
       { code: 'browser_stopped' },
     );
     await connection.request('browser.resume', { sessionId });
-    browserStatus = (await connection.request('status.get', { sessionId })).browser;
+    browserStatus = (await connection.request('status.get', { sessionId }) as BrowserStatus).browser;
     assert.equal(browserStatus.paused, false);
     assert.equal(browserStatus.connected, false, 'resume never starts a backend process');
 
@@ -262,7 +285,7 @@ test('real Browser Host enforces trust, Permission, Policy, filtering and sticky
       connection.request('mcp.trust.tools', { projectRoot: root, sessionId, server: BROWSER_SERVER }),
       { code: 'mcp_server_untrusted' },
     );
-    assert.equal((await connection.request('status.get', { sessionId })).browser.connected, false);
+    assert.equal((await connection.request('status.get', { sessionId }) as BrowserStatus).browser.connected, false);
     assert.equal(pageOrigin.startsWith('http://127.0.0.1:'), true);
     assert.equal(getControllerFailure(), undefined);
   });
@@ -273,8 +296,8 @@ test('real headless Browser Host persists screenshots and stops servers on cance
 }, async () => {
   await withBrowserHost(async ({ root, dataRoot, config, connection, pageHits, pageOrigin, setPlan,
     controllerWaiting, controllerClosed, getPlanLength, getControllerFailure }) => {
-    const sessionId = (await connection.request('session.create', { projectRoot: root })).sessionId;
-    const trustList = await connection.request('mcp.trust.list', { projectRoot: root, sessionId });
+    const sessionId = (await connection.request('session.create', { projectRoot: root }) as { sessionId: string }).sessionId;
+    const trustList = await connection.request('mcp.trust.list', { projectRoot: root, sessionId }) as { servers: { name: string; identityDigest: string }[] };
     const browser = trustList.servers.find((item) => item.name === BROWSER_SERVER);
     assert.ok(browser);
     await connection.request('mcp.trust.set', { projectRoot: root, sessionId, server: BROWSER_SERVER,
@@ -285,14 +308,14 @@ test('real headless Browser Host persists screenshots and stops servers on cance
     await connection.request('run.start', { sessionId, input: 'open the local test page' });
     setPlan(serverCallPlan('browser_take_screenshot', { scale: 'css', type: 'png' }));
     await connection.request('run.start', { sessionId, input: 'capture the current local page' });
-    const browserEvents = (await readFile(join(root, 'sessions', `${sessionId}.jsonl`), 'utf8')).trim().split('\n').map(JSON.parse);
+    const browserEvents = (await readFile(join(root, 'sessions', `${sessionId}.jsonl`), 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
     const failedBrowserCalls = browserEvents.filter(event => event.kind === 'tool' && event.result?.failed === true);
     assert.deepEqual(failedBrowserCalls.map(event => event.result), [], 'browser workflow must not hide failed tool calls');
     assert.ok(pageHits.includes('/'));
-    assert.equal((await connection.request('status.get', { sessionId })).browser.connected, true);
+    assert.equal((await connection.request('status.get', { sessionId }) as BrowserStatus).browser.connected, true);
 
     const raw = await readFile(join(root, 'sessions', `${sessionId}.jsonl`), 'utf8');
-    const events = raw.trim().split('\n').map(JSON.parse);
+    const events = raw.trim().split('\n').map((line) => JSON.parse(line));
     const screenshotEvent = events.find((event) => event.kind === 'tool' && event.tool === 'mcp.call'
       && event.result?.failed !== true && event.result?.images?.length > 0);
     assert.ok(screenshotEvent);
@@ -306,10 +329,10 @@ test('real headless Browser Host persists screenshots and stops servers on cance
     const running = connection.request('run.start', { sessionId, input: 'wait for cancellation' });
     await waitFor(controllerWaiting.promise, 'controller request');
     await connection.request('run.cancel', { sessionId });
-    await assert.rejects(running, (error) => ['loop_cancelled', 'provider_cancelled'].includes(error.code));
+    await assert.rejects(running, (error) => ['loop_cancelled', 'provider_cancelled'].includes((error as { code: string }).code));
     await waitFor(controllerClosed.promise, 'cancelled controller response');
     assert.equal(getPlanLength(), 0);
-    assert.equal((await connection.request('status.get', { sessionId })).browser.connected, false,
+    assert.equal((await connection.request('status.get', { sessionId }) as BrowserStatus).browser.connected, false,
       'cancelling a turn revokes the Browser MCP process');
     const browserDirectory = join(workspaceDataDirectory({ boundary: root, workspaceRoot: root, userHome: dataRoot }), 'browser', 'sessions', sessionId);
     assert.deepEqual((await readdir(browserDirectory)).sort(), ['.ligule-lease.lock', '.ligule-owner.json'],
@@ -317,7 +340,7 @@ test('real headless Browser Host persists screenshots and stops servers on cance
 
     setPlan(serverCallPlan('browser_navigate', { url: pageOrigin }));
     await connection.request('run.start', { sessionId, input: 'reopen the local test page' });
-    assert.equal((await connection.request('status.get', { sessionId })).browser.connected, true);
+    assert.equal((await connection.request('status.get', { sessionId }) as BrowserStatus).browser.connected, true);
     await connection.request('session.close', { sessionId });
     await assert.rejects(connection.request('status.get', { sessionId }), { code: 'session_not_open' });
     await assert.rejects(access(browserDirectory), { code: 'ENOENT' });

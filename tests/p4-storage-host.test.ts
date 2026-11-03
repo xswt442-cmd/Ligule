@@ -11,13 +11,38 @@ import { sessionDirectory, workspaceDataDirectory } from '../core/dist/session/l
 import { claimStorageOwner, storageGcParent } from '../core/dist/capability/storage-gc.js';
 import { createSessionLog } from '../core/dist/session/session.js';
 import { createHost } from '../core/dist/host/host.js';
+import type { Host } from '../core/dist/host/host.js';
+import type { Connection } from '../core/dist/host/connection.js';
+import type { ImageReference } from '../core/dist/media.js';
 
 const repository = join(process.cwd());
 const fixtureRoot = join(repository, 'testplace', 'v0.1.1');
 const requireCore = createRequire(join(repository, 'core', 'package.json'));
 const sharp = requireCore('sharp');
 
-async function withWorkspace(run, { secondWorkspace = false, permissionControl = true } = {}) {
+type StorageReply = {
+  expiresInMs: number;
+  planId: string;
+  ids: string[];
+  complete: boolean;
+  scannedSessions: number;
+  nextCursor?: string;
+  removed: number;
+  garbageRemoved: number;
+  skipped: { reason: string }[];
+  folders: { kind: string; bytes: number }[];
+  garbage: { id: string }[];
+};
+type WorkspaceContext = {
+  root: string;
+  project: string;
+  otherProject: string;
+  data: string;
+  host: Host;
+  connection: Pick<Connection, 'notify' | 'request'>;
+};
+
+async function withWorkspace(run: (context: WorkspaceContext) => Promise<void>, { secondWorkspace = false, permissionControl = true } = {}) {
   await mkdir(fixtureRoot, { recursive: true });
   const root = await mkdtemp(join(fixtureRoot, 'p4-storage-host-'));
   const project = join(root, 'project');
@@ -26,14 +51,14 @@ async function withWorkspace(run, { secondWorkspace = false, permissionControl =
   await Promise.all([project, otherProject, data].map(path => mkdir(path, { recursive: true })));
   const previousHome = process.env.LIGULE_HOME;
   process.env.LIGULE_HOME = data;
-  const environment = projectRoot => {
+  const environment = (projectRoot: string) => {
     const config = createConfig({ user: { boundary: projectRoot, model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'storage-test' } } });
-    return { config, provider: providerFromConfig(config), policy: { mode: 'auto' } };
+    return { config, provider: providerFromConfig(config), policy: { mode: 'auto' as const } };
   };
   const initialEnvironment = environment(project);
   const host = createHost({ ...initialEnvironment, permissionControl,
     ...(secondWorkspace ? { loadEnvironment: async projectRoot => environment(projectRoot) } : {}) });
-  const connection = { notify() {}, async request() { throw new Error('storage calls do not request user approval'); } };
+  const connection: Pick<Connection, 'notify' | 'request'> = { notify() {}, async request() { throw new Error('storage calls do not request user approval'); } };
   try { await run({ root, project, otherProject, data, host, connection }); }
   finally {
     await host.release();
@@ -43,7 +68,7 @@ async function withWorkspace(run, { secondWorkspace = false, permissionControl =
   }
 }
 
-async function expiredImage(project, sessionId) {
+async function expiredImage(project: string, sessionId: string) {
   const config = { boundary: project, workspaceRoot: project };
   const store = createMediaStore(config, sessionId);
   const png = await sharp({ create: { width: 2, height: 2, channels: 3, background: '#e05030' } }).png().toBuffer();
@@ -57,7 +82,7 @@ async function expiredImage(project, sessionId) {
   return { reference: saved, image, metadata };
 }
 
-async function addSessionImage(project, reference, sessionId) {
+async function addSessionImage(project: string, reference: ImageReference, sessionId: string) {
   const config = { boundary: project, workspaceRoot: project };
   const log = createSessionLog({ directory: sessionDirectory(config), id: sessionId,
     meta: { projectRoot: project, workspace: workspaceIdentity(project) } });
@@ -67,8 +92,8 @@ async function addSessionImage(project, reference, sessionId) {
   await log.close();
 }
 
-async function request(host, connection, method, params) {
-  return await host.handle({ method, params }, connection);
+async function request(host: Host, connection: Pick<Connection, 'notify' | 'request'>, method: string, params: unknown) {
+  return await host.handle({ method, params }, connection) as StorageReply;
 }
 
 test('Host rejects a cleanup plan after its real five-minute lifetime', {
@@ -99,7 +124,7 @@ test('Host storage preview is read-only and apply requires confirmation', async 
     await readFile(image.image);
     const inspected = await request(host, connection, 'storage.inspect', { projectRoot: project });
     assert.deepEqual(inspected.folders.map(folder => folder.kind), ['sessions', 'screenshots', 'browser', 'cache', 'tmp']);
-    assert.ok(inspected.folders.find(folder => folder.kind === 'screenshots').bytes > 0);
+    assert.ok(inspected.folders.find(folder => folder.kind === 'screenshots')!.bytes > 0);
   });
 });
 

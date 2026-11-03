@@ -13,6 +13,9 @@ import { createHost } from '../core/dist/host/host.js';
 import { createControl } from '../core/dist/host/control.js';
 import { createChatCompletionsProvider } from '../core/dist/model/chat-completions.js';
 import { withTuiHost } from '../core/tests/helpers/tui-host.ts';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import type { HostProvider } from '../core/dist/host/provider.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const workspaceRoot = resolve(process.env.LIGULE_MCP_E2E_WORKSPACE_ROOT ?? repoRoot);
@@ -22,20 +25,38 @@ const tempParent = resolve(process.env.LIGULE_MCP_E2E_TEMP_ROOT ?? join(workspac
 const apiKeyName = 'LIGULE_SESSION_CLOSE_TEST_KEY';
 const apiKey = randomUUID();
 
-function structured(result, label) {
+type ToolPayload = {
+  sessionId: string;
+  operationId: string;
+  state: string;
+  code?: string;
+  queue: unknown[];
+  queued?: boolean;
+  records: { json: string }[];
+  hasMore?: boolean;
+  nextBefore?: number;
+};
+type ToolResult = {
+  isError?: boolean;
+  structuredContent?: ToolPayload;
+  content?: { type?: string; text?: string }[];
+};
+type ChatBody = { messages: { role: string; content?: unknown }[] };
+
+function structured(result: ToolResult, label: string): ToolPayload {
   assert.equal(result.isError, undefined, `${label}: ${JSON.stringify(result.structuredContent ?? result)}`);
   assert.ok(result.structuredContent !== undefined, `${label}: missing structuredContent`);
   return result.structuredContent;
 }
 
-function errorCode(result) {
+function errorCode(result: ToolResult) {
   assert.equal(result.isError, true, 'expected an MCP tool error');
-  let payload = {};
+  let payload: { code?: string } = {};
   try { payload = JSON.parse(result.content?.[0]?.text ?? '{}'); } catch { /* The SDK may return a non-JSON error message. */ }
   return result.structuredContent?.code ?? payload.code;
 }
 
-function sendCompletion(response, text = 'session close run completed') {
+function sendCompletion(response: ServerResponse, text = 'session close run completed') {
   const frames = [
     { choices: [{ index: 0, delta: { content: text }, finish_reason: 'stop' }] },
     { choices: [], usage: { prompt_tokens: 20, completion_tokens: 5 } },
@@ -44,7 +65,7 @@ function sendCompletion(response, text = 'session close run completed') {
   response.end(`${frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('')}data: [DONE]\n\n`);
 }
 
-async function createFixture(onRequest = async (_body, response) => sendCompletion(response)) {
+async function createFixture(onRequest: (body: ChatBody, response: ServerResponse, request: IncomingMessage) => Promise<void> = async (_body, response) => sendCompletion(response)) {
   await mkdir(tempParent, { recursive: true });
   const verifiedParent = await realpath(tempParent);
   const tempRoot = await mkdtemp(join(verifiedParent, 'session-close-'));
@@ -67,14 +88,14 @@ async function createFixture(onRequest = async (_body, response) => sendCompleti
       }
     }
   });
-  await new Promise((resolveListen, reject) => {
+  await new Promise<void>((resolveListen, reject) => {
     endpoint.once('error', reject);
-    endpoint.listen(0, '127.0.0.1', resolveListen);
+    endpoint.listen(0, '127.0.0.1', () => resolveListen());
   });
-  const address = endpoint.address();
+  const address = endpoint.address() as AddressInfo;
   assert.ok(address && typeof address === 'object');
   const baseURL = `http://127.0.0.1:${address.port}/v1`;
-  const tomlString = (value) => JSON.stringify(value.replaceAll('\\', '/'));
+  const tomlString = (value: string) => JSON.stringify(value.replaceAll('\\', '/'));
   await writeFile(join(dataRoot, 'config.toml'), [
     '[model]',
     'api = "chat-completions"',
@@ -98,17 +119,17 @@ async function createFixture(onRequest = async (_body, response) => sendCompleti
     context, projectRoot, dataRoot, sessionDirectory,
     async dispose() {
       await context.close();
-      await new Promise((resolveClose, reject) => endpoint.close((error) => error ? reject(error) : resolveClose()));
+      await new Promise<void>((resolveClose, reject) => endpoint.close((error) => error ? reject(error) : resolveClose()));
       await rm(tempRoot, { recursive: true, force: true });
     },
   };
 }
 
-async function call(context, name, args) {
+async function call(context: Awaited<ReturnType<typeof createFixture>>['context'], name: string, args: Record<string, unknown>) {
   return await context.client.callTool({ name, arguments: args });
 }
 
-async function waitFor(check, label, within = 10_000) {
+async function waitFor(check: () => Promise<unknown>, label: string, within = 10_000) {
   const until = Date.now() + within;
   while (Date.now() < until) {
     const result = await check();
@@ -123,7 +144,7 @@ test('real MCP close releases the 64-session limit, retains history and operatio
   const { context, projectRoot, dataRoot, sessionDirectory } = fixture;
   try {
     const listed = await context.client.listTools();
-    assert.ok(listed.tools.some((tool) => tool.name === 'ligule_session_close'), 'the MCP server exposes explicit session close');
+    assert.ok(listed.tools.some((tool: { name: string }) => tool.name === 'ligule_session_close'), 'the MCP server exposes explicit session close');
 
     const owned = [];
     for (let index = 0; index < 64; index += 1) {
@@ -133,7 +154,7 @@ test('real MCP close releases the 64-session limit, retains history and operatio
     const previousHome = process.env.LIGULE_HOME;
     process.env.LIGULE_HOME = dataRoot;
     try {
-      const takeover = await requestAgentControl(projectRoot, owned[0], { action: 'takeover' });
+      const takeover = await requestAgentControl(projectRoot, owned[0], { action: 'takeover' }) as { ownership: string };
       assert.equal(takeover.ownership, 'human');
     } finally {
       if (previousHome === undefined) delete process.env.LIGULE_HOME;
@@ -153,7 +174,7 @@ test('real MCP close releases the 64-session limit, retains history and operatio
       structured(await call(context, 'ligule_session_close', { sessionId }), 'close_filled_session');
     }
 
-    let firstClosed;
+    let firstClosed: { sessionId: string; operationId: string } | undefined;
     for (let index = 0; index < 66; index += 1) {
       const created = structured(await call(context, 'ligule_session_create', { projectRoot }), `cycle_${index}_create`);
       const run = structured(await call(context, 'ligule_run', { sessionId: created.sessionId, input: `close cycle ${index}` }), `cycle_${index}_run`);
@@ -182,14 +203,14 @@ test('real MCP close releases the 64-session limit, retains history and operatio
 });
 
 test('close refuses a running or queued session without cancelling or discarding its work', { timeout: 60_000 }, async () => {
-  let markStarted;
-  let releaseProvider;
-  const started = new Promise((resolveStarted) => { markStarted = resolveStarted; });
-  const waitForRelease = new Promise((resolveRelease) => { releaseProvider = resolveRelease; });
+  let markStarted: (() => void) | undefined;
+  let releaseProvider: (() => void) | undefined;
+  const started = new Promise<void>((resolveStarted) => { markStarted = resolveStarted; });
+  const waitForRelease = new Promise<void>((resolveRelease) => { releaseProvider = resolveRelease; });
   const fixture = await createFixture(async (body, response) => {
     const input = body.messages.filter((message) => message.role === 'user').at(-1)?.content ?? '';
     if (typeof input === 'string' && input.includes('HOLD_CLOSE_TEST')) {
-      markStarted();
+      markStarted?.();
       await waitForRelease;
     }
     if (!response.destroyed) sendCompletion(response, 'held run completed');
@@ -208,32 +229,33 @@ test('close refuses a running or queued session without cancelling or discarding
     assert.equal(stillRunning.state, 'running');
     assert.equal(stillRunning.queue.length, 1);
     structured(await call(context, 'ligule_session_send', { sessionId: created.sessionId, action: 'clear_queue' }), 'explicit_clear_queue');
-    releaseProvider();
+    releaseProvider?.();
     const completed = structured(await call(context, 'ligule_run_await', { operationId: operation.operationId, timeoutMs: 10_000 }), 'finish_running_operation');
     assert.equal(completed.state, 'done');
     structured(await call(context, 'ligule_session_close', { sessionId: created.sessionId }), 'close_after_idle');
   } finally {
-    releaseProvider();
+    releaseProvider?.();
     await fixture.dispose();
   }
 });
 
 test('a plugin cleanup failure keeps the real Host session locked until close is retried', async () => {
   await withTuiHost(async ({ config, projectDirectory, sessionDirectory }) => {
-    const provider = createChatCompletionsProvider({ baseUrl: config.model.baseURL, model: config.model.model, apiKeyEnv: config.model.apiKeyEnv });
+    const provider = createChatCompletionsProvider({ baseUrl: config.model.baseURL, model: config.model.model, apiKeyEnv: config.model.apiKeyEnv }) as unknown as HostProvider;
     const failure = new Error('plugin disposal failed');
     const host = createHost({ config, provider, plugins: [{ name: 'cleanup-failure', setup: () => () => { throw failure; } }] });
     const observer = createHost({ config, provider });
+    const unusedConnection = { notify() {}, async request() { throw new Error('session_close_test_connection_unused'); } };
     const control = createControl(host, projectDirectory);
     try {
       const { sessionId } = await control.create(projectDirectory);
       await assert.rejects(control.close(sessionId), error => error instanceof AggregateError && error.errors.includes(failure));
       assert.throws(() => control.start(sessionId, 'blocked while closing'), { code: 'control_session_closing' });
-      await assert.rejects(observer.handle({ method: 'session.open', params: { projectRoot: projectDirectory, sessionId } }), { code: 'session_locked' });
+      await assert.rejects(observer.handle({ method: 'session.open', params: { projectRoot: projectDirectory, sessionId } }, unusedConnection), { code: 'session_locked' });
       assert.deepEqual(await control.close(sessionId), { sessionId });
       await access(join(sessionDirectory, `${sessionId}.jsonl`));
-      await observer.handle({ method: 'session.open', params: { projectRoot: projectDirectory, sessionId } });
-      const history = await observer.handle({ method: 'session.read', params: { sessionId } });
+      await observer.handle({ method: 'session.open', params: { projectRoot: projectDirectory, sessionId } }, unusedConnection);
+      const history = await observer.handle({ method: 'session.read', params: { sessionId } }, unusedConnection) as { events: unknown[] };
       assert.ok(history.events.length > 0);
     } finally {
       await Promise.allSettled([control.release(), observer.release()]);

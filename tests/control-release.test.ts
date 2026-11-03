@@ -7,20 +7,22 @@ import { createControl } from '../core/dist/host/control.js';
 import { createHost } from '../core/dist/host/host.js';
 import { createConfig } from '../core/dist/kernel/config.js';
 import { createChatCompletionsProvider } from '../core/dist/model/chat-completions.js';
+import type { Host } from '../core/dist/host/host.js';
+import type { HostProvider } from '../core/dist/host/provider.js';
 import { withTuiHost, waitFor } from '../core/tests/helpers/tui-host.ts';
 
 test('controller shutdown cancels a real Host run before draining a delayed read response', async () => {
   await withTuiHost(async ({ host, sessionId, projectDirectory, sessionDirectory, providerRequests, client }) => {
-    const readGate = Promise.withResolvers();
-    const reading = Promise.withResolvers();
+    const readGate = Promise.withResolvers<unknown>();
+    const reading = Promise.withResolvers<unknown>();
     // Delay delivery of a real Host response until its active HTTP run settles.
-    const controlled = {
+    const controlled: Host = {
       async handle(message, connection) {
         const work = host.handle(message, connection);
         if (message.method === 'run.start') work.then(readGate.resolve, readGate.resolve);
         const result = await work;
         if (message.method === 'session.read') {
-          reading.resolve();
+          reading.resolve(undefined);
           await readGate.promise;
         }
         return result;
@@ -52,7 +54,7 @@ test('controller shutdown cancels a real Host run before draining a delayed read
     } finally {
       deadline.abort();
       await host.release();
-      readGate.resolve();
+      readGate.resolve(undefined);
       await Promise.allSettled([pendingRead, shutdown]);
     }
   }, { delayMs: 2500 });
@@ -63,12 +65,12 @@ for (const [hostFails, earlyOperation] of [[true, false], [false, false], [true,
     await withTuiHost(async ({ config, projectDirectory, providerRequests, sessionDirectory }) => {
       const disposeFailure = new Error('plugin_dispose_failed');
       const operationFailure = new Error('operation_completion_failed');
-      const readGate = Promise.withResolvers();
-      const reading = Promise.withResolvers();
-      const operationGate = Promise.withResolvers();
-      const hostFinished = Promise.withResolvers();
-      let originalHostError;
-      const provider = createChatCompletionsProvider({ baseUrl: config.model.baseURL, model: config.model.model, apiKeyEnv: config.model.apiKeyEnv });
+      const readGate = Promise.withResolvers<unknown>();
+      const reading = Promise.withResolvers<unknown>();
+      const operationGate = Promise.withResolvers<unknown>();
+      const hostFinished = Promise.withResolvers<unknown>();
+      let originalHostError: AggregateError | undefined;
+      const provider = createChatCompletionsProvider({ baseUrl: config.model.baseURL, model: config.model.model, apiKeyEnv: config.model.apiKeyEnv }) as unknown as HostProvider;
       const host = createHost({ config, provider, plugins: [{ name: 'release-check', setup: () => () => {
         if (hostFails) throw disposeFailure;
       } }] });
@@ -76,7 +78,7 @@ for (const [hostFails, earlyOperation] of [[true, false], [false, false], [true,
         async handle(message, connection) {
           try {
             const result = await host.handle(message, connection);
-            if (message.method === 'session.read') { reading.resolve(); await readGate.promise; }
+            if (message.method === 'session.read') { reading.resolve(undefined); await readGate.promise; }
             return result;
           } catch (error) {
             if (message.method === 'run.start') {
@@ -89,12 +91,12 @@ for (const [hostFails, earlyOperation] of [[true, false], [false, false], [true,
         },
         async release() {
           try { await host.release(); }
-          catch (error) { originalHostError = error; throw error; }
-          finally { hostFinished.resolve(); }
+          catch (error) { originalHostError = error as AggregateError; throw error; }
+          finally { hostFinished.resolve(undefined); }
         },
       }, projectDirectory);
       let pendingRead;
-      let outcome;
+      let outcome: Promise<{ error?: unknown }> | undefined;
       let closed = false;
       try {
         const { sessionId } = await control.create(projectDirectory);
@@ -103,26 +105,26 @@ for (const [hostFails, earlyOperation] of [[true, false], [false, false], [true,
         pendingRead = control.read(sessionId, undefined, 10);
         await reading.promise;
         const shutdown = control.release();
-        outcome = shutdown.then(() => { closed = true; return {}; }, error => { closed = true; return { error }; });
+        outcome = shutdown.then((): { error?: unknown } => { closed = true; return {}; }, error => { closed = true; return { error }; });
         assert.equal(control.release(), shutdown);
         await hostFinished.promise;
-        if (earlyOperation) operationGate.resolve();
+        if (earlyOperation) operationGate.resolve(undefined);
         await tick();
         assert.equal(closed, false, 'Host failure does not skip pending requests');
-        readGate.resolve();
+        readGate.resolve(undefined);
         await pendingRead;
         await tick();
         if (!earlyOperation) assert.equal(closed, false, 'operation completion is drained after requests');
-        operationGate.resolve();
-        const result = await outcome;
+        operationGate.resolve(undefined);
+        const result = await outcome!;
         assert.equal(result.error, hostFails ? originalHostError : operationFailure);
-        if (hostFails) assert.ok(originalHostError.errors.includes(disposeFailure));
+        if (hostFails) assert.ok(originalHostError!.errors.includes(disposeFailure));
         assert.equal(control.release(), shutdown, 'repeated close retains the original result');
         assert.equal((await readdir(sessionDirectory)).filter(name => name.endsWith('.lock')).length, 1,
           'only the outer fixture session retains its lock');
       } finally {
-        readGate.resolve();
-        operationGate.resolve();
+        readGate.resolve(undefined);
+        operationGate.resolve(undefined);
         await Promise.allSettled([pendingRead, outcome, host.release()]);
       }
     }, { delayMs: 2500 });
@@ -133,12 +135,12 @@ test('shutdown refuses session construction after a concurrent project load fini
   await withTuiHost(async ({ config, directory }) => {
     const otherRoot = join(directory, 'other');
     await mkdir(otherRoot);
-    const loading = Promise.withResolvers();
-    const loaded = Promise.withResolvers();
-    const provider = createChatCompletionsProvider({ baseUrl: 'http://127.0.0.1:1', model: 'unused', apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY' });
+    const loading = Promise.withResolvers<unknown>();
+    const loaded = Promise.withResolvers<unknown>();
+    const provider = createChatCompletionsProvider({ baseUrl: 'http://127.0.0.1:1', model: 'unused', apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY' }) as unknown as HostProvider;
     const host = createHost({ config, provider,
       loadEnvironment: async () => {
-        loading.resolve();
+        loading.resolve(undefined);
         await loaded.promise;
         return { config: createConfig({ user: { ...config, workspaceRoot: otherRoot, boundary: otherRoot } }), provider };
       },
@@ -149,13 +151,13 @@ test('shutdown refuses session construction after a concurrent project load fini
     try {
       await loading.promise;
       const shutdown = control.release();
-      loaded.resolve();
+      loaded.resolve(undefined);
       await shutdown;
       assert.deepEqual(await outcome, { code: 'host_closed' });
       assert.equal((await readdir(config.host.sessionDirectory)).filter(name => name.endsWith('.lock')).length, 1,
         'only the fixture Host session retains its existing lock');
     } finally {
-      loaded.resolve();
+      loaded.resolve(undefined);
       await Promise.allSettled([creating, outcome]);
       await host.release();
     }

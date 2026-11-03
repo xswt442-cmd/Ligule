@@ -7,6 +7,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import type { AddressInfo } from 'node:net';
 import { loadHostEnvironment } from '../core/dist/host/environment.js';
 import { serveHost } from '../core/dist/host/host.js';
 import { createConnection } from '../core/dist/host/connection.js';
@@ -32,8 +33,8 @@ test('CLI run keeps credential binding when a project replaces the user endpoint
     response.end(JSON.stringify({ choices: [{ message: { content: 'endpoint reply' }, finish_reason: 'stop' }] }));
   }));
   try {
-    for (const endpoint of endpoints) await new Promise(resolve => endpoint.listen(0, '127.0.0.1', resolve));
-    const urls = endpoints.map(endpoint => `http://127.0.0.1:${endpoint.address().port}/v1`);
+    for (const endpoint of endpoints) await new Promise<void>(resolve => endpoint.listen(0, '127.0.0.1', () => resolve()));
+    const urls = endpoints.map(endpoint => `http://127.0.0.1:${(endpoint.address() as AddressInfo).port}/v1`);
     const reference = `LIGULE_CLI_BINDING_${randomUUID().replaceAll('-', '')}`;
     await writeFile(join(dataRoot, 'config.toml'), stringify({ model: { api: 'chat-completions', baseURL: urls[0], model: 'fixture', apiKeyEnv: reference,
       capabilities: { streaming: false } }, policy: { mode: 'auto' } }));
@@ -65,19 +66,19 @@ test('real model requests bind credentials to user or flag endpoints across proj
   process.env[reference] = sentinel;
   process.env[otherReference] = 'isolated-other-reference';
   const previousHome = process.env.LIGULE_HOME;
-  const seen = [[], []];
-  let beforeFirstReply;
-  let childRequest;
+  const seen: boolean[][] = [[], []];
+  let beforeFirstReply: (() => Promise<void>) | undefined;
+  let childRequest: boolean | undefined;
   const servers = seen.map((requests) => createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     const delegate = childRequest;
     childRequest = undefined;
-    if (delegate !== undefined) assert(body.tools.some((tool) => tool.function.name === 'subagent'));
-    if (body.messages.some((message) => message.role === 'user' && message.content === 'binding child')) {
+    if (delegate !== undefined) assert(body.tools.some((tool: { function: { name: string } }) => tool.function.name === 'subagent'));
+    if (body.messages.some((message: { role: string; content?: unknown }) => message.role === 'user' && message.content === 'binding child')) {
       assert.equal(body.max_tokens, 16);
-      assert.equal(body.tools.some((tool) => tool.function.name === 'subagent'), false);
+      assert.equal(body.tools.some((tool: { function: { name: string } }) => tool.function.name === 'subagent'), false);
     }
     requests.push(request.headers.authorization === `Bearer ${sentinel}` || request.headers['x-api-key'] === sentinel);
     const hook = beforeFirstReply;
@@ -88,17 +89,26 @@ test('real model requests bind credentials to user or flag endpoints across proj
       ? { choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'binding-child', type: 'function', function: { name: 'subagent', arguments: JSON.stringify({ task: 'binding child', outputTokens: 16 }) } }] }, finish_reason: 'tool_calls' }] }
       : hook !== undefined
       ? { choices: [{ message: { role: 'assistant', content: null, tool_calls: [{ id: 'binding-read', type: 'function', function: { name: 'read', arguments: '{"path":"note.txt"}' } }] }, finish_reason: 'tool_calls' }] }
-      : request.url.endsWith('/messages')
+      : request.url!.endsWith('/messages')
       ? { type: 'message', role: 'assistant', content: [{ type: 'text', text: 'bound response' }], stop_reason: 'end_turn' }
       : { choices: [{ message: { role: 'assistant', content: 'bound response' }, finish_reason: 'stop' }] }));
   }));
   try {
-    await Promise.all(servers.map((server) => new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))));
-    const [firstURL, secondURL] = servers.map((server) => `http://127.0.0.1:${server.address().port}`);
+    await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()))));
+    const [firstURL, secondURL] = servers.map((server) => `http://127.0.0.1:${(server.address() as AddressInfo).port}`);
     const user = { api: 'chat-completions', baseURL: firstURL, model: 'review', apiKeyEnv: reference, capabilities: { streaming: false } };
     const service = { id: 'binding', name: 'Binding', api: 'chat-completions', baseURL: firstURL, apiKeyEnv: reference, models: ['review'] };
     const services = { services: [service], selection: { provider: 'binding', model: 'review' }, capabilities: { streaming: false } };
-    const cases = [
+    const cases: {
+      name: string;
+      user: Record<string, unknown>;
+      project: Record<string, unknown>;
+      local?: boolean;
+      flags?: string[];
+      allowed?: number;
+      changeDuringTurn?: boolean;
+      subagent?: boolean;
+    }[] = [
       { name: 'shared-endpoint', user, project: { baseURL: secondURL } },
       { name: 'local-endpoint', user, project: { baseURL: secondURL }, local: true },
       { name: 'credential-reference', user, project: { apiKeyEnv: otherReference } },
@@ -130,12 +140,12 @@ test('real model requests bind credentials to user or flag endpoints across proj
       let approvals = 0;
       client.onRequest(() => { approvals += 1; return { decision: 'deny' }; });
       try {
-        const { sessionId } = await client.request('session.create', {});
-        assert.equal((await client.request('status.get', { sessionId })).permission.workspaceTrusted, false);
+        const { sessionId } = await client.request('session.create', {}) as { sessionId: string };
+        assert.equal((await client.request('status.get', { sessionId }) as { permission: { workspaceTrusted: boolean } }).permission.workspaceTrusted, false);
         if (scenario.changeDuringTurn) {
           beforeFirstReply = async () => {
-            const shown = await client.request('config.get', {});
-            await client.request('config.set', { field: 'model.baseURL', value: secondURL, layer: 'user', version: shown.layers.find((layer) => layer.layer === 'user').version });
+            const shown = await client.request('config.get', {}) as { layers: { layer: string; version: number }[] };
+            await client.request('config.set', { field: 'model.baseURL', value: secondURL, layer: 'user', version: shown.layers.find((layer) => layer.layer === 'user')!.version });
           };
         }
         if (scenario.subagent) childRequest = true;
@@ -144,11 +154,11 @@ test('real model requests bind credentials to user or flag endpoints across proj
           await assert.rejects(run, { code: 'provider_credential_unbound' }, scenario.name);
           assert.deepEqual(seen, [[], []], scenario.name);
         } else {
-          assert.equal((await run).text, 'bound response', scenario.name);
+          assert.equal((await run as { text: string }).text, 'bound response', scenario.name);
           assert.deepEqual(seen[scenario.allowed], scenario.subagent ? [true, true, true] : scenario.changeDuringTurn ? [true, true] : [true], scenario.name);
           assert.deepEqual(seen[1 - scenario.allowed], [], scenario.name);
           if (scenario.changeDuringTurn) {
-            assert.equal((await client.request('run.start', { sessionId, input: 'Use the updated service.' })).text, 'bound response');
+            assert.equal((await client.request('run.start', { sessionId, input: 'Use the updated service.' }) as { text: string }).text, 'bound response');
             assert.deepEqual(seen[1], [true], 'the next turn adopts the newly bound user endpoint');
           }
         }
@@ -162,7 +172,7 @@ test('real model requests bind credentials to user or flag endpoints across proj
   } finally {
     await Promise.all(servers.map((server) => {
       server.closeAllConnections();
-      return new Promise((resolve) => server.close(resolve));
+      return new Promise<void>((resolve) => server.close(() => resolve()));
     }));
     if (previousHome === undefined) delete process.env.LIGULE_HOME;
     else process.env.LIGULE_HOME = previousHome;

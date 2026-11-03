@@ -8,13 +8,16 @@ import {
   createConfig, createDecisionChain, createKernel, createLoop, createSessionLog, findTool,
   loadAssembly, minimalPlugin, probeBackend, readTool,
 } from '../core/dist/index.js';
+import type { Kernel, ToolDefinition } from '../core/dist/kernel/kernel.js';
+import type { Plugin } from '../core/dist/kernel/assembly.js';
+import type { ModelProvider, ModelRequest, ProviderEvent } from '../core/dist/kernel/loop.js';
 
 const sourceDirectories = [
   fileURLToPath(new URL('../core/src/', import.meta.url)),
   fileURLToPath(new URL('../tui/src/', import.meta.url)),
 ];
 
-function filesBelow(directory) {
+function filesBelow(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = join(directory, entry.name);
     return entry.isDirectory() ? filesBelow(path) : [path];
@@ -28,7 +31,7 @@ test('runtime source files use TypeScript only', () => {
   assert.deepEqual(javascript, []);
 });
 
-function tool(name, run, execution) {
+function tool(name: string, run: ToolDefinition['run'], execution?: ToolDefinition['execution']): ToolDefinition {
   return { name, description: `the ${name} tool`, parameters: { type: 'object', properties: {} }, execution, run };
 }
 
@@ -47,9 +50,9 @@ test('清单第 2 条：装配清单能读出本次运行装了哪些插件', ()
 
 test('清单第 3 条：两个插件声明同名工具时整份装载失败并回滚', () => {
   const kernel = createKernel();
-  const asFirst = { name: 'a', setup: (host) => host.register(tool('dup', async () => ({}))) };
-  const asSecond = { name: 'b', setup: (host) => host.register(tool('dup', async () => ({}))) };
-  assert.throws(() => loadAssembly(kernel, [asFirst, asSecond]), (error) => error.code === 'tool_already_registered');
+  const asFirst: Plugin<Kernel> = { name: 'a', setup: (host) => host.register(tool('dup', async () => ({}))) };
+  const asSecond: Plugin<Kernel> = { name: 'b', setup: (host) => host.register(tool('dup', async () => ({}))) };
+  assert.throws(() => loadAssembly(kernel, [asFirst, asSecond]), (error) => (error as { code: string }).code === 'tool_already_registered');
   assert.deepEqual(kernel.list(), []);
 });
 
@@ -73,16 +76,17 @@ test('清单第 5 条：上级引用越界与链接指向边界之外，两种�
     const workspace = join(root, 'workspace');
     await mkdir(workspace, { recursive: true });
     await writeFile(join(workspace, 'ok.txt'), 'inside');
+    const context = { config: createConfig({ user: { boundary: workspace } }) } as Parameters<typeof readTool.run>[1];
     await assert.rejects(
-      () => readTool.run({ path: '../ok-outside.txt' }, { config: createConfig({ user: { boundary: workspace } }) }),
-      (error) => error.code === 'path_escapes_boundary',
+      () => readTool.run({ path: '../ok-outside.txt' }, context),
+      (error) => (error as { code: string }).code === 'path_escapes_boundary',
     );
     await mkdir(join(root, 'outside'), { recursive: true });
     await writeFile(join(root, 'outside', 'secret.txt'), 'outside');
     await symlink(join(root, 'outside'), join(workspace, 'link'), process.platform === 'win32' ? 'junction' : 'dir');
     await assert.rejects(
-      () => readTool.run({ path: 'link/secret.txt' }, { config: createConfig({ user: { boundary: workspace } }) }),
-      (error) => error.code === 'path_escapes_through_link',
+      () => readTool.run({ path: 'link/secret.txt' }, context),
+      (error) => (error as { code: string }).code === 'path_escapes_through_link',
     );
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -110,8 +114,8 @@ test('清单第 7 条：上一轮模型看到的工具清单与注入内容能�
       const disposers = [readTool, findTool].map((entry) => host.register(entry));
       return () => disposers.forEach((dispose) => dispose());
     } }]);
-    const requests = [];
-    const provider = {
+    const requests: ModelRequest[] = [];
+    const provider: ModelProvider = {
       async *stream(request) {
         requests.push(request);
         yield* requests.length === 1
@@ -158,10 +162,10 @@ test('清单第 9 条：内核一侧不引入传输、界面与适配器，同�
   const kernel = createKernel();
   kernel.register(tool('ping', async () => ({ text: 'pong' })));
   let asked = 0;
-  const provider = {
+  const provider: ModelProvider = {
     async *stream() {
       asked += 1;
-      yield* asked === 1 ? [{ type: 'tool-call', name: 'ping' }] : [{ type: 'text', text: 'done' }];
+      yield* (asked === 1 ? [{ type: 'tool-call', name: 'ping' }] : [{ type: 'text', text: 'done' }]) as unknown as ProviderEvent[];
     },
   };
   assert.deepEqual(await createLoop({ kernel, provider }).run('go'), { text: 'done', iterations: 2, modelCalls: 2 });
@@ -171,6 +175,6 @@ test('清单第 11 条：参数模式形状不合法时注册当场失败', () =
   const kernel = createKernel();
   assert.throws(
     () => kernel.register({ name: 'bad', description: 'd', parameters: { type: 'string' }, run: async () => ({}) }),
-    (error) => error.code === 'tool_parameters_type_not_object',
+    (error) => (error as { code: string }).code === 'tool_parameters_type_not_object',
   );
 });

@@ -17,7 +17,7 @@ const apiKeySentinel = 'PLAN2_SYNTHETIC_MCP_CREDENTIAL_NEVER_USE';
 const diagnosticSentinel = 'PLAN2_SYNTHETIC_UPSTREAM_DIAGNOSTIC_SENTINEL';
 const userPrompt = 'Please provide a concise status note for this project.';
 
-function sse(events) {
+function sse(events: unknown[]) {
   return events.map((event) => `data: ${typeof event === 'string' ? event : JSON.stringify(event)}\n\n`).join('');
 }
 
@@ -56,7 +56,7 @@ function messagesToolFailure() {
   ];
 }
 
-async function startEndpoint(kind) {
+async function startEndpoint(kind: string) {
   const server = createServer((request, response) => {
     request.resume();
     if (kind === 'http-unauthorized') {
@@ -79,14 +79,14 @@ async function startEndpoint(kind) {
   return { server, baseUrl: `http://127.0.0.1:${port}` };
 }
 
-async function collectJsonlFiles(root) {
-  const result = [];
-  async function visit(directory) {
+async function collectJsonlFiles(root: string) {
+  const result: string[] = [];
+  async function visit(directory: string) {
     let entries;
     try {
       entries = await readdir(directory, { withFileTypes: true });
     } catch (error) {
-      if (error && typeof error === 'object' && error.code === 'ENOENT') return;
+      if (error && typeof error === 'object' && (error as { code?: string }).code === 'ENOENT') return;
       throw error;
     }
     for (const entry of entries) {
@@ -99,19 +99,34 @@ async function collectJsonlFiles(root) {
   return result;
 }
 
-function resultData(result) {
+type ToolPayload = {
+  code?: string;
+  sessionId?: string;
+  operationId?: string;
+  state?: string;
+  records?: { json: string }[];
+  hasMore?: boolean;
+  nextBefore?: number;
+};
+type ToolResult = {
+  isError?: boolean;
+  structuredContent?: ToolPayload & { result?: { structuredContent?: ToolPayload } };
+  content?: { type?: string; text?: string }[];
+};
+
+function resultData(result: ToolResult | undefined): ToolPayload {
   const structured = result?.structuredContent;
-  if (structured !== undefined) return structured.result?.structuredContent ?? structured;
+  if (structured !== undefined) return (structured.result?.structuredContent ?? structured) as ToolPayload;
   const text = result?.content?.find((item) => item?.type === 'text')?.text;
   if (typeof text !== 'string') throw new Error('mcp_result_shape_invalid');
   try {
-    return JSON.parse(text);
+    return JSON.parse(text) as ToolPayload;
   } catch {
     throw new Error('mcp_result_json_invalid');
   }
 }
 
-async function runFailureCase({ name, api, endpoint, expectedCode }) {
+async function runFailureCase({ name, api, endpoint, expectedCode }: { name: string; api: string; endpoint: { baseUrl: string }; expectedCode: string }) {
   await mkdir(temporaryBase, { recursive: true });
   const caseRoot = await mkdtemp(join(temporaryBase, `${name}-`));
   const projectRoot = join(caseRoot, 'project');
@@ -143,7 +158,7 @@ async function runFailureCase({ name, api, endpoint, expectedCode }) {
   await writeFile(join(home, 'config.toml'), config, { flag: 'wx' });
   await setTrusted(projectRoot, true, join(home, 'tui-trust.json'));
 
-  let connection;
+  let connection: Awaited<ReturnType<typeof connectMcp>> | undefined;
   try {
     connection = await connectMcp({
       cliPath,
@@ -154,9 +169,9 @@ async function runFailureCase({ name, api, endpoint, expectedCode }) {
       sdkRoot,
     });
 
-    const mcpResponses = [];
-    const call = async (name, argumentsValue) => {
-      const result = await connection.client.callTool({ name, arguments: argumentsValue });
+    const mcpResponses: ToolResult[] = [];
+    const call = async (name: string, argumentsValue: Record<string, unknown>) => {
+      const result = await connection!.client.callTool({ name, arguments: argumentsValue }) as ToolResult;
       mcpResponses.push(result);
       return resultData(result);
     };
@@ -183,8 +198,8 @@ async function runFailureCase({ name, api, endpoint, expectedCode }) {
 
     let before;
     let page;
-    const sessionResponses = [];
-    const records = [];
+    const sessionResponses: string[] = [];
+    const records: { json: string }[] = [];
     do {
       const argumentsValue = { sessionId, limit: 50, ...(before === undefined ? {} : { before }) };
       const result = await connection.client.callTool({ name: 'ligule_session_read', arguments: argumentsValue });
