@@ -1,17 +1,44 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { copyFile, cp, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createSessionLog } from '../../core/dist/index.js';
 import { createRunAcceptance } from '../../core/dist/session/run.js';
 import { spillContent } from '../../core/dist/kernel/result.js';
+import { isTrusted } from '../../core/dist/kernel/workspace-trust.js';
 
 const repository = fileURLToPath(new URL('../../', import.meta.url));
 const corePackage = join(repository, 'core');
 const helperSource = fileURLToPath(new URL('./export_session.mjs', import.meta.url));
 const temporaryRoot = process.env.LIGULE_EVAL_TEMP_DIR ?? tmpdir();
+
+// 真实安装里 core 的依赖由 npm 装好；测试夹具只拷贝 dist，所以按需补上传递依赖。
+// pnpm 的 node_modules 是符号链接，所以按 core 的解析结果定位真实目录。
+async function copyDependency(name, targetRoot, fromDirectory = corePackage) {
+  const resolve = (specifier) => createRequire(join(fromDirectory, 'package.json')).resolve(specifier);
+  let source;
+  try {
+    source = dirname(resolve(`${name}/package.json`));
+  } catch {
+    // 有些包用 exports 封住了 ./package.json，就沿着入口文件向上找到包根。
+    let directory = dirname(resolve(name));
+    while (!existsSync(join(directory, 'package.json'))) directory = dirname(directory);
+    source = directory;
+  }
+  const target = join(targetRoot, name);
+  await mkdir(join(targetRoot, name.split('/').slice(0, -1).join('/')), { recursive: true });
+  await cp(source, target, { recursive: true, dereference: true });
+  const manifest = JSON.parse(await readFile(join(source, 'package.json'), 'utf8'));
+  for (const dependency of Object.keys(manifest.dependencies ?? {})) {
+    if (dependency.startsWith('@ligule/')) continue;
+    // pnpm 把传递依赖放在包自己的 node_modules 里，所以从该包目录解析。
+    await copyDependency(dependency, targetRoot, source);
+  }
+}
 
 async function packagedHelper(root) {
   const packageRoot = join(root, 'node_modules', 'ligule');
@@ -22,7 +49,13 @@ async function packagedHelper(root) {
   const bundledCore = join(packageRoot, 'node_modules', '@ligule', 'core');
   await mkdir(bundledCore, { recursive: true });
   await cp(join(corePackage, 'dist'), join(bundledCore, 'dist'), { recursive: true });
+  const coreManifest = JSON.parse(await readFile(join(corePackage, 'package.json'), 'utf8'));
   await writeFile(join(bundledCore, 'package.json'), await readFile(join(corePackage, 'package.json')));
+  // export_session.mjs 现在会写信任文档，需要 core 的 proper-lockfile / smol-toml 及其传递依赖。
+  for (const dependency of ['proper-lockfile', 'smol-toml']) {
+    if (coreManifest.dependencies?.[dependency] === undefined) continue;
+    await copyDependency(dependency, join(packageRoot, 'node_modules'));
+  }
   const helperPath = join(packageRoot, 'export_session.mjs');
   await writeFile(helperPath, await readFile(helperSource));
   return import(pathToFileURL(helperPath).href);
@@ -196,7 +229,7 @@ test('machine CLI parser filters response bodies and rejects localized output', 
     assert.equal(argv.at(-1), 'solve the public task');
     assert.ok(argv.includes('--allow-full-access'));
     assert.ok(argv.includes('loop.totalModelCalls=5'));
-    assert.ok(argv.includes('policy.mode="auto"'));
+    assert.ok(argv.includes('policy.mode="never"'));
     assert.throws(() => helper.buildCliArgs({
       instruction: 'x', sessionDirectory: '/tmp/sessions', api: 'messages', baseUrl: 'https://api.example.test',
       model: 'x', apiKeyEnv: 'LIGULE_API_KEY', modelCalls: 0, timeoutMs: 1000, requestTimeoutMs: 1000,
@@ -218,6 +251,29 @@ test('terminates the CLI process group when its runtime budget expires', async (
     assert.equal(child.error.code, 'ETIMEDOUT');
     assert.notEqual(child.status, 0);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('trusts the task directory before the benchmark run starts', async () => {
+  const root = await mkdtemp(join(temporaryRoot, 'ligule-harbor-trust-'));
+  const saved = process.env.LIGULE_HOME;
+  try {
+    const helper = await packagedHelper(root);
+    const workspace = join(root, 'workspace');
+    const home = join(root, 'ligule-home');
+    await mkdir(workspace, { recursive: true });
+    await mkdir(home, { recursive: true });
+    process.env.LIGULE_HOME = home;
+    assert.equal(await isTrusted(workspace, join(home, 'trust.json')), false);
+    await helper.ensureWorkspaceTrust(workspace);
+    assert.equal(await isTrusted(workspace, join(home, 'trust.json')), true);
+    const document = JSON.parse(await readFile(join(home, 'trust.json'), 'utf8'));
+    assert.equal(document.version, 1);
+    assert.equal(document.directories.length, 1);
+  } finally {
+    if (saved === undefined) delete process.env.LIGULE_HOME;
+    else process.env.LIGULE_HOME = saved;
     await rm(root, { recursive: true, force: true });
   }
 });
