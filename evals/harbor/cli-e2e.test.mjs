@@ -54,6 +54,8 @@ async function installableHelper(root) {
   await writeFile(join(packageRoot, 'package.json'), JSON.stringify({ name: 'ligule', version: '0.1.0' }));
   const helperPath = join(packageRoot, 'export_session.mjs');
   await writeFile(helperPath, await readFile(helperSource));
+  // 导出器按同目录的 policy-mode.mjs 读取基准审批档位，手工 consumer 也需要它。
+  await writeFile(join(packageRoot, 'policy-mode.mjs'), await readFile(fileURLToPath(new URL('./policy-mode.mjs', import.meta.url))));
   return import(pathToFileURL(helperPath).href);
 }
 
