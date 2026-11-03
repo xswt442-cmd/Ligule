@@ -182,7 +182,7 @@ function validateGrant(value: unknown): DelegationGrant {
     'confirmedPartialWorkspaceWrite', 'allowedMcpServers', 'allowedMcpTools', 'allowedModes', 'allowedModels', 'maxOutputTokens',
     'allowScreenCapture', 'confirmedScreenCapture', 'createdAt', 'expiresAt', 'revokedAt', 'policySemantics'];
   const requiredKeys = keys.filter((key) => !['source', 'confirmedPartialWorkspaceWrite', 'allowedMcpServers', 'allowedMcpTools',
-    'allowedModes', 'allowedModels', 'maxOutputTokens', 'allowScreenCapture', 'confirmedScreenCapture'].includes(key));
+    'allowedModes', 'allowedModels', 'maxOutputTokens', 'allowScreenCapture', 'confirmedScreenCapture', 'policySemantics'].includes(key));
   const valueRecord = isRecord(value) ? value : {};
   const semantics = valueRecord.policySemantics;
   const legacy = semantics === undefined;
@@ -269,7 +269,8 @@ function validateAudit(value: unknown): DelegationAuditEvent {
     || (value.source !== undefined && ((value.source !== 'trusted-ui' && value.source !== 'legacy') || value.kind !== 'grant.created'))
     || (value.permissionProfile !== undefined && !isProfile(value.permissionProfile))
     || (value.network !== undefined && !isNetwork(value.network))
-    || (value.policy !== undefined && !isPolicy(value.policy))
+    // 历史审计记录里可能写着旧值 `none`，保留原文，不改写也不丢弃。
+    || (value.policy !== undefined && !isPolicy(value.policy) && value.policy !== 'none')
     || (value.code !== undefined && (typeof value.code !== 'string' || !/^[a-z][a-z0-9_]{0,79}$/.test(value.code)))) {
     throw invalidStore();
   }

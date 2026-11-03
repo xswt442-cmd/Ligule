@@ -195,6 +195,29 @@ matrix([
   },
 ]);
 
+test('a denial threshold never turns always into a rule-answered mode', async () => {
+  // 拒绝阈值会把 ask/auto 拉回逐次审批，但 `always` 本来就要问每一次调用：
+  // 它不能因为计数被降成 `ask`，否则一条 allow 规则就能免掉审批。
+  const asked: PolicyQuestion[] = [];
+  const chain = createDecisionChain({
+    mode: 'always',
+    thresholds: { consecutive: 1, total: 1 },
+    rules: [
+      { tool: 'exec', decision: 'deny', match: 'rm *' },
+      { tool: 'exec', decision: 'allow', match: 'git status*' },
+    ],
+    ask: async (question) => { asked.push(question); return true; },
+  });
+  await chain.evaluate({ tool: 'exec', input: { command: 'rm -rf /tmp/x' }, access: 'exec' });
+  assert.equal(chain.denials().consecutive, 1);
+  const verdict = await chain.evaluate({ tool: 'exec', input: { command: 'git status' }, access: 'exec' });
+  assert.equal(verdict.decision, 'allow');
+  assert.equal(verdict.via, 'ask');
+  assert.equal(verdict.level, 'always');
+  assert.equal(asked.length, 1);
+  assert.equal(chain.mode, 'always');
+});
+
 test('a denial threshold does not survive a never override', async () => {
   const chain = createDecisionChain({ mode: 'ask', thresholds: { consecutive: 1, total: 1 }, rules: [{ tool: 'exec', decision: 'deny', match: 'rm *' }], ask: async () => true });
   assert.equal((await chain.evaluate({ tool: 'exec', input: { command: 'rm -rf /tmp/x' } })).via, 'rule');

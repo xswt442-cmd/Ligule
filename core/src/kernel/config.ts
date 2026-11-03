@@ -92,6 +92,17 @@ export function createConfig(layers: unknown): ConfigSnapshot {
       return [{ source, rules: layer.policy.rules }];
     });
     if (rules.length > 0) snapshot.policy.rules = mergePolicyRules(rules).rules;
+    // 语义标记必须与它解释的那一档来自同一层：上层只写 `mode` 时不能继承下层留下的
+    // `semantics`，否则旧文件里的 `never` 会被读成新语义的“跳过审批”。
+    const modeLayer = [...LAYER_ORDER].reverse().find((name) => {
+      const layer = layers[name];
+      return isPlainObject(layer) && isPlainObject(layer.policy) && layer.policy.mode !== undefined;
+    });
+    const semantics = modeLayer === undefined
+      ? undefined
+      : ((layers[modeLayer] as Record<string, unknown>).policy as Record<string, unknown> | undefined)?.semantics;
+    if (semantics === undefined) delete snapshot.policy.semantics;
+    else snapshot.policy.semantics = semantics;
   }
   deepFreeze(snapshot);
   return snapshot;

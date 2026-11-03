@@ -3807,8 +3807,11 @@ export function createHost({
             maxPermissionProfile: message.params.maxPermissionProfile as PermissionProfile,
             defaultNetwork: message.params.defaultNetwork as PermissionNetwork,
             maxNetwork: message.params.maxNetwork as PermissionNetwork,
-            // 授权里的策略上限同样只降级不升级：旧 UI 的 `none` 记作 `ask`，无法自证的 `never` 也降为 `ask`。
-            defaultPolicy: readPolicyMode(message.params.defaultPolicy, true) ?? 'ask',
+            // 旧 UI 的 `none`/旧 `never` 只降级为 `ask`；更新后的客户端要么显式带上语义标记，
+            // 要么带着只有新版本才会发送的 `allowedPolicyAlways`，这两种情况按新语义读取。
+            defaultPolicy: readPersistedPolicyMode(message.params.defaultPolicy,
+              message.params.policySemantics
+                ?? (message.params.allowedPolicyAlways === undefined ? undefined : POLICY_SEMANTICS)) ?? 'ask',
             allowedPolicies: [...new Set<DelegationPolicy>([
               ...(message.params.allowedPolicyAsk === true ? ['ask' as const] : []),
               ...(message.params.allowedPolicyAuto === true ? ['auto' as const] : []),

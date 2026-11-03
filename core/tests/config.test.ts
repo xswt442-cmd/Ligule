@@ -2,6 +2,23 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createConfig, KernelError } from '../dist/index.js';
 
+test('the policy semantics marker is taken from the layer that supplies the mode', () => {
+  // 上层只写档位、下层写着档位和语义标记：合并后必须按供值那一层的语义解释，
+  // 否则新的 `never` 会被旧的 `ask` 读法抹平，或者旧值被当成新语义。
+  const inherited = createConfig({
+    user: { policy: { mode: 'never', semantics: 2 } },
+    project: { policy: { mode: 'ask' } },
+  }) as { policy: { mode?: string; semantics?: unknown } };
+  assert.equal(inherited.policy.mode, 'ask');
+  assert.equal(inherited.policy.semantics, undefined);
+  const supplied = createConfig({
+    user: { policy: { mode: 'ask' } },
+    project: { policy: { mode: 'never', semantics: 2 } },
+  }) as { policy: { mode?: string; semantics?: unknown } };
+  assert.equal(supplied.policy.mode, 'never');
+  assert.equal(supplied.policy.semantics, 2);
+});
+
 test('a key written in two layers is taken from the higher-precedence one', () => {
   const config = createConfig({
     user: { mode: 'user', keep: 1 },

@@ -74,6 +74,8 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly maxNetwork?: string;
   readonly defaultPolicy?: string;
   readonly allowedPolicyAlways?: boolean;
+  /** 客户端写下的档位语义；缺省时按旧语义读取 `defaultPolicy`。 */
+  readonly policySemantics?: number;
   readonly allowedPolicyAsk?: boolean;
   readonly allowedPolicyAuto?: boolean;
   readonly allowedPolicyNone?: boolean;
@@ -536,6 +538,7 @@ export const METHODS = Object.freeze({
       maxNetwork: { type: 'string' },
       defaultPolicy: { type: 'string', description: 'always, ask, auto, or never; a legacy none is read as ask' },
       allowedPolicyAlways: { type: 'boolean' },
+      policySemantics: { type: 'integer', description: 'the meaning of defaultPolicy; 2 sends always and never as themselves' },
       allowedPolicyAsk: { type: 'boolean' },
       allowedPolicyAuto: { type: 'boolean' },
       allowedPolicyNone: { type: 'boolean', description: 'legacy spelling; grants ask, never the approval-skipping never' },

@@ -284,7 +284,8 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
     },
 
     get mode() {
-      return forcedToAsk && current !== 'never' ? 'ask' : current;
+      // always 本身就要求每次审批，拒绝阈值不会把它收紧成 ask。
+      return forcedToAsk && current !== 'never' && current !== 'always' ? 'ask' : current;
     },
 
     // 标明当前策略来自配置默认值还是会话覆盖；拒绝阈值触发的收紧状态单独记录在 `forced`。
@@ -368,7 +369,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       // `never` 跳过整个策略审批层：不应用规则、不因危险分析或脚本解释器升级为审批、也不询问。
       // 硬性安全校验（网络目标类别、守卫、脚本绑定、Permission）在下面照常执行。
       const applyRules = current !== 'never';
-      let effective: PolicyMode = forcedToAsk && current !== 'never' ? 'ask' : current;
+      let effective: PolicyMode = current === 'always' || current === 'never' || !forcedToAsk ? current : 'ask';
       // 记录此次判定时的有效策略；拒绝阈值触发的收紧状态另行记录。
       const judged = (decision: PolicyVerdict['decision'], via: string, extra: Omit<PolicyVerdict, 'decision' | 'via' | 'capability' | 'level' | 'forced'>, hardDenied = false): PolicyVerdict => ({
         decision,

@@ -199,6 +199,27 @@ test('a trusted grant can narrow the policy ceiling and never exceeds it', async
   });
 });
 
+test('a grant file written before the semantic marker keeps its old meaning', async () => {
+  await fixture(async ({ projectRoot, storePath }) => {
+    const created = await createDelegationGrant(storePath, input(projectRoot, {
+      defaultPolicy: 'never', allowedPolicies: ['ask', 'auto', 'never'],
+    }), (await listDelegationGrants(storePath)).version);
+    assert.equal(created.grants[0].defaultPolicy, 'never');
+    // 模拟旧版本写下的文件：没有 semantic 标记，档位还是旧的 `none`。
+    const stored = JSON.parse(await readFile(storePath, 'utf8')) as { grants: Record<string, unknown>[] };
+    delete stored.grants[0].policySemantics;
+    stored.grants[0].defaultPolicy = 'none';
+    stored.grants[0].allowedPolicies = ['none', 'ask'];
+    await writeFile(storePath, `${JSON.stringify(stored)}\n`, 'utf8');
+    const reloaded = await listDelegationGrants(storePath);
+    // 旧 `none` 只降级为 `ask`，绝不能变成新的“跳过审批”档位。
+    assert.equal(reloaded.grants[0].defaultPolicy, 'ask');
+    assert.deepEqual([...reloaded.grants[0].allowedPolicies].sort(), ['ask']);
+    assertDelegationPolicy(reloaded.grants[0], 'ask');
+    assert.throws(() => assertDelegationPolicy(reloaded.grants[0], 'never'), { code: 'agent_control_policy_exceeds_grant' });
+  });
+});
+
 test('Agent Control MCP limits require an allowed server and an exact tool capability', async () => {
   await fixture(async ({ projectRoot, storePath }) => {
     const allowed = {
