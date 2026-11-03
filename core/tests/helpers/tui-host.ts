@@ -190,8 +190,11 @@ export async function withTuiHost<TResult>(run: (context: TuiHostContext) => TRe
       response.writeHead(200, { 'content-type': 'text/event-stream' });
       response.end(`${frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('')}data: [DONE]\n\n`);
     } catch (error) {
+      // This loopback fixture is test-only; keep the HTTP body fixed and surface the
+      // fixture detail only on the test process's stderr for diagnosis.
+      process.stderr.write(`[tui host fixture] ${error instanceof Error ? error.message : String(error)}\n`);
       response.writeHead(500, { 'content-type': 'text/plain' });
-      response.end(error instanceof Error ? error.message : String(error));
+      response.end('tui_host_fixture_failure');
     }
   });
 
