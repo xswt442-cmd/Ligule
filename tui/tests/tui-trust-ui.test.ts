@@ -6,9 +6,12 @@ import { join, resolve } from 'node:path';
 import { confirmWorkspaceTrust } from '../dist/tui/trust.js';
 import { isTrusted, setTrusted } from '../dist/tui/trust-store.js';
 
+type FakeInput = PassThrough & { isTTY: boolean; setRawMode(): unknown; ref(): void; unref(): void };
+type FakeOutput = PassThrough & { isTTY: boolean; columns: number };
+
 const testRoot = resolve('testplace/tmp');
 
-async function withSandbox(run) {
+async function withSandbox<T>(run: (root: string) => Promise<T>) {
   await mkdir(testRoot, { recursive: true });
   const root = await mkdtemp(join(testRoot, 'tui-trust-ui-'));
   try {
@@ -19,20 +22,16 @@ async function withSandbox(run) {
 }
 
 function terminal() {
-  const stdout = new PassThrough();
-  stdout.columns = 90;
-  stdout.isTTY = true;
+  const stdout: FakeOutput = Object.assign(new PassThrough(), { columns: 90, isTTY: true });
   let painted = '';
-  stdout.on('data', (chunk) => { painted += chunk.toString(); });
-  const stdin = new PassThrough();
-  stdin.isTTY = true;
-  stdin.setRawMode = () => stdin;
-  stdin.ref = () => {};
-  stdin.unref = () => {};
+  stdout.on('data', (chunk: Buffer | string) => { painted += chunk.toString(); });
+  const stdin: FakeInput = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
   return { stdin, stdout, painted: () => painted };
 }
 
-async function waitForPrompt(tty) {
+type Terminal = ReturnType<typeof terminal>;
+
+async function waitForPrompt(tty: Terminal) {
   const deadline = Date.now() + 2_000;
   while (!tty.painted().includes('退出')) {
     if (Date.now() > deadline) throw new Error('trust prompt did not render');
@@ -46,12 +45,12 @@ test('Enter on the default Exit option does not save trust', async () => {
     const trustFile = join(root, 'trust.json');
     await mkdir(directory);
     const tty = terminal();
-    const result = confirmWorkspaceTrust(directory, { stdin: tty.stdin, stdout: tty.stdout, trustFile });
+    const result = confirmWorkspaceTrust(directory, { stdin: tty.stdin as unknown as NodeJS.ReadStream, stdout: tty.stdout as unknown as NodeJS.WriteStream, trustFile });
     await waitForPrompt(tty);
     tty.stdin.write('\r');
     assert.equal(await result, false);
     assert.equal(await isTrusted(directory, trustFile), false);
-    await assert.rejects(readFile(trustFile), (error) => error.code === 'ENOENT');
+    await assert.rejects(readFile(trustFile), (error: unknown) => (error as { code?: string }).code === 'ENOENT');
   });
 });
 
@@ -61,7 +60,7 @@ test('Up and Enter trust the workspace and remember the choice', async () => {
     const trustFile = join(root, 'trust.json');
     await mkdir(directory);
     const tty = terminal();
-    const result = confirmWorkspaceTrust(directory, { stdin: tty.stdin, stdout: tty.stdout, trustFile });
+    const result = confirmWorkspaceTrust(directory, { stdin: tty.stdin as unknown as NodeJS.ReadStream, stdout: tty.stdout as unknown as NodeJS.WriteStream, trustFile });
     await waitForPrompt(tty);
     tty.stdin.write('\u001b[A');
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
@@ -77,7 +76,7 @@ test('Escape exits and pasted y does not approve trust', async () => {
     const trustFile = join(root, 'trust.json');
     await mkdir(directory);
     const tty = terminal();
-    const result = confirmWorkspaceTrust(directory, { stdin: tty.stdin, stdout: tty.stdout, trustFile });
+    const result = confirmWorkspaceTrust(directory, { stdin: tty.stdin as unknown as NodeJS.ReadStream, stdout: tty.stdout as unknown as NodeJS.WriteStream, trustFile });
     await waitForPrompt(tty);
     tty.stdin.write('y');
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 40));
@@ -94,7 +93,7 @@ test('an already trusted workspace returns without rendering a prompt', async ()
     await mkdir(directory);
     await setTrusted(directory, true, trustFile);
     const tty = terminal();
-    assert.equal(await confirmWorkspaceTrust(directory, { stdin: tty.stdin, stdout: tty.stdout, trustFile }), true);
+    assert.equal(await confirmWorkspaceTrust(directory, { stdin: tty.stdin as unknown as NodeJS.ReadStream, stdout: tty.stdout as unknown as NodeJS.WriteStream, trustFile }), true);
     assert.equal(tty.painted(), '');
   });
 });

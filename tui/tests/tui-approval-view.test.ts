@@ -4,11 +4,15 @@ import { PassThrough } from 'node:stream';
 import { createElement } from 'react';
 import { render } from 'ink';
 import { ApprovalPanel, buildApprovalLayout } from '../dist/tui/approval-view.js';
+import type { ApprovalDisplay, ApprovalLayout } from '../dist/tui/approval-view.js';
 import { displayWidth } from '../dist/tui/commands.js';
 import { keyHint } from '../dist/tui/keymap.js';
-import { completeFrame } from './helpers/frames.js';
+import { completeFrame } from './helpers/frames.ts';
 
-function approval(overrides = {}) {
+type FakeInput = PassThrough & { isTTY: boolean; setRawMode(): unknown; ref(): void; unref(): void };
+type FakeOutput = PassThrough & { isTTY: boolean; columns: number };
+
+function approval(overrides: Partial<ApprovalDisplay> = {}): ApprovalDisplay {
   return {
     tool: 'fs.write',
     detail: 'C:/repo/notes.txt',
@@ -26,25 +30,19 @@ function approval(overrides = {}) {
 }
 
 function terminal(columns = 80) {
-  const stdout = new PassThrough();
-  stdout.columns = columns;
-  stdout.isTTY = true;
+  const stdout: FakeOutput = Object.assign(new PassThrough(), { columns, isTTY: true });
   let output = '';
-  stdout.on('data', (chunk) => { output += chunk.toString(); });
-  const stdin = new PassThrough();
-  stdin.isTTY = true;
-  stdin.setRawMode = () => stdin;
-  stdin.ref = () => {};
-  stdin.unref = () => {};
+  stdout.on('data', (chunk: Buffer | string) => { output += chunk.toString(); });
+  const stdin: FakeInput = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref() {}, unref() {} });
   return {
     output: () => completeFrame(output),
-    render: (layout, cursor = 0) => render(createElement(ApprovalPanel, { layout, cursor }), {
-      stdin, stdout, exitOnCtrlC: false, patchConsole: false, interactive: true,
+    render: (layout: ApprovalLayout, cursor = 0) => render(createElement(ApprovalPanel, { layout, cursor }), {
+      stdin: stdin as unknown as NodeJS.ReadStream, stdout: stdout as unknown as NodeJS.WriteStream, exitOnCtrlC: false, patchConsole: false, interactive: true,
     }),
   };
 }
 
-function assertFrameBudget(frame, columns, rows) {
+function assertFrameBudget(frame: string, columns: number, rows: number) {
   const lines = frame.split('\n').filter(Boolean);
   assert.ok(lines.length <= rows, `expected at most ${rows} rows, got ${lines.length}:\n${frame}`);
   assert.ok(lines.every((line) => displayWidth(line) <= columns), lines.join('\n'));

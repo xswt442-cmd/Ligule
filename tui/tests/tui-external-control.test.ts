@@ -6,26 +6,49 @@ import { PassThrough } from 'node:stream';
 import { createElement } from 'react';
 import { render } from 'ink';
 import { createAgentControlRuntime } from '../../core/dist/host/agent-control-runtime.js';
+import type { AgentControlRuntime } from '../../core/dist/host/agent-control-runtime.js';
 import { createSessionLog } from '../../core/dist/session/session.js';
 import { App } from '../dist/tui/app.js';
-import { completeFrame } from './helpers/frames.js';
+import type { TuiClient } from '../dist/tui/app.js';
+import { completeFrame } from './helpers/frames.ts';
 import { waitFor, withTuiHost } from './helpers/tui-host.ts';
+import type { TuiHostContext } from './helpers/tui-host.ts';
 
-async function withApp(context, run) {
-  const stdout = Object.assign(new PassThrough(), { columns: 80, rows: 24, isTTY: true });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref() {}, unref() {} });
+type FakeInput = PassThrough & { isTTY: boolean; setRawMode(): unknown; ref(): void; unref(): void };
+type FakeOutput = PassThrough & { isTTY: boolean; columns: number; rows: number };
+
+type AppHandle = {
+  frame: () => string;
+  output: () => string;
+  stdin: FakeInput;
+  type: (text: string) => Promise<void>;
+  wait: (condition: () => boolean) => Promise<void>;
+};
+
+type RecordedAction = { readonly action: string; readonly [key: string]: unknown };
+type ControlEvent = { readonly cursor: number; readonly kind: string; readonly at: number; readonly sessionId: string; readonly operationId: string; readonly [key: string]: unknown };
+
+async function withApp<T>(context: TuiHostContext, run: (handle: AppHandle) => Promise<T>) {
+  const stdout: FakeOutput = Object.assign(new PassThrough(), { columns: 80, rows: 24, isTTY: true });
+  const stdin: FakeInput = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref() {}, unref() {} });
   let painted = '';
-  stdout.on('data', (chunk) => { painted += chunk; });
+  stdout.on('data', (chunk: Buffer | string) => { painted += chunk.toString(); });
   const frame = () => completeFrame(painted);
   const output = () => painted.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
   const instance = render(createElement(App, {
-    client: context.client,
+    client: context.client as TuiClient,
     sessionId: context.sessionId,
-    stdout,
+    stdout: stdout as unknown as NodeJS.WriteStream,
     info: { boundary: context.projectDirectory },
-  }), { stdout, stdin, patchConsole: false, exitOnCtrlC: false, interactive: true });
-  const wait = (condition) => waitFor(condition, { within: 15_000, read: frame });
-  const type = async (text) => { stdin.write(text); await new Promise((resolve) => setTimeout(resolve, 50)); stdin.write('\r'); };
+  }), {
+    stdout: stdout as unknown as NodeJS.WriteStream,
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    patchConsole: false,
+    exitOnCtrlC: false,
+    interactive: true,
+  });
+  const wait = (condition: () => boolean) => waitFor(condition, { within: 15_000, read: frame });
+  const type = async (text: string) => { stdin.write(text); await new Promise<void>((resolve) => setTimeout(resolve, 50)); stdin.write('\r'); };
   try {
     await wait(() => frame().includes('审批 逐次审批'));
     await run({ frame, output, stdin, type, wait });
@@ -51,10 +74,10 @@ test('TUI observes an externally locked session, answers a question, sends guida
     let currentOperation = 'external-question-run';
     let currentState = 'running';
     let failFirstQuestionReply = true;
-    let pending = [];
-    let events = [{ cursor: 1, kind: 'run.started', at: Date.now(), sessionId, operationId: currentOperation }];
-    const actions = [];
-    let runtime;
+    let pending: { requestId: string; sessionId: string; operationId: string; type: 'question'; createdAt: number; details: { questions: typeof questions } }[] = [];
+    let events: ControlEvent[] = [{ cursor: 1, kind: 'run.started', at: Date.now(), sessionId, operationId: currentOperation }];
+    const actions: RecordedAction[] = [];
+    let runtime: AgentControlRuntime;
     runtime = createAgentControlRuntime(context.projectDirectory, async (requestedSession, request) => {
       assert.equal(requestedSession, sessionId);
       actions.push(request);
@@ -110,7 +133,7 @@ test('TUI observes an externally locked session, answers a question, sends guida
 
     try {
       await runtime.register(sessionId);
-      const listed = await context.client.request('sessions.list', { projectRoot: context.projectDirectory });
+      const listed = await context.client.request('sessions.list', { projectRoot: context.projectDirectory }) as { sessions: { id: string }[] };
       assert.ok(listed.sessions.some((item) => item.id === sessionId), JSON.stringify(listed));
       await type(`/resume ${sessionId}`);
       await wait(() => output().includes('External session connected') || output().includes('外控会话已连接'));
@@ -132,8 +155,8 @@ test('TUI observes an externally locked session, answers a question, sends guida
       stdin.write('\r');
       await wait(() => output().includes('answers to the external session') || output().includes('回答（外控会话）'));
       await wait(() => actions.filter((action) => action.action === 'reply').length === 2);
-      assert.equal(actions.find((action) => action.action === 'reply').type, 'question');
-      assert.deepEqual(actions.find((action) => action.action === 'reply').answers, [{ id: 'q1', selected: [], custom: 'north' }]);
+      assert.equal(actions.find((action) => action.action === 'reply')!.type, 'question');
+      assert.deepEqual(actions.find((action) => action.action === 'reply')!.answers, [{ id: 'q1', selected: [], custom: 'north' }]);
       await wait(() => output().includes('Submitted 1/1 answers') || output().includes('已提交 1/1 个回答'));
       await wait(() => !frame().includes('Choose a route'));
 
@@ -153,8 +176,8 @@ test('TUI observes an externally locked session, answers a question, sends guida
         && !frame().includes('外控会话已连接') && !frame().includes('External session connected'));
       assert.equal(actions.some((action) => action.action === 'takeover'), true);
       assert.ok(context.requests.some((request) => request.method === 'session.open'
-        && request.params.projectRoot === context.projectDirectory && request.params.sessionId === sessionId));
-      assert.ok(context.requests.some((request) => request.method === 'session.read' && request.params.sessionId === sessionId));
+        && (request.params as { projectRoot?: string }).projectRoot === context.projectDirectory && (request.params as { sessionId?: string }).sessionId === sessionId));
+      assert.ok(context.requests.some((request) => request.method === 'session.read' && (request.params as { sessionId?: string }).sessionId === sessionId));
     } finally {
       await runtime.close();
       await session.close();

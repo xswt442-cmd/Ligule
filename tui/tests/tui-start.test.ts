@@ -10,32 +10,40 @@ import { hostProviderFromConfig } from '../../core/dist/host/host.js';
 import { listSessions } from '../../core/dist/session/list.js';
 import { createSessionLog } from '../../core/dist/session/session.js';
 import { runTui } from '../dist/tui/start.js';
+import type { RunTuiOptions } from '../dist/tui/start.js';
+import type { TuiClient } from '../dist/tui/app.js';
 import { readInput } from '../dist/tui/input-store.js';
-import { completeFrame } from './helpers/frames.js';
+import type { SavedInput } from '../dist/tui/input-store.js';
+import { completeFrame } from './helpers/frames.ts';
 import { waitFor, withTuiHost } from './helpers/tui-host.ts';
 
+type FakeInput = PassThrough & { isTTY: boolean; setRawMode(): unknown; ref(): void; unref(): void };
+type FakeOutput = PassThrough & { isTTY: boolean; columns: number; rows: number };
+
 async function createTerminal() {
-  const stdout = Object.assign(new PassThrough(), { columns: 120, rows: 30, isTTY: true });
+  const stdout: FakeOutput = Object.assign(new PassThrough(), { columns: 120, rows: 30, isTTY: true });
   const stderr = new PassThrough();
-  const stdin = Object.assign(new PassThrough(), {
+  const stdin: FakeInput = Object.assign(new PassThrough(), {
     isTTY: true,
     setRawMode: () => stdin,
     ref: () => {},
     unref: () => {},
   });
   let painted = '';
-  stdout.on('data', (chunk) => { painted += chunk.toString(); });
+  stdout.on('data', (chunk: Buffer | string) => { painted += chunk.toString(); });
   return { stdin, stdout, stderr, frame: () => completeFrame(painted), allOutput: () => painted };
 }
 
-async function typeAndSubmit(terminal, text) {
+type Terminal = Awaited<ReturnType<typeof createTerminal>>;
+
+async function typeAndSubmit(terminal: Terminal, text: string) {
   terminal.stdin.write(text);
   const draft = `› ${text}`;
   await waitFor(() => terminal.frame().includes(draft) || terminal.allOutput().slice(-1_000).includes(draft), { within: 10_000, read: terminal.allOutput });
   terminal.stdin.write('\r');
 }
 
-function visible(terminal, text) {
+function visible(terminal: Terminal, text: string) {
   return terminal.frame().includes(text) || terminal.allOutput().includes(text);
 }
 
@@ -58,17 +66,17 @@ test('runTui starts without a model, records the failed turn, stays usable, and 
   const modesDirectory = fileURLToPath(new URL('../../core/modes/', import.meta.url));
   const terminal = await createTerminal();
   let finished = false;
-  let runError;
+  let runError: unknown;
   const running = runTui({
     config,
     provider: hostProviderFromConfig(config),
-    policy: config.policy,
+    policy: config.policy as RunTuiOptions['policy'],
     modeName: DEFAULT_MODE,
     modePaths: modeDirectories(projectDirectory, modesDirectory),
     locale: 'en',
-    stdout: terminal.stdout,
-    stdin: terminal.stdin,
-    stderr: terminal.stderr,
+    stdout: terminal.stdout as unknown as NodeJS.WriteStream,
+    stdin: terminal.stdin as unknown as NodeJS.ReadStream,
+    stderr: terminal.stderr as unknown as NodeJS.WriteStream,
     historyFile: join(directory, 'history.jsonl'),
     inputFile: join(directory, 'inputs.jsonl'),
     keyFile: join(directory, 'keys.json'),
@@ -92,7 +100,7 @@ test('runTui starts without a model, records the failed turn, stays usable, and 
     const sessions = await listSessions(sessionDirectory, { projectRoot: projectDirectory });
     assert.equal(sessions.length, 1);
     const record = await createSessionLog({ directory: sessionDirectory, id: sessions[0].id }).read();
-    const failedTurn = record.find((event) => event.kind === 'turn');
+    const failedTurn = record.find((event) => event.kind === 'turn')!;
     assert.equal(failedTurn.status, 'failed');
     assert.equal(failedTurn.code, 'host_model_config_missing');
 
@@ -136,7 +144,7 @@ test('Ctrl+C saves a fresh unsent draft before the debounce interval', { timeout
   const running = runTui({
     config, provider: hostProviderFromConfig(config),
     modeName: DEFAULT_MODE, modePaths: modeDirectories(projectDirectory, fileURLToPath(new URL('../../core/modes/', import.meta.url))),
-    locale: 'en', stdout: terminal.stdout, stdin: terminal.stdin, stderr: terminal.stderr,
+    locale: 'en', stdout: terminal.stdout as unknown as NodeJS.WriteStream, stdin: terminal.stdin as unknown as NodeJS.ReadStream, stderr: terminal.stderr as unknown as NodeJS.WriteStream,
     historyFile: join(directory, 'history.jsonl'), inputFile: join(directory, 'inputs.jsonl'), keyFile: join(directory, 'keys.json'),
   }).finally(() => { finished = true; });
   try {
@@ -165,15 +173,22 @@ test('the credentials command shows the reference and source without exposing th
     const { App } = await import('../dist/tui/app.js');
     const terminal = await createTerminal();
     const instance = render(React.createElement(App, {
-      client,
+      client: client as TuiClient,
       sessionId,
       info: { boundary: projectDirectory },
       locale: 'en',
       interactive: true,
       history: { entries: [], remember: async () => [] },
-      inputs: { read: async () => ({ draft: '', queued: [] }), write: async () => {} },
+      inputs: { read: async () => ({ draft: '', queued: [] }) as unknown as SavedInput, write: async () => {} },
       keys: { read: async () => ({ overrides: {}, refused: [] }), write: async () => {} },
-    }), { stdout: terminal.stdout, stdin: terminal.stdin, stderr: terminal.stderr, exitOnCtrlC: false, patchConsole: false, interactive: true });
+    }), {
+      stdout: terminal.stdout as unknown as NodeJS.WriteStream,
+      stdin: terminal.stdin as unknown as NodeJS.ReadStream,
+      stderr: terminal.stderr as unknown as NodeJS.WriteStream,
+      exitOnCtrlC: false,
+      patchConsole: false,
+      interactive: true,
+    });
 
     try {
       await waitFor(() => visible(terminal, 'Describe a task'), { within: 10_000, read: terminal.allOutput });
