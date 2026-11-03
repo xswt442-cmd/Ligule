@@ -20,7 +20,7 @@ pnpm verify-install
 
 Core 包内测试位于 `core/tests/`，TUI 测试位于 `tui/tests/`，跨模块集成测试位于仓库根目录的 `tests/`。桌面前端检查脚本位于 `desktop/frontend/tests/checks/`，开发辅助文件保留在 `desktop/frontend/dev/`。运行完整套件请使用 `pnpm test`，其中包含 Core、TUI 和跨模块测试。
 
-`tests/mcp-server.test.js` 通过真实 SDK stdio 客户端、本地 HTTP 模型端点、持久 Session 记录、Policy 与子进程验证外控。可单独运行 `node --test --import ./tests/hooks/isolated-data-root.mjs tests/mcp-server.test.js`。`tests/helpers/mcp-control.mjs` 独立客户端接受明确的已安装 CLI 和 SDK 路径，可在检出目录之外检查相同控制调用。工具与权限语义见 [Agent Control（MCP）指南](../agent-control/guide.zh-CN.md)。确定性模型端点测试不代表真实外部模型服务验收。
+`tests/mcp-server.test.js` 通过真实 SDK stdio 客户端、本地 HTTP 模型端点、持久 Session 记录、Policy 与子进程验证外控。可单独运行 `node --test --import ./tests/hooks/isolated-data-root.ts tests/mcp-server.test.js`。`tests/helpers/mcp-control.mjs` 独立客户端接受明确的已安装 CLI 和 SDK 路径，可在检出目录之外检查相同控制调用。工具与权限语义见 [Agent Control（MCP）指南](../agent-control/guide.zh-CN.md)。确定性模型端点测试不代表真实外部模型服务验收。
 
 ## 桌面开发
 

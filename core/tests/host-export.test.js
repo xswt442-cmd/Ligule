@@ -7,7 +7,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { branchSessionId, exportImageUrl, exportMarkdown, writeExport } from '../dist/host/export.js';
-import { waitFor, withTuiHost } from './helpers/tui-host.js';
+import { waitFor, withTuiHost } from './helpers/tui-host.ts';
 
 const events = [
   { kind: 'session', formatVersion: 1, sessionId: 's-1', projectRoot: '/work', createdAt: '2026-10-05T00:00:00.000Z' },

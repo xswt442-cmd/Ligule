@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { withTuiHost } from './helpers/tui-host.ts';
+import { withTuiHost } from '../core/tests/helpers/tui-host.ts';
 import { createCompaction, estimateRequest } from '../core/dist/session/compaction.js';
 import { createSessionLog } from '../core/dist/session/session.js';
 import { providerFromConfig } from '../core/dist/host/host.js';

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { withTuiHost, waitFor } from './helpers/tui-host.js';
+import { withTuiHost, waitFor } from './helpers/tui-host.ts';
 
 test('status and notifications expose phase changes, approval waits, counts, and idle cleanup per session', async () => {
   await withTuiHost(async ({ client, sessionId, notifications }) => {

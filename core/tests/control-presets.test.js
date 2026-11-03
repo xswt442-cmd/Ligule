@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { controlPresets, presetGrantCeiling } from '../dist/host/control-presets.js';
-import { withTuiHost } from './helpers/tui-host.js';
+import { withTuiHost } from './helpers/tui-host.ts';
 
 test('safe presets stay inside the minimal permission envelope', () => {
   const presets = controlPresets({ partialWorkspaceWriteConfirmationRequired: true, partialWorkspaceWriteConfirmed: false });

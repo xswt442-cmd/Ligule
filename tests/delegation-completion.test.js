@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createControl } from '../core/dist/host/control.js';
 import { createPermissionContext } from '../core/dist/kernel/permission.js';
-import { withTuiHost, waitFor } from '../core/tests/helpers/tui-host.js';
+import { withTuiHost, waitFor } from '../core/tests/helpers/tui-host.ts';
 
 const outputSchema = {
   type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'], additionalProperties: false,

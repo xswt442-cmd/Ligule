@@ -7,7 +7,7 @@ import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createKernel, createLoop, createSessionLog } from '../dist/index.js';
 import { createControl } from '../dist/host/control.js';
-import { withTuiHost } from './helpers/tui-host.js';
+import { withTuiHost } from './helpers/tui-host.ts';
 
 async function workspace(run) {
   const parent = resolve('testplace');

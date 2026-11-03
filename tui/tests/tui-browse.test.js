@@ -10,7 +10,7 @@ import { completeFrame } from './helpers/frames.js';
 import { App } from '../dist/tui/app.js';
 import { UI_COMMANDS } from '../dist/tui/commands.js';
 import { readInput, rememberInput } from '../dist/tui/input-store.js';
-import { measuredPermissionContext, waitFor, withTuiHost } from './helpers/tui-host.ts';
+import { measuredPermissionContext, waitFor, withTuiHost } from '../../core/tests/helpers/tui-host.ts';
 
 async function withApp(context, run, { columns = 80, rows = 24, inputs } = {}) {
   const stdout = Object.assign(new PassThrough(), { columns, rows, isTTY: true });

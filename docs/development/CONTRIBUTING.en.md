@@ -20,7 +20,7 @@ pnpm verify-install
 
 Core's package tests live under `core/tests/`, TUI tests under `tui/tests/`, and cross-package integration tests under the repository-level `tests/`. Desktop frontend check scripts live under `desktop/frontend/tests/checks/`; development support stays under `desktop/frontend/dev/`. Run the complete suite with `pnpm test` to include Core, TUI, and cross-package tests.
 
-The MCP integration in `tests/mcp-server.test.js` uses a real SDK stdio client, a local HTTP model endpoint, persistent Session records, Policy decisions and child processes. Run it directly with `node --test --import ./tests/hooks/isolated-data-root.mjs tests/mcp-server.test.js`. The standalone client in `tests/helpers/mcp-control.mjs` accepts explicit installed CLI and SDK paths so the same control calls can be checked outside the checkout. See the [Agent Control via MCP guide](../agent-control/guide.en.md) for tool and permission semantics. A deterministic model endpoint does not count as a real external model service test.
+The MCP integration in `tests/mcp-server.test.js` uses a real SDK stdio client, a local HTTP model endpoint, persistent Session records, Policy decisions and child processes. Run it directly with `node --test --import ./tests/hooks/isolated-data-root.ts tests/mcp-server.test.js`. The standalone client in `tests/helpers/mcp-control.mjs` accepts explicit installed CLI and SDK paths so the same control calls can be checked outside the checkout. See the [Agent Control via MCP guide](../agent-control/guide.en.md) for tool and permission semantics. A deterministic model endpoint does not count as a real external model service test.
 
 ## Desktop development
 

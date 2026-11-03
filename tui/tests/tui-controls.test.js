@@ -7,7 +7,7 @@ import { render } from 'ink';
 import { modeDirectories } from '../../core/dist/kernel/modes.js';
 import { modeOptions } from '../dist/tui/mode-options.js';
 import { completeFrame } from './helpers/frames.js';
-import { waitFor, withTuiHost } from './helpers/tui-host.ts';
+import { waitFor, withTuiHost } from '../../core/tests/helpers/tui-host.ts';
 
 const shippedModes = fileURLToPath(new URL('../../core/modes/', import.meta.url));
 const options = {

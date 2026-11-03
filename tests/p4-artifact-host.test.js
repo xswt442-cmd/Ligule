@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { withTuiHost } from '../core/tests/helpers/tui-host.js';
+import { withTuiHost } from '../core/tests/helpers/tui-host.ts';
 
 async function present(client, sessionId, files) {
   await client.request('session.configure', { sessionId, mode: 'full' });

@@ -4,7 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
-import { withTuiHost } from './helpers/tui-host.js';
+import { withTuiHost } from './helpers/tui-host.ts';
 
 const input = JSON.stringify({ tool: 'ask_user_question', args: {
   questions: JSON.stringify([{ question: 'Continue?', options: [], multiSelect: false }]),

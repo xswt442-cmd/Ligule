@@ -8,7 +8,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createDelegationGrant, delegationPathOf, listDelegationGrants, requireDelegationGrant } from '../dist/host/agent-control.js';
 import { detectPermissionCapabilities } from '../dist/capability/permission-capabilities.js';
 import { createPermissionContext } from '../dist/kernel/permission.js';
-import { waitFor, withTuiHost } from './helpers/tui-host.js';
+import { waitFor, withTuiHost } from './helpers/tui-host.ts';
 
 const windowsWorkspaceWrite = createPermissionContext('workspace-write', 'unrestricted', {
   filesystemRead: 'partial', filesystemWrite: 'partial', network: 'partial', process: 'full',

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { withTuiHost } from '../core/tests/helpers/tui-host.js';
+import { withTuiHost } from '../core/tests/helpers/tui-host.ts';
 
 test('persisted and reused failed runs retain the actual provider diagnostic', async () => {
   let requests = 0;

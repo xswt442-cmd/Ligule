@@ -7,7 +7,7 @@ import {
   listDelegationGrants, requireDelegationGrant,
 } from '../dist/host/agent-control.js';
 import { createPermissionContext } from '../dist/kernel/permission.js';
-import { withTuiHost } from './helpers/tui-host.js';
+import { withTuiHost } from './helpers/tui-host.ts';
 
 const root = resolve('testplace');
 

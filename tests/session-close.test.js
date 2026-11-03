@@ -12,7 +12,7 @@ import { setTrusted } from '../core/dist/kernel/workspace-trust.js';
 import { createHost } from '../core/dist/host/host.js';
 import { createControl } from '../core/dist/host/control.js';
 import { createChatCompletionsProvider } from '../core/dist/model/chat-completions.js';
-import { withTuiHost } from '../core/tests/helpers/tui-host.js';
+import { withTuiHost } from '../core/tests/helpers/tui-host.ts';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const workspaceRoot = resolve(process.env.LIGULE_MCP_E2E_WORKSPACE_ROOT ?? repoRoot);

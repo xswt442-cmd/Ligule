@@ -7,7 +7,7 @@ import { createControl } from '../core/dist/host/control.js';
 import { createHost } from '../core/dist/host/host.js';
 import { createConfig } from '../core/dist/kernel/config.js';
 import { createChatCompletionsProvider } from '../core/dist/model/chat-completions.js';
-import { withTuiHost, waitFor } from '../core/tests/helpers/tui-host.js';
+import { withTuiHost, waitFor } from '../core/tests/helpers/tui-host.ts';
 
 test('controller shutdown cancels a real Host run before draining a delayed read response', async () => {
   await withTuiHost(async ({ host, sessionId, projectDirectory, sessionDirectory, providerRequests, client }) => {

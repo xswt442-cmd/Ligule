@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "rootDir": "../.."
+  },
+  "references": [{ "path": ".." }],
+  "include": ["helpers/**/*.ts", "**/*.test.ts"]
+}

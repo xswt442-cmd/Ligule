@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { appendFile, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { withTuiHost } from './helpers/tui-host.js';
+import { withTuiHost } from './helpers/tui-host.ts';
 import {
   branchSession, chooseResumeMode, createBlock, createCheckpointFile, createConfig, createConnection, createMemoryConnectionPair, createSessionLog,
   findUnresolvedCalls, listSessions, listWorkspaceSessions, loadCheckpointFile, loadMode, MESSAGES_CAPABILITIES, modeDirectories, parseSessionBytes,

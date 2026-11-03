@@ -7,7 +7,7 @@ import { createElement } from 'react';
 import { render } from 'ink';
 import { App } from '../dist/tui/app.js';
 import { completeFrame } from './helpers/frames.js';
-import { waitFor, withTuiHost } from './helpers/tui-host.ts';
+import { waitFor, withTuiHost } from '../../core/tests/helpers/tui-host.ts';
 
 async function waitUntilSessionClosed(context, sessionId) {
   await waitFor(async () => {

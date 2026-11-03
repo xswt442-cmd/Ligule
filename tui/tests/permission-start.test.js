@@ -8,7 +8,7 @@ import { createConfig } from '../../core/dist/kernel/config.js';
 import { detectPermissionCapabilities } from '../../core/dist/capability/permission-capabilities.js';
 import { hostProviderFromConfig } from '../../core/dist/host/host.js';
 import { runTui } from '../dist/tui/start.js';
-import { waitFor } from './helpers/tui-host.ts';
+import { waitFor } from '../../core/tests/helpers/tui-host.ts';
 
 function createTerminal() {
   const stdout = Object.assign(new PassThrough(), { columns: 180, rows: 30, isTTY: true });

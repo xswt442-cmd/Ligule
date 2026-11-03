@@ -4,7 +4,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createDelegationGrant, listDelegationGrants, requireDelegationGrant, revokeDelegationGrant, assertDelegationMcpServer, assertDelegationMcpTool, assertDelegationPermission, assertDelegationPolicy } from '../dist/host/agent-control.js';
 import { createPermissionContext } from '../dist/kernel/permission.js';
-import { withTuiHost } from './helpers/tui-host.js';
+import { withTuiHost } from './helpers/tui-host.ts';
 import { createConfig } from '../dist/kernel/config.js';
 import { serveHost } from '../dist/host/host.js';
 import { hostProviderFromConfig } from '../dist/host/provider.js';

@@ -11,7 +11,7 @@ import { serveHost } from '../core/dist/host/host.js';
 import { createControl } from '../core/dist/host/control.js';
 import { hostProviderFromConfig } from '../core/dist/host/provider.js';
 import { modeDirectories } from '../core/dist/kernel/modes.js';
-import { withTuiHost } from '../core/tests/helpers/tui-host.js';
+import { withTuiHost } from '../core/tests/helpers/tui-host.ts';
 
 const testDirectory = fileURLToPath(new URL('../testplace/', import.meta.url));
 

@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { waitFor, withTuiHost } from './helpers/tui-host.ts';
+import { waitFor, withTuiHost } from '../../core/tests/helpers/tui-host.ts';
 
 let rows = {};
 let missing = '';

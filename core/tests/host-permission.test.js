@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { createPermissionContext } from '../dist/kernel/permission.js';
 import { createInteractivePermissionContext } from '../dist/capability/permission-capabilities.js';
 import { resolveShell } from '../dist/capability/shell.js';
-import { waitFor, withTuiHost } from './helpers/tui-host.js';
+import { waitFor, withTuiHost } from './helpers/tui-host.ts';
 import { withoutAutoInheritanceMarker } from './helpers/windows-acl.js';
 
 const fullPermission = createPermissionContext('full-access', 'unrestricted', {

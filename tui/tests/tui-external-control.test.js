@@ -9,7 +9,7 @@ import { createAgentControlRuntime } from '../../core/dist/host/agent-control-ru
 import { createSessionLog } from '../../core/dist/session/session.js';
 import { App } from '../dist/tui/app.js';
 import { completeFrame } from './helpers/frames.js';
-import { waitFor, withTuiHost } from './helpers/tui-host.ts';
+import { waitFor, withTuiHost } from '../../core/tests/helpers/tui-host.ts';
 
 async function withApp(context, run) {
   const stdout = Object.assign(new PassThrough(), { columns: 80, rows: 24, isTTY: true });

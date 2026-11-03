@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { createControl } from '../core/dist/host/control.js';
 import { createPermissionContext } from '../core/dist/kernel/permission.js';
 import { runSummary } from '../core/dist/kernel/run-summary.js';
-import { withTuiHost, waitFor } from '../core/tests/helpers/tui-host.js';
+import { withTuiHost, waitFor } from '../core/tests/helpers/tui-host.ts';
 
 const permission = createPermissionContext('workspace-write', 'disabled', {
   filesystemRead: 'full', filesystemWrite: 'full', network: 'unavailable', process: 'unavailable',

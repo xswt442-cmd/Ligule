@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, writeFile, rename, mkdir, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { withTuiHost } from './helpers/tui-host.js';
+import { withTuiHost } from './helpers/tui-host.ts';
 
 test('complete results are read through the Host without changing the record or model projection', async () => {
   await withTuiHost(async ({ client, config, sessionId, sessionDirectory }) => {

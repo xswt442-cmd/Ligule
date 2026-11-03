@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { withTuiHost } from '../core/tests/helpers/tui-host.js';
+import { withTuiHost } from '../core/tests/helpers/tui-host.ts';
 import { currentTodoSnapshot } from '../core/dist/session/todo.js';
 
 async function records(directory, id) {

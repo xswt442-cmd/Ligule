@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { withTuiHost } from './helpers/tui-host.js';
+import { withTuiHost } from './helpers/tui-host.ts';
 
 // requestKey 的幂等语义：一个逻辑写操作绑定 (Scope, Session, 操作摘要)，重复、并发、重启、
 // 取消后重试要么返回同一次 Run，要么明确冲突；任何情况下都不得再执行一次副作用。

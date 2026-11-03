@@ -43,8 +43,8 @@
   "files": ["dist", "modes", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsc -b tsconfig.json",
-    "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
-    "test": "pnpm run build && pnpm run typecheck:test && node --experimental-strip-types --test --test-reporter=../scripts/test-summary-reporter.mjs --test-concurrency=1 --import ../tests/hooks/isolated-data-root.mjs tests/*.test.js"
+    "typecheck:test": "tsc --noEmit -p tests/tsconfig.json",
+    "test": "pnpm run build && pnpm run typecheck:test && node --experimental-strip-types --test --test-reporter=../scripts/test-summary-reporter.mjs --test-concurrency=1 --import ../tests/hooks/isolated-data-root.ts tests/*.test.js tests/*.test.ts"
   },
   "engines": {
     "node": ">=24"

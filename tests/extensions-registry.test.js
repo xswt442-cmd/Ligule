@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
-import { withTuiHost } from '../core/tests/helpers/tui-host.js';
+import { withTuiHost } from '../core/tests/helpers/tui-host.ts';
 import { createPermissionContext } from '../core/dist/kernel/permission.js';
 
 test('extensions.set records the disable registry from a trusted interface', async () => {

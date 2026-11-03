@@ -5,7 +5,7 @@ import { copyFile, mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { measuredPermissionContext, withTuiHost } from './helpers/tui-host.ts';
+import { measuredPermissionContext, withTuiHost } from '../core/tests/helpers/tui-host.ts';
 
 const repositoryFile = (relativePath) => fileURLToPath(new URL(relativePath, import.meta.url));
 
