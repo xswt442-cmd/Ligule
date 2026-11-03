@@ -7,9 +7,13 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { measuredPermissionContext, withTuiHost } from '../core/tests/helpers/tui-host.ts';
 
-const repositoryFile = (relativePath) => fileURLToPath(new URL(relativePath, import.meta.url));
+const repositoryFile = (relativePath: string) => fileURLToPath(new URL(relativePath, import.meta.url));
 
-async function stageReferences({ projectDirectory }) {
+type HostContext = Parameters<Parameters<typeof withTuiHost>[0]>[0];
+type ToolEvent = { kind: string; tool?: string; seq: number; result: { failed: boolean; content: ToolOutput } };
+type ToolOutput = { text: string; exitCode?: number };
+
+async function stageReferences({ projectDirectory }: { projectDirectory: string }) {
   const reference = join(projectDirectory, 'reference');
   await mkdir(reference, { recursive: true });
   await Promise.all([
@@ -19,12 +23,12 @@ async function stageReferences({ projectDirectory }) {
   ]);
 }
 
-async function callTool(context, tool, args) {
+async function callTool(context: HostContext, tool: string, args: Record<string, unknown>): Promise<ToolOutput> {
   const { client, sessionId } = context;
-  const before = (await client.request('session.read', { sessionId, fullResults: true })).events;
+  const before = (await client.request('session.read', { sessionId, fullResults: true }) as { events: ToolEvent[] }).events;
   const lastSeq = before.at(-1)?.seq ?? -1;
   await client.request('run.start', { sessionId, input: JSON.stringify({ tool, args }) });
-  const { events } = await client.request('session.read', { sessionId, fullResults: true });
+  const { events } = await client.request('session.read', { sessionId, fullResults: true }) as { events: ToolEvent[] };
   const result = events.findLast((event) => event.kind === 'tool' && event.tool === tool && event.seq > lastSeq);
   assert.ok(result, `the real Host did not record the ${tool} tool result`);
   assert.equal(result.result.failed, false, `${tool} failed: ${JSON.stringify(result.result)}`);
@@ -39,7 +43,7 @@ test('G01–G04: isolated Node project, defect repair, repository README, design
     await client.request('workspace.trust', {
       projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true,
     });
-    assert.equal((await client.request('status.get', { sessionId })).permission.workspaceTrusted, true);
+    assert.equal((await client.request('status.get', { sessionId }) as { permission: { workspaceTrusted: boolean } }).permission.workspaceTrusted, true);
     // 只回应 Host 实际提出的命令审批；Permission 仍由本测试使用平台实测能力显式设置。
     client.onRequest(async (message) => {
       assert.equal(message.method, 'approval.request');
@@ -146,11 +150,11 @@ test('G01–G04: isolated Node project, defect repair, repository README, design
     assert.match(noteRead.text, /Session records/);
 
     // Close and reopen the completed session. Recovery must not call the provider or repeat the app side effect.
-    const beforeClose = await client.request('session.read', { sessionId });
+    const beforeClose = await client.request('session.read', { sessionId }) as { events: unknown[] };
     const requestsBeforeClose = providerRequests.length;
     await client.request('session.close', { sessionId });
     await client.request('session.open', { sessionId });
-    const afterOpen = await client.request('session.read', { sessionId });
+    const afterOpen = await client.request('session.read', { sessionId }) as { events: unknown[] };
     assert.equal(providerRequests.length, requestsBeforeClose, 'opening a completed session must not ask the model to replay work');
     assert.deepEqual(afterOpen.events, beforeClose.events, 'opening a completed session must not append recovery events');
     assert.equal((await readFile(join(projectDirectory, 'run-count.txt'), 'utf8')), 'ran\n', 'the exec side effect happened once');

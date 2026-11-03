@@ -7,20 +7,23 @@ import { withTuiHost } from '../core/tests/helpers/tui-host.ts';
 import { createCompaction, estimateRequest } from '../core/dist/session/compaction.js';
 import { createSessionLog } from '../core/dist/session/session.js';
 import { providerFromConfig } from '../core/dist/host/host.js';
+import type { ModelTool } from '../core/dist/kernel/loop.js';
+
+type UsageEvent = { kind: string; input: number; estimated: number; measurement: string };
 
 test('usage calibrates the complete request and remains reproducible after reopen', async () => {
   await withTuiHost(async ({ client, sessionId, providerRequests, sessionDirectory, config }) => {
     await client.request('run.start', { sessionId, input: '短输入' });
-    const short = (await client.request('status.get', { sessionId })).usage;
+    const short = (await client.request('status.get', { sessionId }) as { usage: { factor: number } }).usage;
     assert.ok(short.factor < 10, '固定系统与工具前缀计入本地估算');
     const guide = await readFile(new URL('../AGENTS.md', import.meta.url), 'utf8');
     await client.request('run.start', { sessionId, input: guide });
-    const read = await client.request('session.read', { sessionId });
-    const usage = read.events.filter((event) => event.kind === 'usage').at(-1);
-    const request = providerRequests.at(-1);
+    const read = await client.request('session.read', { sessionId }) as { events: UsageEvent[] };
+    const usage = read.events.filter((event) => event.kind === 'usage').at(-1) as UsageEvent;
+    const request = providerRequests.at(-1)!;
     const prefix = {
-      system: request.messages.find((message) => message.role === 'system')?.content ?? '',
-      tools: (await client.request('status.get', { sessionId })).tools,
+      system: (request.messages.find((message) => message.role === 'system')?.content ?? '') as string,
+      tools: (await client.request('status.get', { sessionId }) as { tools: readonly ModelTool[] }).tools,
     };
     assert.equal(usage.measurement, 'request-v1');
     const snapshot = createCompaction({
@@ -40,22 +43,22 @@ test('manual compaction blocks a concurrent round and forwards cancellation to t
     await client.request('run.start', { sessionId, input: text });
     const before = providerRequests.length;
     const compacted = client.request('session.compact', { sessionId });
-    const rejected = assert.rejects(compacted, (error) => error.code === 'loop_cancelled');
+    const rejected = assert.rejects(compacted, (error) => (error as { code: string }).code === 'loop_cancelled');
     for (let count = 0; count < 100 && providerRequests.length === before; count += 1) await delay(20);
     assert.ok(providerRequests.length > before, '摘要请求实际发到了HTTP服务');
-    await assert.rejects(client.request('run.start', { sessionId, input: '并发输入' }), (error) => error.code === 'run_already_running');
+    await assert.rejects(client.request('run.start', { sessionId, input: '并发输入' }), (error) => (error as { code: string }).code === 'run_already_running');
     await client.request('run.cancel', { sessionId });
     await rejected;
-    assert.equal((await client.request('status.get', { sessionId })).running, false);
-    await assert.rejects(readFile(join(sessionDirectory, `${sessionId}.checkpoint.json`)), (error) => error.code === 'ENOENT');
+    assert.equal((await client.request('status.get', { sessionId }) as { running: boolean }).running, false);
+    await assert.rejects(readFile(join(sessionDirectory, `${sessionId}.checkpoint.json`)), (error) => (error as NodeJS.ErrnoException).code === 'ENOENT');
   }, { delayMs: 250 });
 });
 
 test('an endpoint usage report is recorded when no context window is configured', async () => {
   await withTuiHost(async ({ client, sessionId }) => {
     await client.request('run.start', { sessionId, input: '未配置窗口的用量记录' });
-    const read = await client.request('session.read', { sessionId });
+    const read = await client.request('session.read', { sessionId }) as { events: UsageEvent[] };
     assert.ok(read.events.some((event) => event.kind === 'usage' && event.input > 0 && event.measurement === 'request-v1'));
-    assert.equal((await client.request('status.get', { sessionId })).usage, null);
+    assert.equal((await client.request('status.get', { sessionId }) as { usage: null }).usage, null);
   }, { config: { limits: {} } });
 });

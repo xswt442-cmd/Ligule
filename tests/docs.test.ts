@@ -51,22 +51,22 @@ const localGuides = [
   join(repoRoot, 'core', 'src', 'host'),
   join(repoRoot, 'tui'),
 ];
-const guidePath = (guide) => join(repoRoot, guide);
+const guidePath = (guide: string) => join(repoRoot, guide);
 
 /** 按 GitHub 的标题规则生成锚点。 */
-function slug(heading) {
+function slug(heading: string) {
   return heading.trim().toLowerCase()
     .replace(/`/g, '')
     .replace(/[^\p{L}\p{N}\- ]/gu, '')
     .replace(/ /g, '-');
 }
 
-function anchors(text) {
+function anchors(text: string) {
   return new Set(text.split('\n').filter((line) => /^#{1,6}\s/.test(line)).map((line) => slug(line.replace(/^#+\s/, ''))));
 }
 
 /** 提取 Markdown 链接目标，包括可选锚点。 */
-function links(text) {
+function links(text: string) {
   return [...text.matchAll(/\[[^\]]*\]\(([^)\s]+)\)/g)].map((match) => match[1]);
 }
 
@@ -85,12 +85,12 @@ test('所有受维护 AGENTS.md 都有对应的轻量 CLAUDE.md 入口', () => {
   }
 });
 
-function codeTokens(text) {
+function codeTokens(text: string) {
   return new Set([...text.matchAll(/`([^`]+)`/g)].map((match) => match[1])
     .filter((token) => /^[a-z][a-z0-9_.-]{2,}$/.test(token) && /[._]/.test(token)));
 }
 
-function tomlExample(text) {
+function tomlExample(text: string) {
   const match = text.match(/```toml\n([\s\S]*?)\n```/);
   assert.ok(match, 'guide must contain a TOML example');
   return parse(match[1]);
@@ -115,7 +115,7 @@ test('所有受维护文档的相对链接与锚点都落在仓库内', () => {
 });
 
 test('所有中英文配对文档的章节数对应', () => {
-  const headings = (text) => text.split('\n').filter((line) => /^##\s/.test(line)).length;
+  const headings = (text: string) => text.split('\n').filter((line) => /^##\s/.test(line)).length;
   for (const [zh, en] of bilingualPairs) {
     assert.equal(headings(readFileSync(zh, 'utf8')), headings(readFileSync(en, 'utf8')), `${zh} 与 ${en} 的章节数不同`);
   }
@@ -141,20 +141,21 @@ test('双语手册的多服务 TOML 示例相同且符合实际配置格式', ()
   const zh = tomlExample(readFileSync(zhPath, 'utf8'));
   const en = tomlExample(readFileSync(enPath, 'utf8'));
   assert.deepEqual(zh, en);
-  assert.equal(modelServices(zh.model.services).length, 1);
-  assert.deepEqual(resolveModel(zh.model), {
+  const zhModel = zh.model as Record<string, unknown>;
+  assert.equal(modelServices(zhModel.services).length, 1);
+  assert.deepEqual(resolveModel(zhModel), {
     api: 'chat-completions',
     baseURL: 'https://api.deepseek.com/v1',
     model: 'deepseek-flash',
     apiKeyEnv: 'DEEPSEEK_API_KEY',
-    services: zh.model.services,
-    selection: zh.model.selection,
+    services: zhModel.services,
+    selection: zhModel.selection,
     serviceId: 'deepseek',
   });
 });
 
 test('workspace and product READMEs present the products and link to maintained documentation', () => {
-  const manifest = JSON.parse(readFileSync(join(repoRoot, 'tui', 'package.json'), 'utf8'));
+  const manifest = JSON.parse(readFileSync(join(repoRoot, 'tui', 'package.json'), 'utf8')) as { files: string[] };
   const rootReadme = readFileSync(join(repoRoot, 'README.md'), 'utf8');
   const readme = readFileSync(join(repoRoot, 'tui', 'README.md'), 'utf8');
   const englishReadme = readFileSync(join(repoRoot, 'tui', 'README.en.md'), 'utf8');

@@ -5,9 +5,11 @@ import { createRequire } from 'node:module';
 import { parse, parseAllDocuments } from '../core/node_modules/yaml/dist/index.js';
 import { releaseManifest } from '../scripts/pack-release.js';
 
-const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
+const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
 
-function firstGroup(text, pattern, label) {
+type NodePin = { version: string; targets: Record<string, { file: string; sha256: string }> };
+
+function firstGroup(text: string, pattern: RegExp, label: string): string {
   const match = pattern.exec(text);
   assert.ok(match, `no ${pattern} match in ${label}`);
   return match[1];
@@ -115,7 +117,7 @@ test('the pinned pnpm workspace lock covers all manifests and dependency specifi
   const environment = documents[0].toJSON();
   assert.equal(environment.lockfileVersion, '9.0');
   assert.equal(environment.importers['.'].packageManagerDependencies.pnpm.version, '12.9.1');
-  const lock = documents.at(-1).toJSON();
+  const lock = documents.at(-1)!.toJSON();
   assert.equal(lock.lockfileVersion, '9.0');
   const packages = [
     ['.', '../package.json'],
@@ -139,9 +141,9 @@ test('the pinned pnpm workspace lock covers all manifests and dependency specifi
 
 // Node 运行时的版本与校验值由 desktop/node-pin.json 统一维护，发行文档链接到该文件。
 test('the vendored Node targets use the documented pin file', () => {
-  const pin = JSON.parse(read('../desktop/node-pin.json'));
+  const pin = JSON.parse(read('../desktop/node-pin.json')) as NodePin;
   const releaseGuide = read('../docs/development/RELEASE.md');
-  const suffixes = { 'win32-x64': 'zip', 'linux-x64': 'tar.xz', 'darwin-arm64': 'tar.gz', 'darwin-x64': 'tar.gz' };
+  const suffixes: Record<string, string> = { 'win32-x64': 'zip', 'linux-x64': 'tar.xz', 'darwin-arm64': 'tar.gz', 'darwin-x64': 'tar.gz' };
   assert.deepEqual(Object.keys(pin.targets).sort(), ['darwin-arm64', 'darwin-x64', 'linux-x64', 'win32-x64']);
   for (const [target, archived] of Object.entries(pin.targets)) {
     const expected = `node-${pin.version}-${target.replace('win32', 'win')}.${suffixes[target]}`;

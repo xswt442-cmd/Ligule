@@ -8,5 +8,5 @@
     "rootDir": ".."
   },
   "references": [{ "path": "../core" }],
-  "include": ["helpers/**/*.ts", "hooks/**/*.ts", "**/*.test.ts", "../core/tests/helpers/**/*.ts", "../scripts/*.js", "../scripts/desktop-release-manifest.ts"]
+  "include": ["helpers/**/*", "hooks/**/*.ts", "**/*.test.ts", "../core/tests/helpers/**/*.ts", "../scripts/*.js", "../scripts/*.ts", "../scripts/desktop-release-manifest.ts"]
 }

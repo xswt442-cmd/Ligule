@@ -9,7 +9,10 @@ import { assertSymlinksInside } from '../scripts/runtime-tree.js';
 const repositoryRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const temporaryParent = join(repositoryRoot, 'desktop', 'testplace', 'tmp');
 
-async function makeCore(root, files) {
+type CoreFiles = Record<string, string>;
+type CoreTrees = { source: string; deployed: string };
+
+async function makeCore(root: string, files: CoreFiles) {
   for (const [relativePath, content] of Object.entries(files)) {
     const path = join(root, relativePath);
     await mkdir(dirname(path), { recursive: true });
@@ -17,7 +20,7 @@ async function makeCore(root, files) {
   }
 }
 
-async function withCoreTrees(action) {
+async function withCoreTrees(action: (trees: CoreTrees) => Promise<void>) {
   await mkdir(temporaryParent, { recursive: true });
   const temporary = await mkdtemp(join(temporaryParent, 'core-runtime-test-'));
   const source = join(temporary, 'source');

@@ -11,7 +11,9 @@ const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const cliPath = join(repo, 'tui/dist/cli.js');
 const sdkRoot = join(repo, 'core/node_modules/@modelcontextprotocol/sdk');
 
-async function fixture(action) {
+type FixturePaths = { project: string; home: string };
+
+async function fixture(action: (paths: FixturePaths) => Promise<void>) {
   const parent = join(repo, 'testplace/tmp');
   await mkdir(parent, { recursive: true });
   const root = await mkdtemp(join(parent, 'mcp-trust-'));
@@ -26,7 +28,7 @@ async function fixture(action) {
   }
 }
 
-function startUntrusted(project, home) {
+function startUntrusted(project: string, home: string) {
   return spawnSync(process.execPath, [cliPath, 'mcp-server', '--project', project], {
     cwd: project,
     env: { PATH: process.env.PATH, LIGULE_HOME: home, HOME: home, USERPROFILE: home, ...(process.env.SystemRoot === undefined ? {} : { SystemRoot: process.env.SystemRoot }) },
