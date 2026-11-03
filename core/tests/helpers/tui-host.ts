@@ -189,10 +189,11 @@ export async function withTuiHost<TResult>(run: (context: TuiHostContext) => TRe
       ];
       response.writeHead(200, { 'content-type': 'text/event-stream' });
       response.end(`${frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('')}data: [DONE]\n\n`);
-    } catch (error) {
-      // This loopback fixture is test-only; keep the HTTP body fixed and surface the
-      // fixture detail only on the test process's stderr for diagnosis.
-      process.stderr.write(`[tui host fixture] ${error instanceof Error ? error.message : String(error)}\n`);
+    } catch {
+      // This loopback fixture is test-only. Neither the body nor the stderr line may
+      // carry the exception text: a test host that echoes error details back over
+      // HTTP or into shared logs is exactly the stack-trace exposure CodeQL reports.
+      process.stderr.write('[tui host fixture] request failed\n');
       response.writeHead(500, { 'content-type': 'text/plain' });
       response.end('tui_host_fixture_failure');
     }
