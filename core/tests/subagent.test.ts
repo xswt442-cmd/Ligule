@@ -10,37 +10,92 @@ import {
   createPermissionContext, minimalPlugin, networkPlugin,
   createTaskBudget,
 } from '../dist/index.js';
+import type { ModelRequest, ProviderEvent } from '../dist/kernel/loop.js';
+import type { SubagentDeps } from '../dist/tools/subagent.js';
 
 const fullAccess = createPermissionContext('full-access', 'unrestricted', {
   filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
 });
 
-const text = (value) => [
+// 脚本化的帧：`message_start` 只是让提供方的回答形状贴近真实端点，其余字段由用例给出。
+type FixtureEvent = {
+  readonly type: string;
+  readonly text?: string;
+  readonly id?: string;
+  readonly name?: string;
+  readonly args?: Record<string, unknown>;
+  readonly message?: unknown;
+};
+// 派生结果按测试读到的字段收窄；工具结果本身仍是内核返回的原值。
+type SubagentOutcome = {
+  readonly text: string;
+  readonly sessionId: string;
+  readonly iterations: number;
+  readonly mode?: string;
+  readonly modeDigest?: string;
+  readonly generation?: { readonly outputTokens?: number; readonly thinkingEffort?: string };
+  readonly limits?: { readonly iterations?: number; readonly modelCalls?: number; readonly maxParallelTools?: number };
+  readonly result: {
+    readonly runId: string;
+    readonly sessionId: string;
+    readonly state: string;
+    readonly stopReason: string;
+    readonly output: { readonly text?: string; readonly structured?: unknown };
+    readonly artifacts: readonly { readonly kind: string; readonly sessionId: string }[];
+    readonly validation: { readonly status: string; readonly schemaDigest?: string; readonly errors: readonly string[] };
+    readonly diagnostic?: { readonly code?: string };
+  };
+};
+// 分支记录按测试读到的字段收窄；读到的仍是会话文件里的原值。
+type RecordedEvent = {
+  readonly kind?: string;
+  readonly sessionId?: string;
+  readonly text?: string;
+  readonly tool?: string;
+  readonly status?: string;
+  readonly code?: string;
+  readonly delegationSchemaDigest?: unknown;
+  readonly childGeneration?: unknown;
+  readonly childLimits?: unknown;
+  readonly mode: {
+    readonly source?: string;
+    readonly tools?: readonly string[];
+    readonly prompt?: readonly string[];
+    readonly digest?: string;
+    readonly path?: string;
+  };
+  readonly result: {
+    readonly code?: string;
+    readonly content: { readonly sessionId?: string; readonly result?: { readonly state?: string } };
+  };
+};
+
+const text = (value: string): FixtureEvent[] => [
   { type: 'message_start', message: { usage: {} } },
   { type: 'text', text: value },
 ];
-const call = (name, args) => [{ type: 'message_start', message: { usage: {} } }, { type: 'tool-call', id: `call_${name}_${Math.random().toString(36).slice(2, 6)}`, name, args }];
+const call = (name: string, args: Record<string, unknown>): FixtureEvent[] => [{ type: 'message_start', message: { usage: {} } }, { type: 'tool-call', id: `call_${name}_${Math.random().toString(36).slice(2, 6)}`, name, args }];
 
-function scripted(turns) {
-  const requests = [];
+function scripted(turns: readonly FixtureEvent[][]) {
+  const requests: ModelRequest[] = [];
   let index = 0;
   return {
     requests,
     name: 'scripted',
     model: 'test-model',
     capabilities: {},
-    async *stream(request) {
+    async *stream(request: ModelRequest): AsyncGenerator<ProviderEvent> {
       requests.push(request);
       const events = turns[index] ?? text('nothing left to say');
       index += 1;
-      for (const event of events) yield event;
+      for (const event of events) yield event as unknown as ProviderEvent;
     },
   };
 }
 
 // 父记录与派生记录都要真目录（记录是真的会话文件），跑完一起收掉。
-const created = [];
-async function tempDirectory(prefix) {
+const created: string[] = [];
+async function tempDirectory(prefix: string) {
   const directory = await mkdtemp(join(tmpdir(), prefix));
   created.push(directory);
   return directory;
@@ -53,10 +108,12 @@ async function workspace() {
   return directory;
 }
 
+const readEvents = async (file: string) => (await readFile(file, 'utf8')).split('\n').filter(Boolean).map((line) => JSON.parse(line) as RecordedEvent);
+
 test('a parent and its child pause their shared execution budget while the child waits for approval', { timeout: 15_000 }, async (t) => {
   const originalNow = Object.getOwnPropertyDescriptor(performance, 'now');
   t.after(() => {
-    if (originalNow === undefined) delete performance.now;
+    if (originalNow === undefined) delete (performance as { now?: () => number }).now;
     else Object.defineProperty(performance, 'now', originalNow);
   });
   // 用假单调时钟跨过执行期限，不让测试自身的启动时间耗尽预算。
@@ -65,10 +122,10 @@ test('a parent and its child pause their shared execution budget while the child
   const boundary = await workspace();
   const config = createConfig({ user: { boundary } });
   const budget = createTaskBudget({ maxModelCalls: 8, timeoutMs: 60_000, requestTimeoutMs: 10_000, interactionWaitTimeoutMs: 120_000 });
-  let signalApproval;
-  let releaseApproval;
+  let signalApproval: (value?: unknown) => void = () => {};
+  let releaseApproval: (value: { readonly decision: 'allow' } | PromiseLike<{ readonly decision: 'allow' }>) => void = () => {};
   const approvalStarted = new Promise((resolve) => { signalApproval = resolve; });
-  const approval = new Promise((resolve) => { releaseApproval = resolve; });
+  const approval = new Promise<{ readonly decision: 'allow' }>((resolve) => { releaseApproval = resolve; });
   const chain = createDecisionChain({
     mode: 'auto',
     rules: [{ tool: 'read', decision: 'ask' }],
@@ -90,8 +147,8 @@ test('a parent and its child pause their shared execution budget while the child
   minimalPlugin.setup(kernel);
   createSubagentPlugin({ config, provider, chain, taskBudget: () => budget,
     prompt: { staticPrefix: '' }, directory: session.directory, sessionId: 'parent', plugins: [minimalPlugin] }).setup(kernel);
-  let run;
-  let approvalTimer;
+  let run: Promise<{ readonly text: string }> | undefined;
+  let approvalTimer: NodeJS.Timeout | undefined;
   try {
     run = createLoop({ kernel, provider, session }).run('delegate the task', { task: budget, signal: budget.signal });
     void run.catch(() => undefined);
@@ -152,7 +209,7 @@ test('the derived agent runs on the parent decision chain and cannot delegate ag
     plugins: [minimalPlugin, networkPlugin],
   }).setup(kernel);
 
-  const result = await kernel.call('subagent', { task: 'delete the thing' });
+  const result = await kernel.call('subagent', { task: 'delete the thing' }) as SubagentOutcome;
   assert.equal(result.text, 'I could not delete it');
   assert.equal(result.sessionId, 'parent.sub-1');
   assert.equal(result.result.runId.length > 0, true);
@@ -170,7 +227,7 @@ test('the derived agent runs on the parent decision chain and cannot delegate ag
 
   const files = await readdir(session.directory);
   assert.deepEqual(files.sort(), ['parent.jsonl', 'parent.sub-1.jsonl']);
-  const side = (await readFile(join(session.directory, 'parent.sub-1.jsonl'), 'utf8')).split('\n').filter(Boolean).map(JSON.parse);
+  const side = await readEvents(join(session.directory, 'parent.sub-1.jsonl'));
   // 分支记录首行说明父会话和派生关系。
   assert.equal(side[0].kind, 'session');
   assert.equal(side[0].sessionId, 'parent.sub-1');
@@ -178,10 +235,10 @@ test('the derived agent runs on the parent decision chain and cannot delegate ag
   assert.equal(sideEvents[0].kind, 'user');
   assert.equal(sideEvents[0].text, 'delete the thing');
   const denied = sideEvents.find((event) => event.kind === 'tool' && event.tool === 'exec');
-  assert.equal(denied.result.code, 'policy_denied');
-  const parent = (await readFile(join(session.directory, 'parent.jsonl'), 'utf8')).split('\n').filter(Boolean).map(JSON.parse);
+  assert.equal(denied!.result.code, 'policy_denied');
+  const parent = await readEvents(join(session.directory, 'parent.jsonl'));
   const delegated = parent.find((event) => event.kind === 'tool' && event.tool === 'subagent');
-  assert.equal(delegated.result.content.sessionId, 'parent.sub-1');
+  assert.equal(delegated!.result.content.sessionId, 'parent.sub-1');
 });
 
 test('a task is required, and a mode is only looked up when this run has mode directories', async () => {
@@ -201,11 +258,11 @@ test('a task is required, and a mode is only looked up when this run has mode di
   }).setup(kernel);
   await assert.rejects(
     () => kernel.call('subagent', { task: '   ' }),
-    (error) => error.code === 'subagent_task_required',
+    (error: unknown) => (error as { code?: string }).code === 'subagent_task_required',
   );
   await assert.rejects(
     () => kernel.call('subagent', { task: 'do it', mode: 'other' }),
-    (error) => error.code === 'subagent_mode_paths_required',
+    (error: unknown) => (error as { code?: string }).code === 'subagent_mode_paths_required',
   );
 });
 
@@ -235,7 +292,7 @@ test("the derived agent runs under the mode the parent session picked", async ()
     promptFragmentBytes: 4096,
     modeFile: () => ({ name: 'readonly', layer: 'user', path: 'readonly.toml', tools: ['read'], prompt: ['review-guidance'], digest: 'mode-digest' }),
   }).setup(kernel);
-  const result = await kernel.call('subagent', { task: 'read only' });
+  const result = await kernel.call('subagent', { task: 'read only' }) as SubagentOutcome;
   assert.equal(result.mode, 'readonly');
   assert.deepEqual(provider.requests[1].tools.map((entry) => entry.name), ['read']);
   assert.match(provider.requests[1].system, /Check each claim against the files before reporting/u);
@@ -267,15 +324,14 @@ test('an explicit child mode cannot restore tools hidden from the parent', async
   const result = await kernel.call('subagent', {
     task: 'try to create a file',
     mode: { type: 'inline', tools: ['create', 'read'], prompt: [] },
-  });
+  }) as SubagentOutcome;
 
   assert.equal(result.text, 'the parent tool limit held');
   assert.deepEqual(provider.requests[0].tools.map((entry) => entry.name), ['read']);
   await assert.rejects(readFile(join(boundary, 'escalated.txt')), { code: 'ENOENT' });
-  const side = (await readFile(join(session.directory, 'restricted-parent.sub-1.jsonl'), 'utf8'))
-    .split('\n').filter(Boolean).map(JSON.parse);
+  const side = await readEvents(join(session.directory, 'restricted-parent.sub-1.jsonl'));
   const denied = side.find((event) => event.kind === 'tool' && event.tool === 'create');
-  assert.equal(denied.result.code, 'tool_denied');
+  assert.equal(denied!.result.code, 'tool_denied');
 });
 
 test('an inline mode freezes the registered tools and prompt fragments in the child record', async () => {
@@ -304,7 +360,7 @@ test('an inline mode freezes the registered tools and prompt fragments in the ch
   const result = await kernel.call('subagent', {
     task: 'read only',
     mode: { type: 'inline', tools: ['read'], prompt: ['review-guidance'] },
-  });
+  }) as SubagentOutcome;
   assert.equal(result.text, 'the scoped child result');
   assert.equal(result.mode, 'inline');
   assert.equal(typeof result.modeDigest, 'string');
@@ -312,7 +368,7 @@ test('an inline mode freezes the registered tools and prompt fragments in the ch
   assert.match(provider.requests[0].system, /Check each claim against the files before reporting/u);
   assert.doesNotMatch(provider.requests[0].system, /This fragment should not appear/u);
 
-  const side = (await readFile(join(session.directory, 'inline-parent.sub-1.jsonl'), 'utf8')).split('\n').filter(Boolean).map(JSON.parse);
+  const side = await readEvents(join(session.directory, 'inline-parent.sub-1.jsonl'));
   assert.equal(side[0].mode.source, 'inline');
   assert.deepEqual(side[0].mode.tools, ['read']);
   assert.deepEqual(side[0].mode.prompt, ['review-guidance']);
@@ -336,8 +392,8 @@ test('child generation and loop budgets can be lowered but never raised', async 
   const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'bounded-child-parent' });
   const base = scripted([text('child finished within the requested limits')]);
   const thinkingCapability = { efforts: ['none', 'low', 'high', 'max'], defaultEffort: 'high' };
-  let selectedGeneration;
-  const provider = {
+  let selectedGeneration: { readonly outputTokens?: number; readonly thinkingEffort?: string } | undefined;
+  const provider: SubagentDeps['provider'] = {
     ...base,
     outputTokens: 4096,
     thinkingEffort: 'high',
@@ -365,13 +421,12 @@ test('child generation and loop budgets can be lowered but never raised', async 
     thinkingEffort: 'low',
     loopIterations: 3,
     modelCalls: 2,
-  });
+  }) as SubagentOutcome;
   assert.deepEqual(selectedGeneration, { outputTokens: 2048, thinkingEffort: 'low' });
   assert.deepEqual(result.generation, { outputTokens: 2048, thinkingEffort: 'low' });
   assert.deepEqual(result.limits, { iterations: 3, modelCalls: 2, maxParallelTools: 2 });
-  const childEvents = (await readFile(join(session.directory, `${result.sessionId}.jsonl`), 'utf8'))
-    .split('\n').filter(Boolean).map(JSON.parse);
-  const context = childEvents.find((event) => event.kind === 'turnContext');
+  const childEvents = await readEvents(join(session.directory, `${result.sessionId}.jsonl`));
+  const context = childEvents.find((event) => event.kind === 'turnContext')!;
   assert.deepEqual(context.childGeneration, { outputTokens: 2048, thinkingEffort: 'low' });
   assert.deepEqual(context.childLimits, { iterations: 3, modelCalls: 2, maxParallelTools: 2 });
 
@@ -399,13 +454,13 @@ test('one parent turn can run three independent subagents concurrently', { timeo
   let childStarts = 0;
   let activeChildren = 0;
   let maximumActiveChildren = 0;
-  let releaseChildren;
+  let releaseChildren: (value?: unknown) => void = () => {};
   const allChildrenStarted = new Promise((resolve) => { releaseChildren = resolve; });
   const provider = {
     name: 'parallel-check',
     model: 'parallel-check',
     capabilities: {},
-    async *stream(request) {
+    async *stream(request: ModelRequest): AsyncGenerator<ProviderEvent> {
       const last = request.messages.at(-1);
       if (last?.role === 'user' && last.text === 'delegate three') {
         for (const [index, task] of requestedTasks.entries()) {
@@ -418,7 +473,7 @@ test('one parent turn can run three independent subagents concurrently', { timeo
         activeChildren += 1;
         maximumActiveChildren = Math.max(maximumActiveChildren, activeChildren);
         if (childStarts === childTasks.length) releaseChildren();
-        let timer;
+        let timer: NodeJS.Timeout | undefined;
         try {
           await Promise.race([
             allChildrenStarted,
@@ -449,8 +504,7 @@ test('one parent turn can run three independent subagents concurrently', { timeo
   assert.equal(result.text, 'all three children finished');
   assert.equal(childStarts, 3);
   assert.equal(maximumActiveChildren, 3);
-  const parentEvents = (await readFile(join(session.directory, 'parallel-parent.jsonl'), 'utf8'))
-    .split('\n').filter(Boolean).map(JSON.parse);
+  const parentEvents = await readEvents(join(session.directory, 'parallel-parent.jsonl'));
   const outcomes = parentEvents.filter((event) => event.kind === 'tool' && event.tool === 'subagent');
   assert.equal(outcomes.length, 4);
   assert.equal(outcomes.filter((event) => event.result.content?.result?.state === 'completed').length, 3);
@@ -462,11 +516,11 @@ test('configured child concurrency limits live work and releases capacity after 
   const config = createConfig({ user: { boundary, loop: { maxConcurrentSubagents: 1 } } });
   const chain = createDecisionChain({ mode: 'auto' });
   const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-concurrency-'), id: 'parent' });
-  let release;
-  let started;
+  let release: (value?: unknown) => void = () => {};
+  let started: (value?: unknown) => void = () => {};
   const ready = new Promise((resolve) => { started = resolve; });
   const gate = new Promise((resolve) => { release = resolve; });
-  const provider = { name: 'bounded', model: 'bounded', capabilities: {}, async *stream() {
+  const provider = { name: 'bounded', model: 'bounded', capabilities: {}, async *stream(): AsyncGenerator<ProviderEvent> {
     started();
     await gate;
     yield { type: 'text', text: 'done' };
@@ -480,8 +534,8 @@ test('configured child concurrency limits live work and releases capacity after 
   try {
     await assert.rejects(kernel.call('subagent', { task: 'second' }), { code: 'subagent_concurrency_limit' });
   } finally { release(); }
-  assert.equal((await first).text, 'done');
-  assert.equal((await kernel.call('subagent', { task: 'third' })).text, 'done');
+  assert.equal((await first as SubagentOutcome).text, 'done');
+  assert.equal((await kernel.call('subagent', { task: 'third' }) as SubagentOutcome).text, 'done');
   for (const invalid of [0, 9, 1.5, '2']) {
     assert.throws(() => createSubagentPlugin({ ...deps, config: createConfig({ user: { boundary, loop: { maxConcurrentSubagents: invalid } } }) }),
       { code: 'subagent_concurrency_invalid' });
@@ -506,12 +560,12 @@ test('rebuilding the parent continues child session numbering without reusing ol
   };
   let unregister = createSubagentPlugin(deps).setup(kernel);
   try {
-    const first = await kernel.call('subagent', { task: 'first task' });
+    const first = await kernel.call('subagent', { task: 'first task' }) as SubagentOutcome;
     assert.equal(first.sessionId, 'restarted-parent.sub-1');
     unregister();
 
     unregister = createSubagentPlugin(deps).setup(kernel);
-    const second = await kernel.call('subagent', { task: 'second task' });
+    const second = await kernel.call('subagent', { task: 'second task' }) as SubagentOutcome;
     assert.equal(second.sessionId, 'restarted-parent.sub-2');
     const files = (await readdir(session.directory)).sort();
     assert.ok(files.includes('restarted-parent.sub-1.jsonl'));
@@ -550,7 +604,7 @@ test('a child submits a structured result only after it matches the declared sch
       required: ['answer', 'count'],
       additionalProperties: false,
     },
-  });
+  }) as SubagentOutcome;
   assert.match(provider.requests[0].system, /Schema JSON data:.*"answer"/u);
   assert.ok(provider.requests[0].tools.some((tool) => tool.name === 'ligule_delegation_result'));
   assert.equal(result.result.state, 'completed');
@@ -558,11 +612,10 @@ test('a child submits a structured result only after it matches the declared sch
   assert.deepEqual(result.result.output.structured, { answer: 'checked', count: 2 });
   assert.equal(result.result.validation.status, 'valid');
   assert.equal(typeof result.result.validation.schemaDigest, 'string');
-  const childEvents = (await readFile(join(session.directory, 'structured-parent.sub-1.jsonl'), 'utf8'))
-    .split('\n').filter(Boolean).map(JSON.parse);
+  const childEvents = await readEvents(join(session.directory, 'structured-parent.sub-1.jsonl'));
   assert.ok(childEvents.some((event) => event.kind === 'tool' && event.tool === 'ligule_delegation_result'
     && event.result.code === 'delegation_result_invalid'));
-  assert.equal(childEvents.find((event) => event.kind === 'turnContext').delegationSchemaDigest, result.result.validation.schemaDigest);
+  assert.equal(childEvents.find((event) => event.kind === 'turnContext')!.delegationSchemaDigest, result.result.validation.schemaDigest);
   await assert.rejects(kernel.call('subagent', {
     task: 'use an unsupported schema',
     outputSchema: { type: 'object', properties: { answer: { type: 'string', pattern: '^ok$' } } },
@@ -588,7 +641,7 @@ test('a child that never submits its requested structure reports validation fail
   const result = await kernel.call('subagent', {
     task: 'return a checked summary',
     outputSchema: { type: 'object', properties: { answer: { type: 'string' } }, required: ['answer'] },
-  });
+  }) as SubagentOutcome;
   assert.equal(result.result.state, 'failed');
   assert.equal(result.result.stopReason, 'validation_failed');
   assert.equal(result.result.validation.status, 'invalid');
@@ -605,7 +658,7 @@ test('a failed child returns its persisted Session link and a failed RunResult',
     name: 'failing-provider',
     model: 'failing-provider',
     capabilities: {},
-    async *stream() { throw new KernelError('provider_transport_error'); },
+    async *stream(): AsyncGenerator<never> { throw new KernelError('provider_transport_error'); },
   };
   const kernel = createKernel({ config, permission: fullAccess, policy: chain, session });
   createSubagentPlugin({
@@ -621,24 +674,23 @@ test('a failed child returns its persisted Session link and a failed RunResult',
   const result = await kernel.call('subagent', {
     task: 'inspect the workspace',
     outputSchema: { type: 'object', properties: { summary: { type: 'string' } }, required: ['summary'] },
-  });
+  }) as SubagentOutcome;
   assert.equal(result.sessionId, 'failed-child-parent.sub-1');
   assert.equal(result.result.state, 'failed');
   assert.equal(result.result.stopReason, 'provider_error');
-  assert.equal(result.result.diagnostic.code, 'provider_transport_error');
+  assert.equal(result.result.diagnostic!.code, 'provider_transport_error');
   assert.equal(result.result.validation.status, 'invalid');
   assert.deepEqual(result.result.validation.errors, [
     'Run ended with provider_transport_error before a valid structured result was submitted.',
   ]);
   assert.deepEqual(result.result.artifacts, [{ kind: 'session', sessionId: result.sessionId }]);
-  const childEvents = (await readFile(join(session.directory, `${result.sessionId}.jsonl`), 'utf8'))
-    .split('\n').filter(Boolean).map(JSON.parse);
+  const childEvents = await readEvents(join(session.directory, `${result.sessionId}.jsonl`));
   assert.ok(childEvents.some((event) => event.kind === 'turn' && event.status === 'failed'
     && event.code === 'provider_transport_error'));
-  const parentEvents = (await session.read());
+  const parentEvents = (await session.read()) as unknown as RecordedEvent[];
   const childReference = parentEvents.find((event) => event.kind === 'tool' && event.tool === 'subagent');
-  assert.equal(childReference.result.content.sessionId, result.sessionId);
-  assert.equal(childReference.result.content.result.state, 'failed');
+  assert.equal(childReference!.result.content.sessionId, result.sessionId);
+  assert.equal(childReference!.result.content.result!.state, 'failed');
 });
 
 test('cancelling a parent run returns the cancelled child Session reference', async () => {
@@ -646,16 +698,16 @@ test('cancelling a parent run returns the cancelled child Session reference', as
   const config = createConfig({ user: { boundary } });
   const chain = createDecisionChain({ mode: 'auto' });
   const session = createSessionLog({ directory: await tempDirectory('ligule-subagent-log-'), id: 'cancelled-child-parent' });
-  let announceStarted;
+  let announceStarted: (value?: unknown) => void = () => {};
   const started = new Promise((resolve) => { announceStarted = resolve; });
   const provider = {
     name: 'cancellable-provider',
     model: 'cancellable-provider',
     capabilities: {},
-    async *stream(_request, { signal }) {
+    async *stream(_request: ModelRequest, { signal }: { readonly signal?: AbortSignal }): AsyncGenerator<ProviderEvent> {
       announceStarted();
-      if (signal.aborted) throw new KernelError('provider_cancelled');
-      await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+      if (signal!.aborted) throw new KernelError('provider_cancelled');
+      await new Promise((resolve) => signal!.addEventListener('abort', resolve, { once: true }));
       throw new KernelError('provider_cancelled');
     },
   };
@@ -674,15 +726,14 @@ test('cancelling a parent run returns the cancelled child Session reference', as
   const pending = kernel.call('subagent', { task: 'inspect until cancelled' }, { signal: controller.signal });
   await started;
   controller.abort();
-  const result = await pending;
+  const result = await pending as SubagentOutcome;
   assert.equal(result.sessionId, 'cancelled-child-parent.sub-1');
   assert.equal(result.result.state, 'cancelled');
   assert.equal(result.result.stopReason, 'cancelled');
-  const childEvents = (await readFile(join(session.directory, `${result.sessionId}.jsonl`), 'utf8'))
-    .split('\n').filter(Boolean).map(JSON.parse);
+  const childEvents = await readEvents(join(session.directory, `${result.sessionId}.jsonl`));
   assert.ok(childEvents.some((event) => event.kind === 'turn' && event.status === 'cancelled'));
-  const parentEvents = await session.read();
+  const parentEvents = (await session.read()) as unknown as RecordedEvent[];
   const childReference = parentEvents.find((event) => event.kind === 'tool' && event.tool === 'subagent');
-  assert.equal(childReference.result.content.sessionId, result.sessionId);
-  assert.equal(childReference.result.content.result.state, 'cancelled');
+  assert.equal(childReference!.result.content.sessionId, result.sessionId);
+  assert.equal(childReference!.result.content.result!.state, 'cancelled');
 });

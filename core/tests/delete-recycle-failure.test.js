@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { cleanSystemTrashEntry } from './helpers/system-trash.js';
+import { cleanSystemTrashEntry } from './helpers/system-trash.ts';
 import { deleteTool, resolveRecycler } from '../dist/index.js';
 
 async function exists(path) {

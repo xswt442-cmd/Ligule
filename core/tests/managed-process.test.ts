@@ -3,12 +3,28 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { createServer as createHttpServer } from 'node:http';
 import net from 'node:net';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import type { TestContext } from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createConfig, createDecisionChain, createKernel, createManagedProcessRegistry, createPermissionContext, managedProcessPlugin, managedProcessTool } from '../dist/index.js';
 import { isTrusted, setTrusted } from '../dist/kernel/workspace-trust.js';
+
+// Kernel 调用与 Registry 的公开结果都是不透明记录，这里按测试实际读取的字段声明其形状。
+type ManagedProcessResult = {
+  id: string;
+  status: string;
+  ready: boolean;
+  port: number;
+  logs: string;
+  failure: string;
+  startupFailure: { code: string };
+  terminationFailure: { code: string | null; detail: string };
+  terminationPending: boolean;
+  cleanupPending: boolean;
+};
 
 const permission = createPermissionContext('workspace-write', 'unrestricted', {
   filesystemRead: 'partial', filesystemWrite: 'partial', network: 'partial', process: 'full',
@@ -20,16 +36,16 @@ const permission = createPermissionContext('workspace-write', 'unrestricted', {
   workspaceTrusted: true,
 });
 
-async function availableLoopbackPort() {
+async function availableLoopbackPort(): Promise<number> {
   const server = net.createServer();
-  await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
-  const address = server.address();
+  await new Promise<void>((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const address = server.address() as AddressInfo;
   assert.notEqual(address, null);
-  await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   return address.port;
 }
 
-async function waitForRequest(url) {
+async function waitForRequest(url: string): Promise<Response> {
   const deadline = Date.now() + 2_000;
   while (Date.now() < deadline) {
     try {
@@ -42,7 +58,7 @@ async function waitForRequest(url) {
   assert.fail(`server at ${url} did not accept an HTTP request`);
 }
 
-async function waitForUnavailable(url) {
+async function waitForUnavailable(url: string): Promise<void> {
   const deadline = Date.now() + 3_000;
   while (Date.now() < deadline) {
     try {
@@ -56,7 +72,7 @@ async function waitForUnavailable(url) {
   assert.fail(`server at ${url} remained reachable`);
 }
 
-async function waitForFile(path, within = 5_000) {
+async function waitForFile(path: string, within = 5_000): Promise<void> {
   const deadline = Date.now() + within;
   while (Date.now() < deadline) {
     if (existsSync(path)) return;
@@ -65,22 +81,22 @@ async function waitForFile(path, within = 5_000) {
   assert.fail(`file ${path} was not created`);
 }
 
-async function healthUrl(t) {
+async function healthUrl(t: TestContext): Promise<URL> {
   const server = createHttpServer((_request, response) => {
     response.statusCode = 200;
     response.end('ready');
   });
-  await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
-  const address = server.address();
+  await new Promise<void>((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const address = server.address() as AddressInfo;
   assert.notEqual(address, null);
-  t.after(async () => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+  t.after(async () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
   return new URL(`http://127.0.0.1:${address.port}/health`);
 }
 
-function managedLease(onStop = (_calls, finish) => finish(0)) {
-  let finish;
-  let fail;
-  const completion = new Promise((resolve, reject) => { finish = resolve; fail = reject; });
+function managedLease(onStop: (calls: number, finish: (code: number) => void) => void | Promise<void> = (_calls, finish) => finish(0)) {
+  let finish!: (value: number) => void;
+  let fail!: (reason: unknown) => void;
+  const completion = new Promise<number>((resolve, reject) => { finish = resolve; fail = reject; });
   let calls = 0;
   return {
     lease: {
@@ -125,18 +141,19 @@ test('managed process start returns after loopback readiness and stop releases i
       if (!grantActive) throw new Error('delegation grant revoked');
     },
   });
-  const dispose = managedProcessPlugin(registry).setup(kernel);
+  const dispose = managedProcessPlugin(registry).setup(kernel) as () => void;
   t.after(async () => {
     await dispose();
     await registry.close();
   });
 
-  let started;
+  let started: ManagedProcessResult;
   try {
-    started = await kernel.call('managed_process', { action: 'start', command, readyUrl: url });
+    started = await kernel.call('managed_process', { action: 'start', command, readyUrl: url }) as ManagedProcessResult;
   } catch (error) {
-    if (process.platform === 'linux' && error?.code === 'permission_sandbox_unavailable'
-      && String(error.detail ?? '').includes('bwrap: setting up uid map: Permission denied')) {
+    const failure = error as { code?: string; detail?: unknown };
+    if (process.platform === 'linux' && failure.code === 'permission_sandbox_unavailable'
+      && String(failure.detail ?? '').includes('bwrap: setting up uid map: Permission denied')) {
       t.skip('this Linux runner denies bubblewrap user-namespace mapping');
       return;
     }
@@ -148,11 +165,11 @@ test('managed process start returns after loopback readiness and stop releases i
   const response = await waitForRequest(url);
   assert.equal(await response.text(), 'managed-ready');
 
-  const status = await kernel.call('managed_process', { action: 'status', id: started.id });
+  const status = await kernel.call('managed_process', { action: 'status', id: started.id }) as ManagedProcessResult;
   assert.equal(status.status, 'running');
   assert.match(status.logs, /listening/);
 
-  const stopped = await kernel.call('managed_process', { action: 'stop', id: started.id });
+  const stopped = await kernel.call('managed_process', { action: 'stop', id: started.id }) as ManagedProcessResult;
   assert.equal(stopped.status, 'stopped');
   await waitForUnavailable(url);
 
@@ -188,23 +205,24 @@ test('managed process start returns after loopback readiness and stop releases i
     `const server = createServer((_request, response) => response.end('short-lived'));`,
     `server.listen(${shortPort}, '127.0.0.1', () => setTimeout(() => process.exit(0), 250));`,
   ].join('\n'));
-  let shortStarted;
+  let shortStarted: ManagedProcessResult | undefined;
   try {
     shortStarted = await kernel.call('managed_process', {
       action: 'start',
       command: `node "${shortPath.replaceAll('\\', '/')}"`,
       readyUrl: shortUrl,
-    });
+    }) as ManagedProcessResult;
   } catch (error) {
-    assert.ok(['managed_process_exited', 'managed_process_not_ready'].includes(error.code), error.code);
+    const failure = error as { code: string };
+    assert.ok(['managed_process_exited', 'managed_process_not_ready'].includes(failure.code), failure.code);
   }
   await waitForUnavailable(shortUrl);
   await delay(100);
   if (shortStarted !== undefined) {
     const deadline = Date.now() + 2_000;
-    let status;
+    let status!: ManagedProcessResult;
     while (Date.now() < deadline) {
-      status = await kernel.call('managed_process', { action: 'status', id: shortStarted.id });
+      status = await kernel.call('managed_process', { action: 'status', id: shortStarted.id }) as ManagedProcessResult;
       if (status.status !== 'running') break;
       await delay(20);
     }
@@ -217,14 +235,14 @@ test('managed process start returns after loopback readiness and stop releases i
     action: 'start',
     command: `node "${join(workspace, 'server.mjs').replaceAll('\\', '/')}" ${revokedPort}`,
     readyUrl: revokedUrl,
-  });
+  }) as ManagedProcessResult;
   assert.equal((await waitForRequest(revokedUrl)).status, 200);
   grantActive = false;
   await waitForUnavailable(revokedUrl);
   const revokedStatusDeadline = Date.now() + 2_000;
-  let revokedStatus;
+  let revokedStatus!: ManagedProcessResult;
   while (Date.now() < revokedStatusDeadline) {
-    revokedStatus = await kernel.call('managed_process', { action: 'status', id: revoked.id });
+    revokedStatus = await kernel.call('managed_process', { action: 'status', id: revoked.id }) as ManagedProcessResult;
     if (revokedStatus.status === 'stopped') break;
     await delay(20);
   }
@@ -240,7 +258,7 @@ test('an exec Policy denial also blocks managed start before spawning the comman
     policy: createDecisionChain({ rules: [{ tool: 'exec', decision: 'deny' }] }),
     permission,
   });
-  const dispose = managedProcessPlugin(registry).setup(kernel);
+  const dispose = managedProcessPlugin(registry).setup(kernel) as () => void;
   t.after(async () => {
     await dispose();
     await registry.close();
@@ -265,7 +283,7 @@ test('managed process refuses readiness URLs outside loopback before starting a 
   });
   await setTrusted(process.cwd(), true);
   const registry = createManagedProcessRegistry();
-  const dispose = managedProcessPlugin(registry).setup(kernel);
+  const dispose = managedProcessPlugin(registry).setup(kernel) as () => void;
   try {
     await assert.rejects(
       () => kernel.call('managed_process', { action: 'start', command: 'node -e "process.exit(0)"', readyUrl: 'https://example.com/' }),
@@ -285,19 +303,19 @@ test('managed process waits for a successful health response after a transient H
     response.statusCode = healthy ? 200 : 503;
     response.end();
   });
-  await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
-  const address = server.address();
+  await new Promise<void>((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const address = server.address() as AddressInfo;
   assert.notEqual(address, null);
   const registry = createManagedProcessRegistry();
-  let finishLease;
+  let finishLease!: (value: number) => void;
   const lease = {
-    completion: new Promise((resolve) => { finishLease = resolve; }),
+    completion: new Promise<number>((resolve) => { finishLease = resolve; }),
     logs: () => '',
     async stop() { finishLease(0); },
   };
   t.after(async () => {
     await registry.close();
-    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   });
 
   let settled = false;
@@ -322,19 +340,19 @@ test('managed process becomes ready immediately on HTTP 200 without a retry dela
     response.statusCode = 200;
     response.end();
   });
-  await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
-  const address = server.address();
+  await new Promise<void>((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const address = server.address() as AddressInfo;
   assert.notEqual(address, null);
   const registry = createManagedProcessRegistry();
-  let finishLease;
+  let finishLease!: (value: number) => void;
   const lease = {
-    completion: new Promise((resolve) => { finishLease = resolve; }),
+    completion: new Promise<number>((resolve) => { finishLease = resolve; }),
     logs: () => '',
     async stop() { finishLease(0); },
   };
   t.after(async () => {
     await registry.close();
-    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   });
 
   const startedAt = Date.now();
@@ -347,20 +365,20 @@ test('managed process becomes ready immediately on HTTP 200 without a retry dela
 test('managed process retries after a timed-out health request and observes cancellation', async (t) => {
   let requests = 0;
   const server = createHttpServer(() => { requests += 1; });
-  await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
-  const address = server.address();
+  await new Promise<void>((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const address = server.address() as AddressInfo;
   assert.notEqual(address, null);
   const registry = createManagedProcessRegistry();
-  let finishLease;
+  let finishLease!: (value: number) => void;
   const lease = {
-    completion: new Promise((resolve) => { finishLease = resolve; }),
+    completion: new Promise<number>((resolve) => { finishLease = resolve; }),
     logs: () => '',
     async stop() { finishLease(0); },
   };
   const controller = new AbortController();
   t.after(async () => {
     await registry.close();
-    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   });
 
   const pending = registry.start(new URL(`http://127.0.0.1:${address.port}/health`), lease, controller.signal);
@@ -375,8 +393,8 @@ test('managed process retries after a timed-out health request and observes canc
 test('cancelled managed startup preserves both cancellation and process-stop failure', async (t) => {
   let requests = 0;
   const server = createHttpServer(() => { requests += 1; });
-  await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
-  const address = server.address();
+  await new Promise<void>((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const address = server.address() as AddressInfo;
   assert.notEqual(address, null);
   const registry = createManagedProcessRegistry();
   const stopFailure = Object.assign(new Error('simulated process-tree stop failure'), { code: 'exec_terminate_failed' });
@@ -384,7 +402,7 @@ test('cancelled managed startup preserves both cancellation and process-stop fai
   const controller = new AbortController();
   t.after(async () => {
     await registry.close().catch(() => undefined);
-    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   });
 
   const pending = registry.start(new URL(`http://127.0.0.1:${address.port}/health`), owned.lease, controller.signal);
@@ -393,21 +411,23 @@ test('cancelled managed startup preserves both cancellation and process-stop fai
   assert.equal(requests, 1, 'startup must be waiting for the health response before cancellation');
   controller.abort();
 
-  let startFailure;
+  let startFailure!: { detail: string };
   await assert.rejects(pending, (error) => {
-    startFailure = error;
-    assert.equal(error.code, 'exec_cancelled');
-    assert.match(error.detail, /startup failed.*exec_cancelled.*termination (?:also )?failed.*exec_terminate_failed/u);
-    assert.ok(error.cause instanceof AggregateError);
-    assert.equal(error.cause.errors.length, 2);
-    assert.equal(error.cause.errors[1], stopFailure);
-    assert.equal(error.cause.errors[0].code, 'exec_cancelled');
+    const failure = error as { code?: string; detail: string; cause?: unknown };
+    startFailure = failure;
+    assert.equal(failure.code, 'exec_cancelled');
+    assert.match(failure.detail, /startup failed.*exec_cancelled.*termination (?:also )?failed.*exec_terminate_failed/u);
+    assert.ok(failure.cause instanceof AggregateError);
+    const errors = failure.cause.errors as unknown[];
+    assert.equal(errors.length, 2);
+    assert.equal(errors[1], stopFailure);
+    assert.equal((errors[0] as { code?: string }).code, 'exec_cancelled');
     return true;
   });
   assert.equal(owned.calls, 2, 'a settled stop failure should receive the existing bounded retry');
   const id = /managed process ([a-f0-9-]{36}) startup failed/u.exec(startFailure.detail)?.[1];
   assert.ok(id, 'the failed process handle remains addressable for status inspection');
-  const status = registry.status(id);
+  const status = registry.status(id) as ManagedProcessResult;
   assert.equal(status.startupFailure.code, 'exec_cancelled');
   assert.equal(status.terminationFailure.code, 'exec_terminate_failed');
   assert.equal(status.terminationPending, true);
@@ -416,20 +436,19 @@ test('cancelled managed startup preserves both cancellation and process-stop fai
 test('cancellation racing with natural process exit keeps the start cancelled and stops only once', async (t) => {
   let requests = 0;
   const server = createHttpServer(() => { requests += 1; });
-  await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
-  const address = server.address();
+  await new Promise<void>((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const address = server.address() as AddressInfo;
   assert.notEqual(address, null);
   const registry = createManagedProcessRegistry();
-  let finishLease;
-  let releaseStop;
-  const stopPending = new Promise((resolve) => { releaseStop = resolve; });
+  let releaseStop!: () => void;
+  const stopPending = new Promise<void>((resolve) => { releaseStop = resolve; });
   const owned = managedLease(() => stopPending);
-  finishLease = owned.finish;
+  const finishLease = owned.finish;
   const controller = new AbortController();
   t.after(async () => {
     releaseStop();
     await registry.close().catch(() => undefined);
-    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   });
 
   const pending = registry.start(new URL(`http://127.0.0.1:${address.port}/health`), owned.lease, controller.signal);
@@ -454,19 +473,19 @@ test('managed process readiness exits promptly when the owned process terminates
     response.statusCode = 503;
     response.end();
   });
-  await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
-  const address = server.address();
+  await new Promise<void>((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
+  const address = server.address() as AddressInfo;
   assert.notEqual(address, null);
   const registry = createManagedProcessRegistry();
-  let finishLease;
+  let finishLease!: (value: number) => void;
   const lease = {
-    completion: new Promise((resolve) => { finishLease = resolve; }),
+    completion: new Promise<number>((resolve) => { finishLease = resolve; }),
     logs: () => '',
     async stop() { finishLease(0); },
   };
   t.after(async () => {
     await registry.close();
-    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   });
 
   const pending = registry.start(new URL(`http://127.0.0.1:${address.port}/health`), lease);
@@ -486,37 +505,37 @@ test('a failed managed stop stays pending and Registry close retries it', async 
     if (calls < 3) throw new Error(`simulated termination failure ${calls}`);
     finish(0);
   });
-  const started = await registry.start(ready, owned.lease);
+  const started = await registry.start(ready, owned.lease) as ManagedProcessResult;
 
   await assert.rejects(registry.stop(started.id), /simulated termination failure 2/u);
-  assert.equal(registry.status(started.id).status, 'failed');
-  assert.equal(registry.status(started.id).terminationPending, true);
-  assert.equal(registry.status(started.id).terminationFailure.code, null);
-  assert.match(registry.status(started.id).terminationFailure.detail, /simulated termination failure 2/u);
+  assert.equal((registry.status(started.id) as ManagedProcessResult).status, 'failed');
+  assert.equal((registry.status(started.id) as ManagedProcessResult).terminationPending, true);
+  assert.equal((registry.status(started.id) as ManagedProcessResult).terminationFailure.code, null);
+  assert.match((registry.status(started.id) as ManagedProcessResult).terminationFailure.detail, /simulated termination failure 2/u);
 
   await registry.close();
   assert.equal(owned.calls, 3);
-  assert.equal(registry.status(started.id).status, 'stopped');
-  assert.equal(registry.status(started.id).terminationPending, false);
-  assert.equal(registry.status(started.id).terminationFailure, undefined);
+  assert.equal((registry.status(started.id) as ManagedProcessResult).status, 'stopped');
+  assert.equal((registry.status(started.id) as ManagedProcessResult).terminationPending, false);
+  assert.equal((registry.status(started.id) as ManagedProcessResult).terminationFailure, undefined);
 });
 
 test('Registry close reports repeated managed stop failures instead of treating them as complete', async (t) => {
   const ready = await healthUrl(t);
   const registry = createManagedProcessRegistry();
   const owned = managedLease(() => { throw new Error('simulated process may still be alive'); });
-  const started = await registry.start(ready, owned.lease);
+  const started = await registry.start(ready, owned.lease) as ManagedProcessResult;
 
   await assert.rejects(registry.stop(started.id), /simulated process may still be alive/u);
-  assert.equal(registry.status(started.id).terminationPending, true);
+  assert.equal((registry.status(started.id) as ManagedProcessResult).terminationPending, true);
   await assert.rejects(registry.close(), /simulated process may still be alive/u);
   assert.equal(owned.calls, 4);
-  assert.equal(registry.status(started.id).status, 'failed');
-  assert.equal(registry.status(started.id).terminationPending, true);
+  assert.equal((registry.status(started.id) as ManagedProcessResult).status, 'failed');
+  assert.equal((registry.status(started.id) as ManagedProcessResult).terminationPending, true);
 
   owned.finish(0);
   await registry.close();
-  assert.equal(registry.status(started.id).status, 'stopped');
+  assert.equal((registry.status(started.id) as ManagedProcessResult).status, 'stopped');
 });
 
 test('Guardian and cleanup completion errors surface without reporting a stopped process', async (t) => {
@@ -525,16 +544,16 @@ test('Guardian and cleanup completion errors surface without reporting a stopped
     const registry = createManagedProcessRegistry();
     const failure = Object.assign(new Error(`simulated ${code}`), { code });
     const owned = managedLease(() => { throw failure; });
-    const started = await registry.start(ready, owned.lease);
+    const started = await registry.start(ready, owned.lease) as ManagedProcessResult;
     owned.fail(failure);
 
     await assert.rejects(registry.stop(started.id), { code });
-    const status = registry.status(started.id);
+    const status = registry.status(started.id) as ManagedProcessResult;
     assert.equal(status.status, 'failed');
     assert.equal(status.terminationPending, code === 'exec_guardian_failed' || code === 'exec_termination_cleanup_failed');
     assert.equal(status.cleanupPending, code === 'exec_sandbox_cleanup_failed' || code === 'exec_termination_cleanup_failed');
     await assert.rejects(registry.close(), { code });
-    assert.notEqual(registry.status(started.id).status, 'stopped');
+    assert.notEqual((registry.status(started.id) as ManagedProcessResult).status, 'stopped');
   }
 });
 
@@ -543,11 +562,11 @@ test('a cleaned interrupted completion does not report unknown liveness or pendi
   const registry = createManagedProcessRegistry();
   t.after(() => registry.close());
   const owned = managedLease();
-  const started = await registry.start(ready, owned.lease);
+  const started = await registry.start(ready, owned.lease) as ManagedProcessResult;
   owned.fail(Object.assign(new Error('command ended with an unknown exit status'), { code: 'exec_process_interrupted' }));
   await delay(0);
 
-  const status = registry.status(started.id);
+  const status = registry.status(started.id) as ManagedProcessResult;
   assert.equal(status.status, 'failed');
   assert.equal(status.terminationPending, false);
   assert.equal(status.cleanupPending, false);
@@ -560,11 +579,11 @@ test('a sandbox setup failure does not report that a command is running or needs
   const registry = createManagedProcessRegistry();
   t.after(() => registry.close());
   const owned = managedLease();
-  const started = await registry.start(ready, owned.lease);
+  const started = await registry.start(ready, owned.lease) as ManagedProcessResult;
   owned.fail(Object.assign(new Error('sandbox setup failed before command creation'), { code: 'exec_sandbox_setup_failed' }));
   await delay(0);
 
-  const status = registry.status(started.id);
+  const status = registry.status(started.id) as ManagedProcessResult;
   assert.equal(status.status, 'failed');
   assert.equal(status.terminationPending, false);
   assert.equal(status.cleanupPending, false);
@@ -581,18 +600,18 @@ test('Registry distinguishes confirmed termination from failed temporary cleanup
     if (calls === 1) throw cleanupFailure;
     finish(0);
   });
-  const started = await registry.start(ready, owned.lease);
+  const started = await registry.start(ready, owned.lease) as ManagedProcessResult;
   owned.fail(cleanupFailure);
   await delay(0);
 
-  const pending = registry.status(started.id);
+  const pending = registry.status(started.id) as ManagedProcessResult;
   assert.equal(pending.status, 'failed');
   assert.equal(pending.terminationPending, false);
   assert.equal(pending.cleanupPending, true);
   assert.equal(pending.terminationFailure, undefined, 'a confirmed exit with cleanup pending is not a termination failure');
 
   await registry.close();
-  const recovered = registry.status(started.id);
+  const recovered = registry.status(started.id) as ManagedProcessResult;
   assert.equal(owned.calls, 2);
   assert.equal(recovered.status, 'stopped');
   assert.equal(recovered.terminationPending, false);
@@ -603,18 +622,18 @@ test('a timed-out cleanup retry preserves confirmed process termination', async 
   const ready = await healthUrl(t);
   const registry = createManagedProcessRegistry();
   t.after(() => registry.close());
-  let releaseStop;
-  const stopPending = new Promise((resolve) => { releaseStop = resolve; });
+  let releaseStop!: () => void;
+  const stopPending = new Promise<void>((resolve) => { releaseStop = resolve; });
   const cleanupFailure = Object.assign(new Error('temporary cleanup failed'), { code: 'exec_temp_cleanup_failed' });
   const owned = managedLease(() => stopPending);
-  const started = await registry.start(ready, owned.lease);
+  const started = await registry.start(ready, owned.lease) as ManagedProcessResult;
   owned.fail(cleanupFailure);
   await delay(0);
 
   const stopping = registry.stop(started.id);
   try {
     await assert.rejects(stopping, { code: 'exec_temp_cleanup_failed' });
-    const pending = registry.status(started.id);
+    const pending = registry.status(started.id) as ManagedProcessResult;
     assert.equal(pending.status, 'failed');
     assert.equal(pending.terminationPending, false);
     assert.equal(pending.cleanupPending, true);
@@ -624,7 +643,7 @@ test('a timed-out cleanup retry preserves confirmed process termination', async 
   }
 
   await registry.close();
-  const recovered = registry.status(started.id);
+  const recovered = registry.status(started.id) as ManagedProcessResult;
   assert.equal(recovered.status, 'stopped');
   assert.equal(recovered.terminationPending, false);
   assert.equal(recovered.cleanupPending, false);
@@ -638,33 +657,33 @@ test('Registry retains both liveness and cleanup uncertainty when both fail', as
     code: 'exec_termination_cleanup_failed',
   });
   const owned = managedLease(() => { throw failure; });
-  const started = await registry.start(ready, owned.lease);
+  const started = await registry.start(ready, owned.lease) as ManagedProcessResult;
   owned.fail(failure);
   await delay(0);
 
-  const status = registry.status(started.id);
+  const status = registry.status(started.id) as ManagedProcessResult;
   assert.equal(status.status, 'failed');
   assert.equal(status.terminationPending, true);
   assert.equal(status.cleanupPending, true);
   await assert.rejects(registry.close(), { code: 'exec_termination_cleanup_failed' });
-  assert.equal(registry.status(started.id).terminationPending, true);
-  assert.equal(registry.status(started.id).cleanupPending, true);
+  assert.equal((registry.status(started.id) as ManagedProcessResult).terminationPending, true);
+  assert.equal((registry.status(started.id) as ManagedProcessResult).cleanupPending, true);
 });
 
 test('natural Lease completion during an explicit stop confirms process termination', async (t) => {
   const ready = await healthUrl(t);
   const registry = createManagedProcessRegistry();
   t.after(() => registry.close());
-  let releaseStop;
-  const stopPending = new Promise((resolve) => { releaseStop = resolve; });
+  let releaseStop!: () => void;
+  const stopPending = new Promise<void>((resolve) => { releaseStop = resolve; });
   const owned = managedLease(() => stopPending);
-  const started = await registry.start(ready, owned.lease);
+  const started = await registry.start(ready, owned.lease) as ManagedProcessResult;
 
   const stopping = registry.stop(started.id);
   const stopStartedDeadline = Date.now() + 1_000;
   while (owned.calls === 0 && Date.now() < stopStartedDeadline) await delay(1);
   assert.equal(owned.calls, 1);
-  assert.equal(registry.status(started.id).status, 'stopping');
+  assert.equal((registry.status(started.id) as ManagedProcessResult).status, 'stopping');
 
   owned.finish(3);
   const stopped = await stopping;
@@ -679,8 +698,8 @@ test('natural Lease completion during an explicit stop confirms process terminat
 test('concurrent and repeated close calls share one bounded Lease request when it never settles', { timeout: 20_000 }, async (t) => {
   const ready = await healthUrl(t);
   const registry = createManagedProcessRegistry();
-  const owned = managedLease(() => new Promise(() => {}));
-  const started = await registry.start(ready, owned.lease);
+  const owned = managedLease(() => new Promise<void>(() => {}));
+  const started = await registry.start(ready, owned.lease) as ManagedProcessResult;
 
   const start = Date.now();
   const outcomes = await Promise.allSettled([registry.stop(started.id), registry.close()]);
@@ -688,8 +707,8 @@ test('concurrent and repeated close calls share one bounded Lease request when i
     && outcome.reason?.code === 'exec_terminate_failed'), JSON.stringify(outcomes));
   assert.ok(Date.now() - start < 7_000, 'concurrent close and stop must share the bounded attempt');
   assert.equal(owned.calls, 1, 'a timed-out Lease.stop request must not be duplicated concurrently');
-  assert.equal(registry.status(started.id).status, 'failed');
-  assert.equal(registry.status(started.id).terminationPending, true);
+  assert.equal((registry.status(started.id) as ManagedProcessResult).status, 'failed');
+  assert.equal((registry.status(started.id) as ManagedProcessResult).terminationPending, true);
 
   const repeatStart = Date.now();
   await assert.rejects(registry.close(), { code: 'exec_terminate_failed' });
@@ -710,23 +729,23 @@ test('Registry retains a bounded terminal history without pruning uncertain proc
   const registry = createManagedProcessRegistry();
   t.after(() => registry.close());
   const uncertain = managedLease(() => { throw new Error('simulated process may still be alive'); });
-  const uncertainStart = await registry.start(ready, uncertain.lease);
+  const uncertainStart = await registry.start(ready, uncertain.lease) as ManagedProcessResult;
   await assert.rejects(registry.stop(uncertainStart.id), /simulated process may still be alive/u);
 
-  const ids = [];
+  const ids: string[] = [];
   for (let index = 0; index < 150; index += 1) {
     const owned = managedLease();
-    const started = await registry.start(ready, owned.lease);
+    const started = await registry.start(ready, owned.lease) as ManagedProcessResult;
     ids.push(started.id);
     await registry.stop(started.id);
   }
 
-  assert.equal(registry.status(uncertainStart.id).status, 'failed');
-  assert.equal(registry.status(uncertainStart.id).terminationPending, true);
+  assert.equal((registry.status(uncertainStart.id) as ManagedProcessResult).status, 'failed');
+  assert.equal((registry.status(uncertainStart.id) as ManagedProcessResult).terminationPending, true);
   assert.throws(() => registry.status(ids[0]), { code: 'managed_process_not_found' });
   assert.throws(() => registry.status(ids[21]), { code: 'managed_process_not_found' });
-  assert.equal(registry.status(ids[22]).status, 'stopped');
-  assert.equal(registry.status(ids.at(-1)).status, 'stopped');
+  assert.equal((registry.status(ids[22]) as ManagedProcessResult).status, 'stopped');
+  assert.equal((registry.status(ids.at(-1)!) as ManagedProcessResult).status, 'stopped');
 
   uncertain.finish(0);
   await registry.close();
@@ -736,43 +755,44 @@ test('terminal history eviction follows completion time rather than start time',
   const ready = await healthUrl(t);
   const registry = createManagedProcessRegistry();
   t.after(() => registry.close());
-  const longLived = managedLease(() => new Promise(() => {}));
-  const longStarted = await registry.start(ready, longLived.lease);
+  const longLived = managedLease(() => new Promise<void>(() => {}));
+  const longStarted = await registry.start(ready, longLived.lease) as ManagedProcessResult;
 
-  const ids = [];
+  const ids: string[] = [];
   for (let index = 0; index < 150; index += 1) {
     const owned = managedLease();
-    const started = await registry.start(ready, owned.lease);
+    const started = await registry.start(ready, owned.lease) as ManagedProcessResult;
     ids.push(started.id);
     await registry.stop(started.id);
   }
-  assert.equal(registry.status(longStarted.id).status, 'running');
+  assert.equal((registry.status(longStarted.id) as ManagedProcessResult).status, 'running');
   assert.throws(() => registry.status(ids[0]), { code: 'managed_process_not_found' });
-  assert.equal(registry.status(ids[22]).status, 'stopped');
+  assert.equal((registry.status(ids[22]) as ManagedProcessResult).status, 'stopped');
 
   longLived.finish(0);
   await longLived.lease.completion;
-  assert.equal(registry.status(longStarted.id).status, 'exited');
+  assert.equal((registry.status(longStarted.id) as ManagedProcessResult).status, 'exited');
   assert.throws(() => registry.status(ids[22]), { code: 'managed_process_not_found' });
-  assert.equal(registry.status(ids[23]).status, 'stopped');
+  assert.equal((registry.status(ids[23]) as ManagedProcessResult).status, 'stopped');
 });
 
 test('managed process checks an IPv6 readiness port on IPv6 loopback', async (t) => {
   const server = net.createServer();
   try {
-    await new Promise((resolve, reject) => server.once('error', reject).listen(0, '::1', resolve));
+    await new Promise<void>((resolve, reject) => server.once('error', reject).listen(0, '::1', resolve));
   } catch (error) {
-    if (['EAFNOSUPPORT', 'EADDRNOTAVAIL', 'ENOTSUP'].includes(error?.code)) {
+    if (['EAFNOSUPPORT', 'EADDRNOTAVAIL', 'ENOTSUP'].includes((error as { code?: string }).code ?? '')) {
       t.skip('IPv6 loopback is unavailable on this host');
       return;
     }
     throw error;
   }
-  t.after(() => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
-  const address = server.address();
+  t.after(() => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
+  const address = server.address() as AddressInfo;
   assert.notEqual(address, null);
   const tool = managedProcessTool(createManagedProcessRegistry());
-  await assert.rejects(tool.preflight({
+  const preflight = tool.preflight! as (value: unknown) => unknown | Promise<unknown>;
+  await assert.rejects(async () => preflight({
     action: 'start', command: 'node -e "process.exit(0)"', readyUrl: `http://[::1]:${address.port}/`,
   }), { code: 'managed_process_port_in_use' });
 });
@@ -801,7 +821,7 @@ test('revoking shared workspace trust stops a managed process that started from 
     policy: createDecisionChain({ mode: 'auto', ask: async () => true }),
     permission,
   });
-  const dispose = managedProcessPlugin(registry).setup(kernel);
+  const dispose = managedProcessPlugin(registry).setup(kernel) as () => void;
   t.after(async () => {
     try {
       await dispose();
@@ -813,14 +833,15 @@ test('revoking shared workspace trust stops a managed process that started from 
     }
   });
 
-  let started;
+  let started: ManagedProcessResult;
   try {
     started = await kernel.call('managed_process', {
       action: 'start', command: `node "${script.replaceAll('\\', '/')}" ${port}`, readyUrl: url,
-    });
+    }) as ManagedProcessResult;
   } catch (error) {
-    if (process.platform === 'linux' && error?.code === 'permission_sandbox_unavailable'
-      && String(error.detail ?? '').includes('bwrap: setting up uid map: Permission denied')) {
+    const failure = error as { code?: string; detail?: unknown };
+    if (process.platform === 'linux' && failure.code === 'permission_sandbox_unavailable'
+      && String(failure.detail ?? '').includes('bwrap: setting up uid map: Permission denied')) {
       t.skip('this Linux runner denies bubblewrap user-namespace mapping');
       return;
     }
@@ -832,10 +853,10 @@ test('revoking shared workspace trust stops a managed process that started from 
   await setTrusted(workspace, false);
   await waitForUnavailable(url);
   const deadline = Date.now() + 3_000;
-  let stopped = registry.status(started.id);
+  let stopped = registry.status(started.id) as ManagedProcessResult;
   while (stopped.status === 'stopping' && Date.now() < deadline) {
     await delay(20);
-    stopped = registry.status(started.id);
+    stopped = registry.status(started.id) as ManagedProcessResult;
   }
   assert.equal(stopped.status, 'stopped', JSON.stringify(stopped));
   assert.match(stopped.failure, /workspace trust was revoked/u);

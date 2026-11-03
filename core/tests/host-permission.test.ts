@@ -14,6 +14,76 @@ import { resolveShell } from '../dist/capability/shell.js';
 import { waitFor, withTuiHost } from './helpers/tui-host.ts';
 import { withoutAutoInheritanceMarker } from './helpers/windows-acl.ts';
 
+type PermissionView = {
+  profile: string;
+  network: string;
+  changeAllowed: boolean;
+  changeReason: string;
+  workspaceTrusted: boolean;
+  partialWorkspaceWriteConfirmed: boolean;
+  execution: { available: boolean };
+  profiles: { readOnly: string; workspaceWrite: string };
+  limitations: string[];
+};
+
+type StatusView = {
+  permission: PermissionView;
+  tools: string[];
+  policy: string;
+  mode: string;
+  denials: { consecutive: number; total: number };
+};
+
+type ExecResultView = { failed?: boolean; content: { text: string; exitCode: number } };
+
+type SessionEventView = {
+  kind: string;
+  source: string;
+  profile: string;
+  tool: string;
+  result: ExecResultView;
+  confirmedFullAccess: boolean;
+  confirmedNetwork: boolean;
+  confirmedPartialWorkspaceWrite: boolean;
+};
+
+type SessionReadView = { events: SessionEventView[] };
+
+type RunAccepted = { runId: string; text: string };
+
+type ScriptBindingView = {
+  path: string;
+  sha256: string;
+  interpreter: string;
+  workspaceRoot: string;
+  permission: unknown;
+};
+
+type NotFoundError = { code: string };
+
+type PowerShellOutput = {
+  cwd: string;
+  read: string;
+  overwriteDenied: boolean;
+  createDenied: boolean;
+  outsideCreateDenied: boolean;
+  tempRoundTrip: boolean;
+  tempDirectory: string;
+  tempFile: string;
+};
+
+type ExecutionPaths = {
+  cwd: string;
+  temp: string;
+  home: string;
+  profile: string;
+  corepack: string;
+  local: string;
+  roaming: string;
+};
+
+type ServerState = { pid: number; port: number };
+
 const fullPermission = createPermissionContext('full-access', 'unrestricted', {
   filesystemRead: 'unavailable', filesystemWrite: 'unavailable', network: 'unavailable', process: 'unavailable',
 });
@@ -36,17 +106,17 @@ test('a Host without trusted permission controls cannot change a session profile
       }),
       { code: 'permission_control_unavailable' },
     );
-    assert.equal((await client.request('status.get', { sessionId })).permission.profile, 'read-only');
+    assert.equal((await client.request('status.get', { sessionId }) as StatusView).permission.profile, 'read-only');
   });
 });
 
 test('only a trusted UI can change workspace trust and the current session sees the result', async () => {
   await withTuiHost(async ({ client, sessionId, projectDirectory }) => {
-    assert.equal((await client.request('status.get', { sessionId })).permission.workspaceTrusted, false);
+    assert.equal((await client.request('status.get', { sessionId }) as StatusView).permission.workspaceTrusted, false);
     await client.request('workspace.trust', {
       projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true,
     });
-    assert.equal((await client.request('status.get', { sessionId })).permission.workspaceTrusted, true);
+    assert.equal((await client.request('status.get', { sessionId }) as StatusView).permission.workspaceTrusted, true);
   }, { permissionControl: true });
 
   await withTuiHost(async ({ client, projectDirectory }) => {
@@ -59,7 +129,7 @@ test('only a trusted UI can change workspace trust and the current session sees 
 test('a loaded in-process extension prevents an immediate permission downgrade', async () => {
   const extensionPath = fileURLToPath(new URL('./fixtures/noop-extension.mjs', import.meta.url));
   await withTuiHost(async ({ client, sessionId }) => {
-    const status = await client.request('status.get', { sessionId });
+    const status = await client.request('status.get', { sessionId }) as StatusView;
     assert.equal(status.permission.profile, 'full-access');
     assert.equal(status.permission.network, 'unrestricted');
     assert.equal(status.permission.changeAllowed, false);
@@ -68,7 +138,7 @@ test('a loaded in-process extension prevents an immediate permission downgrade',
       client.request('permission.set', { sessionId, permissionProfile: 'read-only' }),
       { code: 'permission_extension_restart_required' },
     );
-    assert.equal((await client.request('status.get', { sessionId })).permission.profile, 'full-access');
+    assert.equal((await client.request('status.get', { sessionId }) as StatusView).permission.profile, 'full-access');
   }, {
     permissionControl: true,
     permission: fullPermission,
@@ -78,7 +148,7 @@ test('a loaded in-process extension prevents an immediate permission downgrade',
 
 test('trusted permission changes require separate confirmations and survive reopening', async () => {
   await withTuiHost(async ({ client, sessionId }) => {
-    const initial = await client.request('status.get', { sessionId });
+    const initial = await client.request('status.get', { sessionId }) as StatusView;
     assert.equal(initial.permission.profile, 'read-only');
     assert.equal(initial.permission.network, 'policy');
     assert.equal(initial.permission.changeAllowed, true);
@@ -99,10 +169,10 @@ test('trusted permission changes require separate confirmations and survive reop
         sessionId, permissionProfile: 'full-access', confirmFullAccess: true,
       }),
       client.request('policy.set', { sessionId, mode: 'auto' }),
-    ]);
+    ]) as [{ permission: PermissionView }, { policy: string }];
     assert.equal(changed.permission.profile, 'full-access');
     assert.equal(policy.policy, 'auto');
-    const profileStatus = await client.request('status.get', { sessionId });
+    const profileStatus = await client.request('status.get', { sessionId }) as StatusView;
     assert.equal(profileStatus.permission.profile, 'full-access');
     assert.equal(profileStatus.permission.network, 'policy');
     assert.equal(profileStatus.permission.execution.available, false);
@@ -119,20 +189,20 @@ test('trusted permission changes require separate confirmations and survive reop
       permissionProfile: 'full-access',
       permissionNetwork: 'unrestricted',
       confirmNetwork: true,
-    });
+    }) as { permission: PermissionView };
     assert.equal(unrestricted.permission.network, 'unrestricted');
     assert.equal(unrestricted.permission.execution.available, true);
 
     await client.request('session.close', { sessionId });
     await client.request('session.open', { sessionId });
-    const reopened = await client.request('status.get', { sessionId });
+    const reopened = await client.request('status.get', { sessionId }) as StatusView;
     assert.equal(reopened.permission.profile, 'full-access');
     assert.equal(reopened.permission.network, 'unrestricted');
-    const records = await client.request('session.read', { sessionId });
+    const records = await client.request('session.read', { sessionId }) as SessionReadView;
     const changes = records.events.filter((event) => event.kind === 'sessionPermission');
     assert.equal(changes[0].source, 'host-default');
-    assert.equal(changes.at(-1).source, 'trusted-ui');
-    assert.equal(changes.at(-1).confirmedNetwork, true);
+    assert.equal(changes.at(-1)!.source, 'trusted-ui');
+    assert.equal(changes.at(-1)!.confirmedNetwork, true);
     assert.equal(changes.some((event) => event.profile === 'full-access' && event.confirmedFullAccess === true), true);
   }, { permissionControl: true, permission: permissionWithOwnedProcesses });
 });
@@ -156,14 +226,14 @@ test('new sessions accept elevated permission only from a confirmed trusted UI r
     };
     await assert.rejects(client.request('session.create', request), { code: 'permission_network_confirmation_required' });
 
-    const created = await client.request('session.create', { ...request, confirmInitialNetwork: true });
-    const status = await client.request('status.get', { sessionId: created.sessionId });
+    const created = await client.request('session.create', { ...request, confirmInitialNetwork: true }) as { sessionId: string };
+    const status = await client.request('status.get', { sessionId: created.sessionId }) as StatusView;
     assert.equal(status.permission.profile, 'full-access');
     assert.equal(status.permission.network, 'unrestricted');
     assert.equal(status.mode, 'minimal');
     assert.equal(status.policy, 'auto');
-    const records = await client.request('session.read', { sessionId: created.sessionId });
-    const permission = records.events.find((event) => event.kind === 'sessionPermission');
+    const records = await client.request('session.read', { sessionId: created.sessionId }) as SessionReadView;
+    const permission = records.events.find((event) => event.kind === 'sessionPermission')!;
     assert.equal(permission.source, 'trusted-ui');
     assert.equal(permission.confirmedFullAccess, true);
     assert.equal(permission.confirmedNetwork, true);
@@ -172,9 +242,9 @@ test('new sessions accept elevated permission only from a confirmed trusted UI r
     const workspaceWrite = await client.request('session.create', {
       initialPermissionProfile: 'workspace-write', initialPermissionNetwork: 'policy',
       confirmInitialFullAccess: true, confirmInitialNetwork: true,
-    });
-    const workspaceRecords = await client.request('session.read', { sessionId: workspaceWrite.sessionId });
-    const workspacePermission = workspaceRecords.events.find((event) => event.kind === 'sessionPermission');
+    }) as { sessionId: string };
+    const workspaceRecords = await client.request('session.read', { sessionId: workspaceWrite.sessionId }) as SessionReadView;
+    const workspacePermission = workspaceRecords.events.find((event) => event.kind === 'sessionPermission')!;
     assert.equal(workspacePermission.source, 'trusted-ui');
     assert.equal(workspacePermission.profile, 'workspace-write');
     assert.equal(workspacePermission.confirmedFullAccess, false);
@@ -191,19 +261,19 @@ test('partial Windows workspace-write requires trust confirmation and preserves 
 
     const changed = await client.request('permission.set', {
       sessionId, permissionProfile: 'workspace-write', confirmPartialWorkspaceWrite: true,
-    });
+    }) as { permission: PermissionView };
     assert.equal(changed.permission.profile, 'workspace-write');
     assert.equal(changed.permission.partialWorkspaceWriteConfirmed, true);
     assert.deepEqual(changed.permission.profiles, { readOnly: 'partial', workspaceWrite: 'partial' });
     assert.match(changed.permission.limitations.join('\n'), /partial isolation/u);
 
-    const records = await client.request('session.read', { sessionId });
-    const latest = records.events.filter((event) => event.kind === 'sessionPermission').at(-1);
+    const records = await client.request('session.read', { sessionId }) as SessionReadView;
+    const latest = records.events.filter((event) => event.kind === 'sessionPermission').at(-1)!;
     assert.equal(latest.confirmedPartialWorkspaceWrite, true);
 
     await client.request('session.close', { sessionId });
     await client.request('session.open', { sessionId });
-    const reopened = await client.request('status.get', { sessionId });
+    const reopened = await client.request('status.get', { sessionId }) as StatusView;
     assert.equal(reopened.permission.partialWorkspaceWriteConfirmed, true);
     assert.equal(reopened.permission.execution.available, false);
   }, { permissionControl: true, permission: windowsPartialPermission });
@@ -216,8 +286,8 @@ test('partial Windows workspace-write requires trust confirmation and preserves 
     const created = await client.request('session.create', {
       initialPermissionProfile: 'workspace-write', initialPermissionNetwork: 'policy',
       confirmInitialPartialWorkspaceWrite: true,
-    });
-    const status = await client.request('status.get', { sessionId: created.sessionId });
+    }) as { sessionId: string };
+    const status = await client.request('status.get', { sessionId: created.sessionId }) as StatusView;
     assert.equal(status.permission.partialWorkspaceWriteConfirmed, true);
     await client.request('session.close', { sessionId: created.sessionId });
   }, { permissionControl: true, permission: windowsPartialPermission });
@@ -232,7 +302,7 @@ test('an unconfirmed Windows partial profile refuses exec before Policy approval
     partialWorkspaceWriteConfirmationRequired: true,
   });
   await withTuiHost(async ({ client, sessionId, projectDirectory }) => {
-    const approvals = [];
+    const approvals: unknown[] = [];
     client.onRequest((message) => {
       if (message.method === 'approval.request') {
         approvals.push(message.params);
@@ -242,13 +312,13 @@ test('an unconfirmed Windows partial profile refuses exec before Policy approval
     });
     const marker = join(projectDirectory, 'must-not-run.txt');
     const command = `node -e "require('fs').writeFileSync('must-not-run.txt','ran')"`;
-    const status = await client.request('status.get', { sessionId });
+    const status = await client.request('status.get', { sessionId }) as StatusView;
     assert.equal(status.tools.includes('exec'), false);
-    const response = await client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command } }) });
+    const response = await client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command } }) }) as RunAccepted;
     assert.equal(await readFile(marker, 'utf8').catch(() => undefined), undefined);
     assert.deepEqual(approvals, []);
     assert.equal(typeof response.text, 'string');
-    const calls = (await client.request('session.read', { sessionId })).events
+    const calls = ((await client.request('session.read', { sessionId })) as SessionReadView).events
       .filter((event) => event.kind === 'tool' && event.tool === 'exec');
     assert.equal(calls.length, 0);
   }, { permission: unconfirmed });
@@ -266,11 +336,11 @@ test('Windows read-only Host execution follows the measured AppContainer workspa
     const shell = resolveShell({ exec: { shell: 'powershell' } });
     assert.equal(shell.executable.toLowerCase(), join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe').toLowerCase());
     await withTuiHost(async ({ client, sessionId, directory, projectDirectory }) => {
-    const status = await client.request('status.get', { sessionId });
+    const status = await client.request('status.get', { sessionId }) as StatusView;
     if (status.permission.profiles.readOnly === 'unavailable') {
       assert.equal(status.permission.execution.available, false);
       assert.equal(status.tools.includes('exec'), false);
-      const approvals = [];
+      const approvals: unknown[] = [];
       client.onRequest((message) => {
         if (message.method === 'approval.request') approvals.push(message.params);
         return undefined;
@@ -278,10 +348,10 @@ test('Windows read-only Host execution follows the measured AppContainer workspa
       const response = await client.request('run.start', {
         sessionId,
         input: JSON.stringify({ tool: 'exec', args: { command: 'Get-Location' } }),
-      });
+      }) as RunAccepted;
       assert.equal(typeof response.text, 'string');
       assert.deepEqual(approvals, []);
-      const calls = (await client.request('session.read', { sessionId })).events
+      const calls = ((await client.request('session.read', { sessionId })) as SessionReadView).events
         .filter((event) => event.kind === 'tool' && event.tool === 'exec');
       assert.equal(calls.length, 0);
       return;
@@ -294,7 +364,7 @@ test('Windows read-only Host execution follows the measured AppContainer workspa
     await client.request('workspace.trust', {
       projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true,
     });
-    const approvals = [];
+    const approvals: unknown[] = [];
     client.onRequest((message) => {
       if (message.method !== 'approval.request') return undefined;
       approvals.push(message.params);
@@ -315,16 +385,16 @@ test('Windows read-only Host execution follows the measured AppContainer workspa
       sessionId,
       input: JSON.stringify({ tool: 'exec', args: { command: source } }),
     });
-    const events = (await client.request('session.read', { sessionId })).events;
+    const events = ((await client.request('session.read', { sessionId })) as SessionReadView).events;
     const execCall = events.filter((event) => event.kind === 'tool' && event.tool === 'exec').at(-1);
     const result = execCall?.result;
     assert.equal(typeof result?.content?.text, 'string', JSON.stringify({ response, execCall }));
-    let output;
-    try { output = JSON.parse(result.content.text.trim()); }
-    catch { assert.fail(JSON.stringify({ response, execCall, text: result.content.text })); }
+    let output: PowerShellOutput;
+    try { output = JSON.parse(result!.content.text.trim()) as PowerShellOutput; }
+    catch { assert.fail(JSON.stringify({ response, execCall, text: result!.content.text })); }
 
-    assert.notEqual(result.failed, true, JSON.stringify({ response, result, approvals }));
-    assert.equal(result.content.exitCode, 0, JSON.stringify(result));
+    assert.notEqual(result!.failed, true, JSON.stringify({ response, result, approvals }));
+    assert.equal(result!.content.exitCode, 0, JSON.stringify(result));
     assert.equal(approvals.length, 1);
     assert.equal(output.cwd.toLowerCase(), projectDirectory.toLowerCase());
     assert.equal(output.read, 'workspace-baseline', JSON.stringify(output));
@@ -367,7 +437,7 @@ test('confirmed Windows workspace-write executes through the Host and restricted
     await client.request('workspace.trust', {
       projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true,
     });
-    const approvals = [];
+    const approvals: unknown[] = [];
     client.onRequest((message) => {
       if (message.method !== 'approval.request') return undefined;
       approvals.push(message.params);
@@ -375,18 +445,18 @@ test('confirmed Windows workspace-write executes through the Host and restricted
     });
     const command = `node -e "require('fs').writeFileSync('guardian-host-result.txt','live-write')"`;
     const response = await client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command } }) });
-    const events = (await client.request('session.read', { sessionId })).events;
-    const result = events.filter((event) => event.kind === 'tool' && event.tool === 'exec').at(-1);
+    const events = ((await client.request('session.read', { sessionId })) as SessionReadView).events;
+    const result = events.filter((event) => event.kind === 'tool' && event.tool === 'exec').at(-1)!;
     const output = await readFile(join(projectDirectory, 'guardian-host-result.txt'), 'utf8').catch(() => undefined);
     assert.equal(output, 'live-write', JSON.stringify({ response, result, approvals }));
     assert.equal(approvals.length, 1);
     assert.notEqual(result.result.failed, true);
     assert.deepEqual(result.result.content, { text: '', exitCode: 0 });
 
-    const runExec = async (command) => {
+    const runExec = async (command: string) => {
       await client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command } }) });
-      const toolResult = (await client.request('session.read', { sessionId })).events
-        .filter((event) => event.kind === 'tool' && event.tool === 'exec').at(-1).result;
+      const toolResult = ((await client.request('session.read', { sessionId })) as SessionReadView).events
+        .filter((event) => event.kind === 'tool' && event.tool === 'exec').at(-1)!.result;
       assert.notEqual(toolResult.failed, true, JSON.stringify(toolResult));
       assert.equal(toolResult.content.exitCode, 0, JSON.stringify(toolResult));
       return toolResult.content.text;
@@ -435,23 +505,23 @@ test('trusted Windows project commands can install without scripts, build, and r
     await client.request('workspace.trust', {
       projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true,
     });
-    const approvals = [];
+    const approvals: unknown[] = [];
     client.onRequest((message) => {
       if (message.method !== 'approval.request') return undefined;
       approvals.push(message.params);
       return { decision: 'allow' };
     });
-    const runExec = async (command) => {
-      const accepted = await client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command } }) });
+    const runExec = async (command: string) => {
+      const accepted = await client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command } }) }) as { runId: string };
       await client.request('run.wait', { sessionId, runId: accepted.runId, origin: 'human' });
-      const toolResult = (await client.request('session.read', { sessionId })).events
-        .filter((event) => event.kind === 'tool' && event.tool === 'exec').at(-1).result;
+      const toolResult = ((await client.request('session.read', { sessionId })) as SessionReadView).events
+        .filter((event) => event.kind === 'tool' && event.tool === 'exec').at(-1)!.result;
       assert.notEqual(toolResult.failed, true, JSON.stringify({ command, toolResult, approvals }));
       assert.equal(toolResult.content.exitCode, 0, JSON.stringify({ command, toolResult, approvals }));
       return toolResult.content.text;
     };
 
-    const executionPaths = JSON.parse((await runExec('node -p "JSON.stringify({cwd:process.cwd(),temp:process.env.TEMP,home:process.env.HOME,profile:process.env.USERPROFILE,corepack:process.env.COREPACK_HOME,local:process.env.LOCALAPPDATA,roaming:process.env.APPDATA})"')).trim());
+    const executionPaths = JSON.parse((await runExec('node -p "JSON.stringify({cwd:process.cwd(),temp:process.env.TEMP,home:process.env.HOME,profile:process.env.USERPROFILE,corepack:process.env.COREPACK_HOME,local:process.env.LOCALAPPDATA,roaming:process.env.APPDATA})"')).trim()) as ExecutionPaths;
     assert.equal(await realpath(executionPaths.cwd), await realpath(projectDirectory));
     assert.equal(executionPaths.home, join(executionPaths.temp, 'profile'));
     assert.equal(executionPaths.profile, join(executionPaths.temp, 'profile'));
@@ -467,18 +537,18 @@ test('trusted Windows project commands can install without scripts, build, and r
     const devOutcome = devRun.then(() => undefined, (error) => error);
     const serverStatePath = join(projectDirectory, 'server-state.json');
     await waitFor(() => existsSync(serverStatePath), { within: 60_000, every: 25 });
-    const serverState = JSON.parse(await readFile(serverStatePath, 'utf8'));
+    const serverState = JSON.parse(await readFile(serverStatePath, 'utf8')) as ServerState;
     const response = await fetch(`http://127.0.0.1:${serverState.port}`);
     assert.equal(await response.text(), 'ligule-dev-server-ok');
     assert.deepEqual(await client.request('run.cancel', { sessionId }), { cancelled: true });
-    assert.equal((await devOutcome)?.code, 'loop_cancelled');
+    assert.equal(((await devOutcome) as { code?: string } | undefined)?.code, 'loop_cancelled');
     assert.ok(Number.isSafeInteger(serverState.pid) && serverState.pid > 0);
     const deadline = Date.now() + 3_000;
     let serverRunning = true;
     while (Date.now() < deadline) {
       try { process.kill(serverState.pid, 0); }
       catch (error) {
-        if (error.code === 'ESRCH') { serverRunning = false; break; }
+        if ((error as NotFoundError).code === 'ESRCH') { serverRunning = false; break; }
         throw error;
       }
       await delay(25);
@@ -522,7 +592,7 @@ test('cancelling a Windows workspace-write Host command kills descendants and re
     while (Date.now() < deadline) {
       try { process.kill(pid, 0); }
       catch (error) {
-        if (error.code === 'ESRCH') { childRunning = false; break; }
+        if ((error as NotFoundError).code === 'ESRCH') { childRunning = false; break; }
         throw error;
       }
       await delay(25);
@@ -538,8 +608,8 @@ test('permission events record only confirmations required by the change', async
     await client.request('permission.set', {
       sessionId, permissionProfile: 'workspace-write', confirmFullAccess: true, confirmNetwork: true,
     });
-    const records = await client.request('session.read', { sessionId });
-    const permission = records.events.filter((event) => event.kind === 'sessionPermission').at(-1);
+    const records = await client.request('session.read', { sessionId }) as SessionReadView;
+    const permission = records.events.filter((event) => event.kind === 'sessionPermission').at(-1)!;
     assert.equal(permission.profile, 'workspace-write');
     assert.equal(permission.confirmedFullAccess, false);
     assert.equal(permission.confirmedNetwork, false);
@@ -549,16 +619,16 @@ test('permission events record only confirmations required by the change', async
 test('changing permission preserves the session policy override across reopening', async () => {
   await withTuiHost(async ({ client, sessionId }) => {
     await client.request('policy.set', { sessionId, mode: 'ask' });
-    const before = await client.request('status.get', { sessionId });
+    const before = await client.request('status.get', { sessionId }) as StatusView;
     assert.equal(before.policy, 'ask');
     assert.deepEqual(before.denials, { consecutive: 0, total: 0 });
     await client.request('permission.set', { sessionId, permissionProfile: 'workspace-write' });
-    const after = await client.request('status.get', { sessionId });
+    const after = await client.request('status.get', { sessionId }) as StatusView;
     assert.equal(after.policy, 'ask');
     assert.deepEqual(after.denials, before.denials);
     await client.request('session.close', { sessionId });
     await client.request('session.open', { sessionId });
-    const reopened = await client.request('status.get', { sessionId });
+    const reopened = await client.request('status.get', { sessionId }) as StatusView;
     assert.equal(reopened.policy, 'ask');
     assert.deepEqual(reopened.denials, before.denials);
   }, {
@@ -576,16 +646,16 @@ test('forced ask and denial counters survive a session reopen', async () => {
       const accepted = await client.request('run.start', {
         sessionId,
         input: JSON.stringify({ tool: 'read', args: { path: 'notes.md' } }),
-      });
+      }) as { runId: string };
       await client.request('run.wait', { sessionId, runId: accepted.runId, origin: 'human' });
     }
     await client.request('policy.set', { sessionId, mode: 'auto' });
-    const before = await client.request('status.get', { sessionId });
+    const before = await client.request('status.get', { sessionId }) as StatusView;
     assert.equal(before.policy, 'ask');
     assert.equal(before.denials.total, 3);
     await client.request('session.close', { sessionId });
     await client.request('session.open', { sessionId });
-    const after = await client.request('status.get', { sessionId });
+    const after = await client.request('status.get', { sessionId }) as StatusView;
     assert.equal(after.policy, 'ask');
     assert.deepEqual(after.denials, before.denials);
   }, {
@@ -601,14 +671,14 @@ test('legacy sessions reject permission changes before appending an unsupported 
   await withTuiHost(async ({ client, sessionId, sessionDirectory }) => {
     await client.request('session.close', { sessionId });
     const path = join(sessionDirectory, `${sessionId}.jsonl`);
-    const before = (await readFile(path, 'utf8')).trimEnd().split('\n').map((line) => JSON.parse(line));
+    const before = (await readFile(path, 'utf8')).trimEnd().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
     const header = { ...before[0], formatVersion: 1 };
     const legacyEvents = before.slice(1).filter((event) => event.kind !== 'sessionPermission');
     const legacy = `${[header, ...legacyEvents].map((event) => JSON.stringify(event)).join('\n')}\n`;
     await writeFile(path, legacy);
     await client.request('session.open', { sessionId });
     const openedBytes = await readFile(path, 'utf8');
-    const openedEvents = (await client.request('session.read', { sessionId })).events.length;
+    const openedEvents = ((await client.request('session.read', { sessionId })) as SessionReadView).events.length;
     await assert.rejects(client.request('permission.set', { sessionId, permissionProfile: 'workspace-write' }), {
       code: 'session_permission_format_unsupported',
     });
@@ -616,7 +686,7 @@ test('legacy sessions reject permission changes before appending an unsupported 
       code: 'session_policy_format_unsupported',
     });
     assert.equal(await readFile(path, 'utf8'), openedBytes);
-    const record = await client.request('session.read', { sessionId });
+    const record = await client.request('session.read', { sessionId }) as SessionReadView;
     assert.equal(record.events.length, legacyEvents.length);
   }, { permissionControl: true });
 });
@@ -629,7 +699,7 @@ test('headerless v0 sessions reject permission and policy changes without changi
     await writeFile(path, legacy);
     await client.request('session.open', { sessionId });
     const openedBytes = await readFile(path, 'utf8');
-    const openedEvents = (await client.request('session.read', { sessionId })).events.length;
+    const openedEvents = ((await client.request('session.read', { sessionId })) as SessionReadView).events.length;
     await assert.rejects(client.request('permission.set', { sessionId, permissionProfile: 'workspace-write' }), {
       code: 'session_permission_format_unsupported',
     });
@@ -637,7 +707,7 @@ test('headerless v0 sessions reject permission and policy changes without changi
       code: 'session_policy_format_unsupported',
     });
     assert.equal(await readFile(path, 'utf8'), openedBytes);
-    assert.equal((await client.request('session.read', { sessionId })).events.length, openedEvents);
+    assert.equal(((await client.request('session.read', { sessionId })) as SessionReadView).events.length, openedEvents);
   }, { permissionControl: true });
 });
 
@@ -645,7 +715,7 @@ test('Host approval requests expose the script binding to connected requesters',
   const permission = createPermissionContext('full-access', 'unrestricted', {
     filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
   });
-  const approvals = [];
+  const approvals: unknown[] = [];
   await withTuiHost(async ({ client, sessionId, projectDirectory }) => {
     await client.request('workspace.trust', {
       projectRoot: projectDirectory, trusted: true, confirmWorkspaceTrust: true,
@@ -660,11 +730,11 @@ test('Host approval requests expose the script binding to connected requesters',
       return { decision: 'allow' };
     });
     const command = `node "${script.replaceAll('\\', '/')}"`;
-    const accepted = await client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command } }) });
+    const accepted = await client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command } }) }) as { runId: string };
     await client.request('run.wait', { sessionId, runId: accepted.runId, origin: 'human' });
     assert.equal(await readFile(marker, 'utf8'), 'ran');
     assert.equal(approvals.length, 1);
-    const binding = approvals[0].scriptBinding;
+    const binding = (approvals[0] as { scriptBinding: ScriptBindingView }).scriptBinding;
     assert.ok(binding);
     assert.equal(binding.path, await realpath(script));
     assert.equal(binding.sha256, createHash('sha256').update(source).digest('hex'));

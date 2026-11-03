@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createDelegationGrant, listDelegationGrants, requireDelegationGrant, revokeDelegationGrant, assertDelegationMcpServer, assertDelegationMcpTool, assertDelegationPermission, assertDelegationPolicy } from '../dist/host/agent-control.js';
+import type { CreateDelegationGrantInput } from '../dist/host/agent-control.js';
 import { createPermissionContext } from '../dist/kernel/permission.js';
 import { withTuiHost } from './helpers/tui-host.ts';
 import { createConfig } from '../dist/kernel/config.js';
@@ -14,7 +15,36 @@ import { TRUSTED_AGENT_CONTROL_ORIGIN } from '../dist/host/agent-control-runtime
 
 const root = resolve('testplace');
 
-async function fixture(run) {
+type FixturePaths = { directory: string; projectRoot: string; storePath: string };
+
+type StoredGrant = {
+  id: string;
+  source?: string;
+  allowScreenCapture?: boolean;
+  confirmedScreenCapture?: boolean;
+  expiresAt?: string | null;
+  revokedAt?: string | null;
+};
+
+type StoredStore = { grants: StoredGrant[]; audit: { source?: string }[] };
+
+type GrantList = {
+  version: string;
+  grants: { id: string; revokedAt?: string | null; confirmedPartialWorkspaceWrite?: boolean }[];
+};
+
+type SessionStatus = {
+  screenCapture?: unknown;
+  delegation: { allowScreenCapture: boolean };
+  permission: { profile: string; changeAllowed: boolean };
+  policy?: string;
+};
+
+type SessionConfiguration = { permission: { profile: string }; applies?: string };
+
+type GrantHandle = { storePath: string; id: string };
+
+async function fixture(run: (paths: FixturePaths) => unknown | Promise<unknown>) {
   await mkdir(root, { recursive: true });
   const directory = await mkdtemp(join(root, 'agent-control-'));
   const projectRoot = join(directory, 'project');
@@ -24,7 +54,7 @@ async function fixture(run) {
   finally { await rm(directory, { recursive: true, force: true }); }
 }
 
-function input(projectRoot, overrides = {}) {
+function input(projectRoot: string, overrides: Partial<CreateDelegationGrantInput> = {}): CreateDelegationGrantInput {
   return {
     name: 'Codex local task',
     projectRoot,
@@ -49,11 +79,11 @@ test('screen capture requires an independent explicit confirmation and never fol
     const ordinary = await createDelegationGrant(storePath, input(projectRoot, { allowOperator: true }), empty.version);
     assert.equal(ordinary.grants[0].allowScreenCapture, false);
     const explicit = await createDelegationGrant(storePath, input(projectRoot, { allowScreenCapture: true, confirmScreenCapture: true }), ordinary.version);
-    const grant = explicit.grants.find(item => item.allowScreenCapture);
+    const grant = explicit.grants.find(item => item.allowScreenCapture)!;
     assert.equal(grant.confirmedScreenCapture, true);
     assert.equal((await requireDelegationGrant(storePath, grant.id, projectRoot)).allowScreenCapture, true);
-    const stored = JSON.parse(await readFile(storePath, 'utf8'));
-    stored.grants.find(item => item.id === grant.id).source = 'legacy';
+    const stored = JSON.parse(await readFile(storePath, 'utf8')) as StoredStore;
+    stored.grants.find(item => item.id === grant.id)!.source = 'legacy';
     await writeFile(storePath, JSON.stringify(stored));
     await assert.rejects(listDelegationGrants(storePath), { code: 'agent_control_store_invalid' });
   });
@@ -70,8 +100,8 @@ test('an Operator Host startup option cannot exceed a grant without screen permi
     });
     const client = createConnection(pair.client);
     try {
-      const { sessionId } = await client.request('session.create', { projectRoot });
-      const status = await client.request('status.get', { sessionId });
+      const { sessionId } = await client.request('session.create', { projectRoot }) as { sessionId: string };
+      const status = await client.request('status.get', { sessionId }) as SessionStatus;
       assert.deepEqual(status.screenCapture, { enabled: false, source: 'none', changeAllowed: false });
       assert.equal(status.delegation.allowScreenCapture, false);
       await assert.rejects(client.request('screen-capture.set', { sessionId, enabled: true, confirmScreenCapture: true }), { code: 'screen_capture_control_unavailable' });
@@ -86,7 +116,7 @@ test('delegation grants bind to a canonical project and reject a different proje
     assert.equal(created.grants.length, 1);
     assert.equal(created.grants[0].projectRoot, projectRoot);
     assert.equal(created.grants[0].source, 'trusted-ui');
-    const stored = JSON.parse(await readFile(storePath, 'utf8'));
+    const stored = JSON.parse(await readFile(storePath, 'utf8')) as StoredStore;
     assert.equal(stored.audit[0].source, 'trusted-ui');
     assert.equal((await requireDelegationGrant(storePath, created.grants[0].id, projectRoot)).id, created.grants[0].id);
     await assert.rejects(requireDelegationGrant(storePath, created.grants[0].id, directory), { code: 'agent_control_project_forbidden' });
@@ -97,7 +127,7 @@ test('delegation grants bind to a canonical project and reject a different proje
 test('existing grants without a recorded origin remain usable without inventing one', async () => {
   await fixture(async ({ projectRoot, storePath }) => {
     const created = await createDelegationGrant(storePath, input(projectRoot), (await listDelegationGrants(storePath)).version);
-    const legacy = JSON.parse(await readFile(storePath, 'utf8'));
+    const legacy = JSON.parse(await readFile(storePath, 'utf8')) as StoredStore;
     delete legacy.grants[0].source;
     delete legacy.grants[0].allowScreenCapture;
     delete legacy.grants[0].confirmedScreenCapture;
@@ -113,7 +143,7 @@ test('existing grants without a recorded origin remain usable without inventing 
     assert.equal((await requireDelegationGrant(storePath, created.grants[0].id, projectRoot)).source, 'legacy');
 
     await revokeDelegationGrant(storePath, created.grants[0].id, loaded.version);
-    const rewritten = JSON.parse(await readFile(storePath, 'utf8'));
+    const rewritten = JSON.parse(await readFile(storePath, 'utf8')) as StoredStore;
     assert.equal(rewritten.grants[0].source, 'legacy');
     assert.equal(rewritten.audit[0].source, 'legacy');
   });
@@ -195,7 +225,7 @@ test('revoked and expired grants cannot be used', async () => {
     await assert.rejects(revokeDelegationGrant(storePath, created.grants[0].id, revoked.version), { code: 'agent_control_grant_revoked' });
 
     const next = await createDelegationGrant(storePath, input(projectRoot), revoked.version);
-    const stored = JSON.parse(await readFile(storePath, 'utf8'));
+    const stored = JSON.parse(await readFile(storePath, 'utf8')) as StoredStore;
     stored.grants[1].expiresAt = new Date(Date.now() - 1000).toISOString();
     await writeFile(storePath, `${JSON.stringify(stored)}\n`);
     await assert.rejects(requireDelegationGrant(storePath, next.grants[1].id, projectRoot), { code: 'agent_control_grant_expired' });
@@ -204,7 +234,7 @@ test('revoked and expired grants cannot be used', async () => {
 
 test('trusted Host clients can create and revoke grants while untrusted Host clients cannot', async () => {
   await withTuiHost(async ({ client, projectDirectory }) => {
-    const before = await client.request('agent-control.list', {});
+    const before = await client.request('agent-control.list', {}) as GrantList;
     const created = await client.request('agent-control.create', {
       version: before.version,
       grantName: 'desktop test',
@@ -213,9 +243,9 @@ test('trusted Host clients can create and revoke grants while untrusted Host cli
       defaultNetwork: 'policy', maxNetwork: 'policy',
       defaultPolicy: 'ask', allowedPolicyAsk: true, allowedPolicyAuto: false, allowedPolicyNever: false, allowOperator: false,
       confirmFullAccess: false, confirmUnrestrictedNetwork: false, confirmWorkspaceTrust: true, expiresAt: '',
-    });
+    }) as GrantList;
     assert.equal(created.grants.length, 1);
-    const revoked = await client.request('agent-control.revoke', { grantId: created.grants[0].id, version: created.version });
+    const revoked = await client.request('agent-control.revoke', { grantId: created.grants[0].id, version: created.version }) as GrantList;
     assert.ok(revoked.grants[0].revokedAt);
   }, { permissionControl: true });
 
@@ -233,7 +263,7 @@ test('Windows partial Agent Control grants require explicit project-trust confir
     partialWorkspaceWriteConfirmationRequired: true,
   });
   await withTuiHost(async ({ client, projectDirectory }) => {
-    const before = await client.request('agent-control.list', {});
+    const before = await client.request('agent-control.list', {}) as GrantList;
     const grant = {
       version: before.version,
       grantName: 'partial workspace test',
@@ -257,16 +287,16 @@ test('Windows partial Agent Control grants require explicit project-trust confir
     });
     const created = await client.request('agent-control.create', {
       ...grant, confirmPartialWorkspaceWrite: true,
-    });
+    }) as GrantList;
     assert.equal(created.grants[0].confirmedPartialWorkspaceWrite, true);
   }, { permissionControl: true, permission });
 });
 
 test('a delegated Host enforces the project, permission, policy and operator limits on every request', async () => {
-  let grant;
+  let grant!: GrantHandle;
   await withTuiHost(async ({ client, sessionId, projectDirectory, directory }) => {
-    assert.equal((await client.request('status.get', { sessionId })).permission.profile, 'read-only');
-    const changed = await client.request('session.configure', { sessionId, permissionProfile: 'workspace-write' });
+    assert.equal(((await client.request('status.get', { sessionId })) as SessionStatus).permission.profile, 'read-only');
+    const changed = await client.request('session.configure', { sessionId, permissionProfile: 'workspace-write' }) as SessionConfiguration;
     assert.equal(changed.permission.profile, 'workspace-write');
     await assert.rejects(
       client.request('session.configure', { sessionId, permissionProfile: 'full-access' }),
@@ -288,8 +318,8 @@ test('a delegated Host enforces the project, permission, policy and operator lim
       allowedPolicyAsk: true, allowedPolicyAuto: false, allowedPolicyNever: false,
       allowOperator: false, confirmFullAccess: false, confirmUnrestrictedNetwork: false, confirmWorkspaceTrust: true, expiresAt: '',
     }), { code: 'agent_control_trusted_ui_required' });
-    const records = await client.request('session.read', { sessionId });
-    assert.equal(records.events.filter((event) => event.kind === 'sessionPermission').at(-1).source, 'agent-control');
+    const records = await client.request('session.read', { sessionId }) as { events: { kind?: string; source?: string }[] };
+    assert.equal(records.events.filter((event) => event.kind === 'sessionPermission').at(-1)!.source, 'agent-control');
     const revoked = await revokeDelegationGrant(grant.storePath, grant.id, (await listDelegationGrants(grant.storePath)).version);
     assert.equal(revoked.grants[0].revokedAt !== null, true);
     await assert.rejects(client.request('status.get', { sessionId }), { code: 'agent_control_grant_revoked' });
@@ -310,16 +340,16 @@ test('a delegated Host enforces the project, permission, policy and operator lim
 });
 
 test('session policy overrides survive reopening and remain inside the active grant ceiling', async () => {
-  let grant;
+  let grant!: GrantHandle;
   await withTuiHost(async ({ client, sessionId, sessionDirectory }) => {
     await client.request('policy.set', { sessionId, mode: 'ask' });
     await client.request('session.close', { sessionId });
     await client.request('session.open', { sessionId });
-    assert.equal((await client.request('status.get', { sessionId })).policy, 'ask');
+    assert.equal(((await client.request('status.get', { sessionId })) as SessionStatus).policy, 'ask');
 
     await client.request('session.close', { sessionId });
     const path = join(sessionDirectory, `${sessionId}.jsonl`);
-    const lines = (await readFile(path, 'utf8')).trimEnd().split('\n').map((line) => JSON.parse(line));
+    const lines = (await readFile(path, 'utf8')).trimEnd().split('\n').map((line) => JSON.parse(line) as { kind?: string; override?: string });
     const state = lines.filter((event) => event.kind === 'sessionPolicy').at(-1);
     assert.ok(state);
     state.override = 'never';
@@ -370,15 +400,15 @@ test('the permission change flag follows the channel, not just the host', async 
     const host = serveHost({ ...pair.host, config, provider: hostProviderFromConfig(config),
       agentControl: { grantId, storePath, operator: false, validate: () => requireDelegationGrant(storePath, grantId, projectRoot) } });
     const client = createConnection(pair.client);
-    const bridge = { notify() {}, async request() { return { decision: 'deny' }; }, [TRUSTED_AGENT_CONTROL_ORIGIN]: true };
+    const bridge = { notify() {}, async request() { return { decision: 'deny' }; }, [TRUSTED_AGENT_CONTROL_ORIGIN]: true as const };
     try {
-      const { sessionId } = await client.request('session.create', { projectRoot });
-      const ordinary = await client.request('status.get', { sessionId });
+      const { sessionId } = await client.request('session.create', { projectRoot }) as { sessionId: string };
+      const ordinary = await client.request('status.get', { sessionId }) as SessionStatus;
       assert.equal(ordinary.permission.changeAllowed, false, 'an ordinary client may not change permission');
-      const observed = await host.handle({ method: 'status.get', params: { projectRoot, sessionId } }, bridge);
+      const observed = await host.handle({ method: 'status.get', params: { projectRoot, sessionId } }, bridge) as SessionStatus;
       assert.equal(observed.permission.changeAllowed, true, 'the bridge may change permission, so the view must say so');
       const target = observed.permission.profile === 'read-only' ? 'workspace-write' : 'read-only';
-      const changed = await host.handle({ method: 'permission.set', params: { sessionId, permissionProfile: target } }, bridge);
+      const changed = await host.handle({ method: 'permission.set', params: { sessionId, permissionProfile: target } }, bridge) as SessionConfiguration;
       assert.equal(changed.permission.profile, target);
       assert.equal(changed.applies, 'now');
       await assert.rejects(host.handle({ method: 'permission.set', params: { sessionId, permissionProfile: 'full-access' } }, bridge), { code: 'agent_control_permission_exceeds_grant' });
@@ -390,13 +420,13 @@ test('the permission change flag follows the channel, not just the host', async 
 
 test('a bridge cannot change permission while a run is executing', async () => {
   await withTuiHost(async ({ client, host, sessionId }) => {
-    const bridge = { notify() {}, async request() { return { decision: 'deny' }; }, [TRUSTED_AGENT_CONTROL_ORIGIN]: true };
-    const started = await client.request('run.submit', { sessionId, input: 'slow bridge turn', requestKey: 'bridge-running' });
+    const bridge = { notify() {}, async request() { return { decision: 'deny' }; }, [TRUSTED_AGENT_CONTROL_ORIGIN]: true as const };
+    const started = await client.request('run.submit', { sessionId, input: 'slow bridge turn', requestKey: 'bridge-running' }) as { state: string; runId: string };
     assert.equal(started.state, 'running');
     await assert.rejects(host.handle({ method: 'permission.set', params: { sessionId, permissionProfile: 'read-only' } }, bridge),
       { code: 'permission_session_running' });
     await client.request('run.wait', { sessionId, runId: started.runId });
-    const changed = await host.handle({ method: 'permission.set', params: { sessionId, permissionProfile: 'read-only' } }, bridge);
+    const changed = await host.handle({ method: 'permission.set', params: { sessionId, permissionProfile: 'read-only' } }, bridge) as SessionConfiguration;
     assert.equal(changed.permission.profile, 'read-only');
   }, {
     delayMs: 1_500,

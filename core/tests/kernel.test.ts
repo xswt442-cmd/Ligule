@@ -6,12 +6,34 @@ import { join } from 'node:path';
 import {
   createConfig, createDecisionChain, createKernel, createPermissionContext, createSessionLog, KernelError, minimalTools,
 } from '../dist/index.js';
+import type { ToolDefinition } from '../dist/kernel/kernel.js';
+import type { Logger } from '../dist/kernel/log.js';
+import type { ProviderDiagnostic } from '../dist/kernel/error.js';
 
 const toolFailurePermission = createPermissionContext('workspace-write', 'policy', {
   filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
 });
 
-function makeTool(name, overrides = {}) {
+type ToolResultRecord = { kind?: string; code?: string; content?: string; failed?: boolean };
+
+type PackageManifest = {
+  name: string;
+  version: string;
+  private?: boolean;
+  main: string;
+  scripts: Record<string, string>;
+  dependencies: Record<string, string>;
+};
+
+function hasCode(error: unknown, code: string): boolean {
+  return error instanceof Error && (error as { code?: string }).code === code;
+}
+
+function hasDetail(error: unknown, text: string): boolean {
+  return error instanceof Error && ((error as { detail?: string }).detail ?? '').includes(text);
+}
+
+function makeTool(name: string, overrides: Partial<ToolDefinition> = {}): ToolDefinition {
   return {
     name,
     description: `the ${name} tool`,
@@ -22,7 +44,7 @@ function makeTool(name, overrides = {}) {
   };
 }
 
-function kernelWith(...names) {
+function kernelWith(...names: string[]) {
   const kernel = createKernel();
   for (const name of names) kernel.register(makeTool(name));
   return kernel;
@@ -64,21 +86,21 @@ test('a duplicate name throws instead of dropping the second one silently', () =
   kernel.register(makeTool('read'));
   assert.throws(
     () => kernel.register(makeTool('read')),
-    (error) => error instanceof KernelError && error.code === 'tool_already_registered',
+    (error: unknown) => error instanceof KernelError && error.code === 'tool_already_registered',
   );
   assert.deepEqual(kernel.list(), ['read']);
 });
 
 test('registration rejects a missing or empty required field with a code', () => {
   const kernel = createKernel();
-  assert.throws(() => kernel.register(makeTool('')), (error) => error.code === 'tool_name_required');
+  assert.throws(() => kernel.register(makeTool('')), (error: unknown) => hasCode(error, 'tool_name_required'));
   assert.throws(
     () => kernel.register(makeTool('read', { description: '' })),
-    (error) => error.code === 'tool_description_required',
+    (error: unknown) => hasCode(error, 'tool_description_required'),
   );
   assert.throws(
-    () => kernel.register(makeTool('read', { run: 'nope' })),
-    (error) => error.code === 'tool_run_required',
+    () => kernel.register(makeTool('read', { run: 'nope' } as unknown as Partial<ToolDefinition>)),
+    (error: unknown) => hasCode(error, 'tool_run_required'),
   );
   assert.deepEqual(kernel.list(), []);
 });
@@ -87,15 +109,15 @@ test('a parameter schema whose top level is a scalar fails at registration', () 
   const kernel = createKernel();
   assert.throws(
     () => kernel.register(makeTool('read', { parameters: { type: 'string' } })),
-    (error) => error.code === 'tool_parameters_type_not_object',
+    (error: unknown) => hasCode(error, 'tool_parameters_type_not_object'),
   );
   assert.throws(
-    () => kernel.register(makeTool('read', { parameters: [] })),
-    (error) => error.code === 'tool_parameters_must_be_object',
+    () => kernel.register(makeTool('read', { parameters: [] } as unknown as Partial<ToolDefinition>)),
+    (error: unknown) => hasCode(error, 'tool_parameters_must_be_object'),
   );
   assert.throws(
     () => kernel.register(makeTool('read', { parameters: undefined })),
-    (error) => error.code === 'tool_parameters_must_be_object',
+    (error: unknown) => hasCode(error, 'tool_parameters_must_be_object'),
   );
 });
 
@@ -103,7 +125,7 @@ test('a parameter schema that cannot round-trip as JSON fails at registration', 
   const kernel = createKernel();
   assert.throws(
     () => kernel.register(makeTool('read', { parameters: { type: 'object', extra: () => 1 } })),
-    (error) => error.code === 'tool_parameters_not_serializable',
+    (error: unknown) => hasCode(error, 'tool_parameters_not_serializable'),
   );
 });
 
@@ -111,35 +133,35 @@ test('a parameter schema outside the supported subset fails at registration and 
   const kernel = createKernel();
   assert.throws(() => kernel.register(makeTool('read', {
     parameters: { type: 'object', properties: { path: { type: 'string', pattern: '^a' } } },
-  })), (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('path.pattern'));
+  })), (error: unknown) => hasCode(error, 'tool_parameters_unsupported_construct') && hasDetail(error, 'path.pattern'));
   assert.throws(
     () => kernel.register(makeTool('read', {
       parameters: { type: 'object', properties: { path: { type: 'string' } }, required: 'path' },
     })),
-    (error) => error.detail.includes('required must be an array of strings'),
+    (error: unknown) => hasDetail(error, 'required must be an array of strings'),
   );
   assert.throws(
     () => kernel.register(makeTool('read', { parameters: { type: 'object', properties: {}, required: ['path'] } })),
-    (error) => error.detail.includes('required names "path" which is not in properties'),
+    (error: unknown) => hasDetail(error, 'required names "path" which is not in properties'),
   );
   // 上下界必须是数值；字符串形式无法用于内核校验。
   assert.throws(
     () => kernel.register(makeTool('read', {
       parameters: { type: 'object', properties: { path: { type: 'string', minimum: 1 } } },
     })),
-    (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('path.minimum needs type integer or number'),
+    (error: unknown) => hasCode(error, 'tool_parameters_unsupported_construct') && hasDetail(error, 'path.minimum needs type integer or number'),
   );
   assert.throws(
     () => kernel.register(makeTool('read', {
       parameters: { type: 'object', properties: { n: { type: 'number', maximum: Number.NaN } } },
     })),
-    (error) => error.detail.includes('n.maximum must be a finite number'),
+    (error: unknown) => hasDetail(error, 'n.maximum must be a finite number'),
   );
   assert.throws(
     () => kernel.register(makeTool('read', {
       parameters: { type: 'object', properties: { n: { type: 'integer', minimum: 10, maximum: 1 } } },
     })),
-    (error) => error.detail.includes('n has minimum above maximum'),
+    (error: unknown) => hasDetail(error, 'n has minimum above maximum'),
   );
   assert.deepEqual(kernel.list(), []);
 });
@@ -226,24 +248,24 @@ test('nested schemas reject unsupported constructs and nesting beyond the suppor
   const kernel = createKernel();
   assert.throws(() => kernel.register(makeTool('delegate', {
     parameters: { type: 'object', properties: { tags: { type: 'array', items: { type: 'null' } } } },
-  })), (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('tags.items.type'));
+  })), (error: unknown) => hasCode(error, 'tool_parameters_unsupported_construct') && hasDetail(error, 'tags.items.type'));
   assert.throws(() => kernel.register(makeTool('delegate', {
     parameters: { type: 'object', properties: { value: { anyOf: [] } } },
-  })), (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('value.anyOf'));
+  })), (error: unknown) => hasCode(error, 'tool_parameters_unsupported_construct') && hasDetail(error, 'value.anyOf'));
   assert.throws(() => kernel.register(makeTool('delegate', {
     parameters: { type: 'object', properties: { value: { type: 'string', anyOf: [{ type: 'string' }] } } },
-  })), (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('value.anyOf cannot be combined'));
+  })), (error: unknown) => hasCode(error, 'tool_parameters_unsupported_construct') && hasDetail(error, 'value.anyOf cannot be combined'));
   assert.throws(() => kernel.register(makeTool('delegate', {
     parameters: { type: 'object', properties: { value: { type: 'object', additionalProperties: true } } },
-  })), (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('value.additionalProperties'));
+  })), (error: unknown) => hasCode(error, 'tool_parameters_unsupported_construct') && hasDetail(error, 'value.additionalProperties'));
 
-  let schema = { type: 'string' };
+  let schema: Record<string, unknown> = { type: 'string' };
   for (let depth = 0; depth < 9; depth += 1) {
     schema = { type: 'object', properties: { nested: schema } };
   }
   assert.throws(() => kernel.register(makeTool('delegate', {
     parameters: { type: 'object', properties: { value: schema } },
-  })), (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('maximum schema depth'));
+  })), (error: unknown) => hasCode(error, 'tool_parameters_unsupported_construct') && hasDetail(error, 'maximum schema depth'));
 });
 
 test('string length bounds are checked as Unicode characters and invalid bounds fail registration', async () => {
@@ -257,18 +279,18 @@ test('string length bounds are checked as Unicode characters and invalid bounds 
 
   assert.throws(() => createKernel().register(makeTool('label', {
     parameters: { type: 'object', properties: { value: { type: 'integer', maxLength: 3 } } },
-  })), (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('maxLength needs type string'));
+  })), (error: unknown) => hasCode(error, 'tool_parameters_unsupported_construct') && hasDetail(error, 'maxLength needs type string'));
   assert.throws(() => createKernel().register(makeTool('label', {
     parameters: { type: 'object', properties: { value: { type: 'string', minLength: 4, maxLength: 3 } } },
-  })), (error) => error.code === 'tool_parameters_unsupported_construct' && error.detail.includes('minLength above maxLength'));
+  })), (error: unknown) => hasCode(error, 'tool_parameters_unsupported_construct') && hasDetail(error, 'minLength above maxLength'));
 });
 
 test('a numeric bound on a numeric parameter registers and is enforced per call', async () => {
   const kernel = createKernel();
   kernel.register(makeTool('read', { parameters: { type: 'object', properties: { n: { type: 'integer', minimum: 1, maximum: 3 } }, required: ['n'] } }));
   assert.deepEqual(kernel.manifest().map((tool) => tool.name), ['read']);
-  await assert.rejects(() => kernel.call('read', { n: 0 }), (error) => error.code === 'tool_args_invalid');
-  await assert.rejects(() => kernel.call('read', { n: 4 }), (error) => error.code === 'tool_args_invalid');
+  await assert.rejects(() => kernel.call('read', { n: 0 }), (error: unknown) => hasCode(error, 'tool_args_invalid'));
+  await assert.rejects(() => kernel.call('read', { n: 4 }), (error: unknown) => hasCode(error, 'tool_args_invalid'));
   assert.equal(await kernel.call('read', { n: 2 }), 'ok');
 });
 
@@ -280,11 +302,11 @@ test('the default read-only permission denies writes and tools without a classif
   assert.deepEqual(kernel.manifest(), []);
   await assert.rejects(
     kernel.call('write', {}),
-    (error) => error.code === 'permission_read_only',
+    (error: unknown) => hasCode(error, 'permission_read_only'),
   );
   await assert.rejects(
     kernel.call('unclassified', {}),
-    (error) => error.code === 'permission_external_access_requires_full_access',
+    (error: unknown) => hasCode(error, 'permission_external_access_requires_full_access'),
   );
 });
 
@@ -292,21 +314,21 @@ test('a call whose arguments do not match the schema fails before the decision c
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'kernel-'));
   try {
     const session = createSessionLog({ directory: root, id: 'args' });
-    const asked = [];
+    const asked: unknown[] = [];
     const kernel = createKernel({
       policy: createDecisionChain({ ask: async (call) => { asked.push(call); return true; } }),
       session,
     });
     kernel.register(makeTool('read'));
-    await assert.rejects(kernel.call('read', { path: 7 }), (error) => error.code === 'tool_args_invalid');
-    await assert.rejects(kernel.call('read', {}), (error) => error.code === 'tool_args_invalid');
+    await assert.rejects(kernel.call('read', { path: 7 }), (error: unknown) => hasCode(error, 'tool_args_invalid'));
+    await assert.rejects(kernel.call('read', {}), (error: unknown) => hasCode(error, 'tool_args_invalid'));
     assert.equal(asked.length, 0, 'a malformed call never reaches the user');
     const events = await session.read();
-    assert.deepEqual(events.map((event) => [event.result.kind, event.result.code]), [
+    assert.deepEqual(events.map((event) => [(event.result as ToolResultRecord).kind, (event.result as ToolResultRecord).code]), [
       ['failure', 'tool_args_invalid'],
       ['failure', 'tool_args_invalid'],
     ]);
-    assert.deepEqual(events.map((event) => event.result.content), [
+    assert.deepEqual(events.map((event) => (event.result as ToolResultRecord).content), [
       '"path" must be a string',
       'missing required property "path"',
     ]);
@@ -319,7 +341,7 @@ test('a call whose arguments do not match the schema fails before the decision c
 test('a tool record carries how long the tool ran, and approval waiting is not in it', async () => {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'kernel-'));
   try {
-    const wait = async (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const wait = async (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
     const session = createSessionLog({ directory: root, id: 'timed' });
     const kernel = createKernel({
       // 答复之前先等 250 毫秒，而工具自己什么都不做：那一段等待不该进这一格。
@@ -329,8 +351,9 @@ test('a tool record carries how long the tool ran, and approval waiting is not i
     kernel.register(makeTool('read'));
     assert.equal(await kernel.call('read', { path: 'note.txt' }), 'ok');
     const [ran] = await session.read();
-    assert.ok(Number.isInteger(ran.durationMs), `那一格是整数毫秒，读到的是 ${ran.durationMs}`);
-    assert.ok(ran.durationMs >= 0 && ran.durationMs < 200, `只算这一次执行，读到的是 ${ran.durationMs}`);
+    const durationMs = ran.durationMs as number;
+    assert.ok(Number.isInteger(durationMs), `那一格是整数毫秒，读到的是 ${durationMs}`);
+    assert.ok(durationMs >= 0 && durationMs < 200, `只算这一次执行，读到的是 ${durationMs}`);
     // 该字段不进入模型可见投影；投影只包含事件类型对应的固定字段。
     assert.ok(!(JSON.stringify(await session.modelView())).includes('durationMs'));
 
@@ -341,7 +364,7 @@ test('a tool record carries how long the tool ran, and approval waiting is not i
       session: refusedSession,
     });
     strict.register(makeTool('read'));
-    await assert.rejects(strict.call('read', { path: 'note.txt' }), (error) => error.code === 'policy_denied');
+    await assert.rejects(strict.call('read', { path: 'note.txt' }), (error: unknown) => hasCode(error, 'policy_denied'));
     const [refused] = await refusedSession.read();
     assert.equal(refused.durationMs, undefined, '拒绝的那一条不记执行耗时');
   } finally {
@@ -361,7 +384,7 @@ test('a numeric bound in the schema is enforced on every call', async () => {
   assert.equal(await kernel.call('read', { path: 'note.txt', offsetBytes: 0 }), 'ok');
   await assert.rejects(
     kernel.call('read', { path: 'note.txt', offsetBytes: -1 }),
-    (error) => error.code === 'tool_args_invalid' && error.detail === '"offsetBytes" must be at least 0',
+    (error: unknown) => hasCode(error, 'tool_args_invalid') && (error as { detail?: string }).detail === '"offsetBytes" must be at least 0',
   );
 });
 
@@ -379,10 +402,10 @@ test('an unwrapped error from a tool becomes a stable code, keeps its cause, and
     }));
     await assert.rejects(
       kernel.call('half-baked', {}),
-      (error) => error instanceof KernelError && error.code === 'tool_failed' && error.cause === original,
+      (error: unknown) => error instanceof KernelError && hasCode(error, 'tool_failed') && error.cause === original,
     );
     const [event] = await session.read();
-    assert.deepEqual([event.result.kind, event.result.code, event.result.content], [
+    assert.deepEqual([(event.result as ToolResultRecord).kind, (event.result as ToolResultRecord).code, (event.result as ToolResultRecord).content], [
       'failure',
       'tool_failed',
       'cannot read properties of undefined',
@@ -394,7 +417,7 @@ test('an unwrapped error from a tool becomes a stable code, keeps its cause, and
 
 test('the manifest carries exactly the three model-visible fields', () => {
   const kernel = createKernel();
-  kernel.register(makeTool('read', { timeoutMs: 5000, output: { render: () => '' } }));
+  kernel.register(makeTool('read', { timeoutMs: 5000, output: { render: () => '' } } as unknown as Partial<ToolDefinition>));
   assert.deepEqual(kernel.manifest(), [
     {
       name: 'read',
@@ -406,11 +429,11 @@ test('the manifest carries exactly the three model-visible fields', () => {
 
 test('the manifest is detached from the object the plugin registered', () => {
   const kernel = createKernel();
-  const parameters = { type: 'object', properties: {} };
+  const parameters = { type: 'object', properties: {} as Record<string, { type: string }> };
   kernel.register(makeTool('read', { parameters }));
   parameters.properties.suffix = { type: 'string' };
   assert.deepEqual(kernel.manifest()[0].parameters.properties, {});
-  kernel.manifest()[0].description = 'edited by the caller';
+  (kernel.manifest()[0] as { description: string }).description = 'edited by the caller';
   assert.equal(kernel.manifest()[0].description, 'the read tool');
 });
 
@@ -421,7 +444,7 @@ test('a restricted tool leaves the manifest but stays registered, and calling it
   assert.deepEqual(kernel.list(), ['read', 'search']);
   await assert.rejects(
     kernel.call('read', {}),
-    (error) => error.code === 'tool_denied',
+    (error: unknown) => hasCode(error, 'tool_denied'),
   );
   lift();
   assert.deepEqual(kernel.manifest().map((tool) => tool.name), ['read', 'search']);
@@ -466,7 +489,7 @@ test('calling a restriction disposer twice does not lift another restriction', (
 test('calling an unregistered tool rejects with a code', async () => {
   await assert.rejects(
     createKernel().call('nope'),
-    (error) => error.code === 'tool_not_found',
+    (error: unknown) => hasCode(error, 'tool_not_found'),
   );
 });
 
@@ -479,7 +502,7 @@ test('every tool failure leaves the model a sentence to act on', async () => {
     const session = createSessionLog({ directory: root, id: 'messages' });
     const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), permission: toolFailurePermission, session });
     for (const tool of minimalTools) kernel.register(tool);
-    const failures = [
+    const failures: [string, Record<string, unknown>][] = [
       ['read', { path: 'missing.txt' }],
       ['find', { pattern: '*', path: 'missing.txt' }],
       ['search', { pattern: 'x', path: 'missing.txt' }],
@@ -493,10 +516,11 @@ test('every tool failure leaves the model a sentence to act on', async () => {
     for (const [name, args] of failures) {
       await assert.rejects(() => kernel.call(name, args), `${name} should have refused ${JSON.stringify(args)}`);
     }
-    const refused = (await session.read()).filter((event) => event.result?.failed);
+    const refused = (await session.read()).filter((event) => (event.result as ToolResultRecord | undefined)?.failed);
     assert.equal(refused.length, failures.length, 'each refusal left exactly one failure event');
     for (const event of refused) {
-      assert.ok(typeof event.result.content === 'string' && event.result.content !== '', `${event.tool} / ${event.result.code} says nothing to the model`);
+      const result = event.result as ToolResultRecord;
+      assert.ok(typeof result.content === 'string' && result.content !== '', `${event.tool} / ${result.code} says nothing to the model`);
     }
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -508,9 +532,9 @@ test('a call naming a tool that is not registered is recorded against its call i
   try {
     const session = createSessionLog({ directory: root, id: 'missing' });
     const kernel = createKernel({ session });
-    await assert.rejects(kernel.call('nope', {}, { callId: 'call_9' }), (error) => error.code === 'tool_not_found');
+    await assert.rejects(kernel.call('nope', {}, { callId: 'call_9' }), (error: unknown) => hasCode(error, 'tool_not_found'));
     const events = await session.read();
-    assert.deepEqual(events.map((event) => [event.kind, event.callId, event.result.kind, event.result.code]), [
+    assert.deepEqual(events.map((event) => [event.kind, event.callId, (event.result as ToolResultRecord).kind, (event.result as ToolResultRecord).code]), [
       ['tool', 'call_9', 'failure', 'tool_not_found'],
     ]);
     assert.deepEqual(await session.modelView(), [
@@ -522,7 +546,7 @@ test('a call naming a tool that is not registered is recorded against its call i
 });
 
 test('a tool reads the configuration snapshot and the logger from the context it is called with', async () => {
-  const seen = [];
+  const seen: unknown[] = [];
   const kernel = createKernel({
     config: createConfig({ user: { sandbox: { network: 'on' } } }),
     logger: {
@@ -533,7 +557,7 @@ test('a tool reads the configuration snapshot and the logger from the context it
   kernel.register(makeTool('read', {
     run: async (args, context) => {
       context.logger.log('reading');
-      return context.config.sandbox.network;
+      return (context.config.sandbox as Record<string, unknown>).network;
     },
   }));
   assert.equal(await kernel.call('read', { path: 'note.txt' }), 'on');
@@ -541,8 +565,8 @@ test('a tool reads the configuration snapshot and the logger from the context it
 });
 
 test('a fresh kernel hands tools an empty read-only snapshot and a silent logger', async () => {
-  let snapshot;
-  let logger;
+  let snapshot!: unknown;
+  let logger!: Logger;
   const kernel = createKernel();
   kernel.register(makeTool('read', {
     run: async (args, context) => {
@@ -560,19 +584,19 @@ test('a fresh kernel hands tools an empty read-only snapshot and a silent logger
 test('a configuration object that is not a folded snapshot is rejected', () => {
   assert.throws(
     () => createKernel({ config: { mode: 'x' } }),
-    (error) => error.code === 'config_snapshot_must_be_frozen',
+    (error: unknown) => hasCode(error, 'config_snapshot_must_be_frozen'),
   );
 });
 
 test('product manifests carry independent release versions while Core stays private', () => {
-  const tui = JSON.parse(readFileSync(new URL('../../tui/package.json', import.meta.url), 'utf8'));
-  const core = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-  const desktop = JSON.parse(readFileSync(new URL('../../desktop/package.json', import.meta.url), 'utf8'));
-  const frontend = JSON.parse(readFileSync(new URL('../../desktop/frontend/package.json', import.meta.url), 'utf8'));
+  const tui = JSON.parse(readFileSync(new URL('../../tui/package.json', import.meta.url), 'utf8')) as PackageManifest;
+  const core = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as PackageManifest;
+  const desktop = JSON.parse(readFileSync(new URL('../../desktop/package.json', import.meta.url), 'utf8')) as PackageManifest;
+  const frontend = JSON.parse(readFileSync(new URL('../../desktop/frontend/package.json', import.meta.url), 'utf8')) as PackageManifest;
   assert.equal(core.name, '@ligule/core');
   assert.equal(core.private, true);
   assert.equal(Object.hasOwn(core, 'version'), false);
-  for (const [name, manifest] of [['tui', tui], ['desktop', desktop], ['frontend', frontend]]) {
+  for (const [name, manifest] of [['tui', tui], ['desktop', desktop], ['frontend', frontend]] as [string, PackageManifest][]) {
     assert.match(manifest.version, /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/, `${name} version must be stable X.Y.Z`);
   }
   assert.equal(tui.name, 'ligule');
@@ -595,7 +619,7 @@ test('provider diagnostics share one category table and one summary', async () =
   assert.deepEqual(parsed, {
     category: 'server', status: 503, attempts: 3, responseReceived: true, streamReceived: false, recoverable: true,
   });
-  assert.deepEqual(providerDiagnosticText(parsed), {
+  assert.deepEqual(providerDiagnosticText(parsed as ProviderDiagnostic), {
     zh: 'HTTP 503 · 服务端故障 · 尝试 3 次 · 收到响应 · 未收到响应流 · 可恢复',
     en: 'HTTP 503 · server failure · 3 attempts · response received · no stream data · recoverable',
   });
@@ -605,5 +629,5 @@ test('provider diagnostics share one category table and one summary', async () =
   assert.equal(parseProviderDiagnostic(null), undefined);
 
   const withoutStatus = parseProviderDiagnostic({ category: 'transport', attempts: 1, responseReceived: false, streamReceived: false, recoverable: false });
-  assert.equal(providerDiagnosticText(withoutStatus).zh, 'HTTP 状态未知 · 传输故障 · 尝试 1 次 · 未收到响应 · 未收到响应流 · 不可安全重试');
+  assert.equal(providerDiagnosticText(withoutStatus as ProviderDiagnostic).zh, 'HTTP 状态未知 · 传输故障 · 尝试 1 次 · 未收到响应 · 未收到响应流 · 不可安全重试');
 });

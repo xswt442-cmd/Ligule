@@ -11,12 +11,17 @@ import { windowsRecycleBin } from '../dist/capability/recycle.js';
 import { bindScript } from '../dist/capability/script-binding.js';
 import { boundaryOf, workingDirectoryOf } from '../dist/capability/limits.js';
 import { resolveWithin } from '../dist/capability/paths.js';
+import type { CapabilityConfig } from '../dist/capability/limits.js';
+import type { ToolContext } from '../dist/kernel/kernel.js';
 
 const builtRipgrep = rgPath;
 
 const NEEDLE = 'needle here';
 
-async function withWorkspace(run, { realRecycleBin = false } = {}) {
+async function withWorkspace<TResult>(
+  run: (workspace: string) => Promise<TResult>,
+  { realRecycleBin = false }: { realRecycleBin?: boolean } = {},
+): Promise<TResult> {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'tools-'));
   const workspace = join(root, 'workspace');
   const previousXdgData = process.env.XDG_DATA_HOME;
@@ -55,19 +60,20 @@ const fullAccess = createPermissionContext('full-access', 'unrestricted', {
   filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
 }, { workspaceTrusted: true });
 
-function context(workspace, limits, extra) {
-  return { config: { boundary: workspace, limits, ...extra }, logger: silentLogger };
+// 工具上下文由内核完整注入；测试只给工具需要的那部分字段。
+function context(workspace: string, limits?: Record<string, number>, extra: Record<string, unknown> = {}, signal?: AbortSignal): ToolContext {
+  return { config: { boundary: workspace, limits, ...extra }, logger: silentLogger, signal } as unknown as ToolContext;
 }
 
 // 收集回落原因的日志接口：检索有两条后端，用不上外部那一条时要说清为什么。
-function recordingContext(workspace, extra) {
-  const logged = [];
+function recordingContext(workspace: string, extra: Record<string, unknown> = {}) {
+  const logged: Record<string, unknown>[] = [];
   return {
     logged,
     context: {
       config: { boundary: workspace, ...extra },
-      logger: { debug: (message, fields) => logged.push({ message, ...fields }), log: () => {} },
-    },
+      logger: { debug: (message: string, fields: Record<string, unknown> = {}) => logged.push({ message, ...fields }), log: () => {} },
+    } as unknown as ToolContext,
   };
 }
 
@@ -88,7 +94,7 @@ test('read and default searches start at the working directory within the permis
     assert.equal((await findTool.run({ pattern: '*.js' }, context(workspace, undefined, { workspaceRoot: child }))).text, 'app.js');
     assert.equal((await searchTool.run({ pattern: NEEDLE }, context(workspace, undefined, { workspaceRoot: child }))).text,
       `app.js:2:second line ${NEEDLE}`);
-    await assert.rejects(readTool.run({ path: '../../outside.txt' }, { config: childConfig }), { code: 'path_escapes_boundary' });
+    await assert.rejects(readTool.run({ path: '../../outside.txt' }, { config: childConfig } as unknown as ToolContext), { code: 'path_escapes_boundary' });
   });
 });
 
@@ -152,7 +158,7 @@ test('exec uses the workspace root by default and validates an explicit child wo
     await writeFile(script, 'console.log(process.cwd())');
     const shell = resolveShell({});
     const command = `node "${script.replace(/\\/g, '/')}"`;
-    const run = async (config, cwd) => {
+    const run = async (config: CapabilityConfig, cwd?: string) => {
       const boundary = boundaryOf(config);
       const workspaceRoot = workingDirectoryOf(config);
       const workingDirectory = await resolveWithin(boundary, cwd ?? '.', { cwd: workspaceRoot });
@@ -275,7 +281,7 @@ test('search of an explicit file inside a skipped directory still reads that fil
 test('the external backend and our own walk return the same hits in the same order', async () => {
   await withWorkspace(async (workspace) => {
     await writeFile(join(workspace, 'crlf.txt'), `windows line endings ${NEEDLE}\r\ntail`);
-    const both = async (args, limits) => [
+    const both = async (args: { pattern: string; path?: string }, limits?: Record<string, number>): Promise<string[]> => [
       (await searchTool.run(args, context(workspace, limits, { ripgrepPath: builtRipgrep }))).text,
       (await searchTool.run(args, context(workspace, limits))).text,
     ];
@@ -328,7 +334,10 @@ test('a ripgrepPath that is not text is refused before probing a backend', async
   await withWorkspace(async (workspace) => {
     await assert.rejects(
       searchTool.run({ pattern: NEEDLE }, context(workspace, undefined, { ripgrepPath: 17 })),
-      (error) => error.code === 'search_backend_failed' && error.detail === 'ripgrepPath must be a string',
+      (error) => {
+        const failure = error as { code?: string; detail?: string };
+        return failure.code === 'search_backend_failed' && failure.detail === 'ripgrepPath must be a string';
+      },
     );
   });
 });
@@ -348,7 +357,7 @@ test('a cancelled search and find report their own code on the walk backend', as
   await withWorkspace(async (workspace) => {
     const controller = new AbortController();
     controller.abort();
-    const cancelled = { config: { boundary: workspace, ripgrepPath: join(workspace, 'missing-rg') }, logger: silentLogger, signal: controller.signal };
+    const cancelled = context(workspace, undefined, { ripgrepPath: join(workspace, 'missing-rg') }, controller.signal);
     await assert.rejects(searchTool.run({ pattern: NEEDLE }, cancelled), { code: 'search_cancelled' });
     await assert.rejects(findTool.run({ pattern: '**' }, cancelled), { code: 'find_cancelled' });
   });
@@ -358,11 +367,7 @@ test('a cancelled search and find report their own code on the walk backend', as
 test('a search cancelled while it is walking stops walking', async () => {
   await withWorkspace(async (workspace) => {
     const controller = new AbortController();
-    const running = searchTool.run({ pattern: NEEDLE }, {
-      config: { boundary: workspace, ripgrepPath: join(workspace, 'missing-rg') },
-      logger: silentLogger,
-      signal: controller.signal,
-    });
+    const running = searchTool.run({ pattern: NEEDLE }, context(workspace, undefined, { ripgrepPath: join(workspace, 'missing-rg') }, controller.signal));
     controller.abort();
     await assert.rejects(running, { code: 'search_cancelled' });
   });
@@ -373,7 +378,7 @@ test('a pre-cancelled call never starts the external backend', async () => {
     const controller = new AbortController();
     controller.abort();
     await assert.rejects(
-      searchTool.run({ pattern: NEEDLE }, { config: { boundary: workspace, ripgrepPath: builtRipgrep }, logger: silentLogger, signal: controller.signal }),
+      searchTool.run({ pattern: NEEDLE }, context(workspace, undefined, { ripgrepPath: builtRipgrep }, controller.signal)),
       { code: 'search_cancelled' },
     );
   });

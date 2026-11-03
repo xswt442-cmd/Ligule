@@ -3,14 +3,20 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { cleanSystemTrashEntry, findSystemTrashEntry, removeSystemTrashEntry } from './helpers/system-trash.js';
 import {
   createConfig, createDecisionChain, createKernel, createObservationLog, createPermissionContext, createTool, deleteTool, editTool, readTool,
   readOnlyTools, resolveRecycler, writeTool, writeTools,
 } from '../dist/index.js';
 import { windowsRecycleBin } from '../dist/capability/recycle.js';
+import type { PolicyAskResult, PolicyQuestion } from '../dist/kernel/policy.js';
+import type { ToolContext } from '../dist/kernel/kernel.js';
 
-async function withWorkspace(run, { realRecycleBin = false } = {}) {
+import { cleanSystemTrashEntry, findSystemTrashEntry, removeSystemTrashEntry } from './helpers/system-trash.ts';
+
+async function withWorkspace<TResult>(
+  run: (workspace: string) => Promise<TResult>,
+  { realRecycleBin = false }: { realRecycleBin?: boolean } = {},
+): Promise<TResult> {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'write-'));
   const workspace = join(root, 'workspace');
   const previousXdgData = process.env.XDG_DATA_HOME;
@@ -37,8 +43,8 @@ const workspaceWrite = createPermissionContext('workspace-write', 'disabled', {
   filesystemRead: 'unavailable', filesystemWrite: 'unavailable', network: 'unavailable', process: 'unavailable',
 });
 
-function context(workspace, limits, extra) {
-  return { config: { boundary: workspace, limits, ...extra }, logger: silentLogger };
+function context(workspace: string, limits?: Record<string, number>, extra: Record<string, unknown> = {}): ToolContext {
+  return { config: { boundary: workspace, limits, ...extra }, logger: silentLogger } as unknown as ToolContext;
 }
 
 test('create writes a new file and creates the missing parent directories', async () => {
@@ -55,7 +61,7 @@ test('create refuses an existing target and leaves its content alone', async () 
     await writeFile(join(workspace, 'note.txt'), 'original');
     await assert.rejects(
       () => createTool.run({ path: 'note.txt', content: 'overwritten' }, context(workspace)),
-      (error) => error.code === 'create_target_exists',
+      (error) => (error as { code?: string }).code === 'create_target_exists',
     );
     assert.equal(await readFile(join(workspace, 'note.txt'), 'utf8'), 'original');
   });
@@ -73,8 +79,8 @@ test('two kernels creating one file preserve exactly one complete winner', async
       const path = `race-${index}.txt`;
       const outcomes = await Promise.allSettled(kernels.map((kernel, writer) => kernel.call('create', { path, content: contents[writer] })));
       assert.equal(outcomes.filter((item) => item.status === 'fulfilled').length, 1);
-      const failed = outcomes.find((item) => item.status === 'rejected');
-      assert.equal(failed.reason.code, 'create_target_exists');
+      const failed = outcomes.find((item) => item.status === 'rejected') as PromiseRejectedResult | undefined;
+      assert.equal(failed?.reason?.code, 'create_target_exists');
       const winner = outcomes.findIndex((item) => item.status === 'fulfilled');
       assert.equal(await readFile(join(workspace, path), 'utf8'), contents[winner]);
     }
@@ -142,7 +148,7 @@ test('edit rejects an empty or blank anchor before looking at the file', async (
     for (const anchor of ['', '   ']) {
       await assert.rejects(
         () => editTool.run({ path: 'missing.txt', anchor, replacement: 'x' }, context(workspace)),
-        (error) => error.code === 'edit_anchor_empty',
+        (error) => (error as { code?: string }).code === 'edit_anchor_empty',
       );
     }
   });
@@ -152,17 +158,17 @@ test('edit rejects a missing target, an anchor that is not there, and an anchor 
   await withWorkspace(async (workspace) => {
     await assert.rejects(
       () => editTool.run({ path: 'missing.txt', anchor: 'a', replacement: 'b' }, context(workspace)),
-      (error) => error.code === 'edit_target_missing',
+      (error) => (error as { code?: string }).code === 'edit_target_missing',
     );
     await writeFile(join(workspace, 'note.txt'), 'alpha');
     await assert.rejects(
       () => editTool.run({ path: 'note.txt', anchor: 'zzz', replacement: 'b' }, context(workspace)),
-      (error) => error.code === 'edit_anchor_not_found',
+      (error) => (error as { code?: string }).code === 'edit_anchor_not_found',
     );
     await writeFile(join(workspace, 'twice.txt'), 'x x');
     await assert.rejects(
       () => editTool.run({ path: 'twice.txt', anchor: 'x', replacement: 'y' }, context(workspace)),
-      (error) => error.code === 'edit_anchor_ambiguous',
+      (error) => (error as { code?: string }).code === 'edit_anchor_ambiguous',
     );
     assert.equal(await readFile(join(workspace, 'twice.txt'), 'utf8'), 'x x');
   });
@@ -207,7 +213,7 @@ test('delete uses the operating system recycle bin and takes the source out of t
     const fileName = `note-${randomUUID()}.txt`;
     const target = join(workspace, fileName);
     await writeFile(target, 'keep me');
-    const approvals = [];
+    const approvals: PolicyQuestion[] = [];
     const kernel = createKernel({
       config: createConfig({ user: { boundary: workspace } }),
       permission: workspaceWrite,
@@ -217,12 +223,12 @@ test('delete uses the operating system recycle bin and takes the source out of t
       } }),
     });
     kernel.register(deleteTool);
-    const result = await kernel.call('delete', { path: fileName });
+    const result = await kernel.call('delete', { path: fileName }) as { text: string };
     const backend = process.platform === 'win32' ? 'system recycle bin' : 'system trash';
     assert.equal(result.text, `sent ${fileName} to the ${backend}`);
     assert.equal(approvals.length, 1);
     assert.equal(approvals[0].tool, 'delete');
-    await assert.rejects(() => readFile(target, 'utf8'), (error) => error.code === 'ENOENT');
+    await assert.rejects(() => readFile(target, 'utf8'), (error) => (error as { code?: string }).code === 'ENOENT');
     if (process.platform === 'linux') {
       await cleanSystemTrashEntry(target, { type: 'file', content: 'keep me' }, { allowSuffix: true, required: true });
     }
@@ -265,10 +271,10 @@ test('concurrent delete calls keep per-call snapshots when they share the same a
   await withWorkspace(async (workspace) => {
     const target = join(workspace, 'note.txt');
     await writeFile(target, 'original content');
-    let signalFirstApproval;
-    let approveFirst;
-    const firstApproval = new Promise((resolve) => { signalFirstApproval = resolve; });
-    const firstDecision = new Promise((resolve) => { approveFirst = resolve; });
+    let signalFirstApproval!: () => void;
+    let approveFirst!: (decision: PolicyAskResult) => void;
+    const firstApproval = new Promise<void>((resolve) => { signalFirstApproval = resolve; });
+    const firstDecision = new Promise<PolicyAskResult>((resolve) => { approveFirst = resolve; });
     const firstKernel = createKernel({
       config: createConfig({ user: { boundary: workspace } }),
       permission: workspaceWrite,
@@ -301,7 +307,7 @@ test('legacy trash backend configuration is refused with an actionable code', as
     await writeFile(join(workspace, 'note.txt'), 'keep me');
     await assert.rejects(
       () => deleteTool.run({ path: 'note.txt' }, context(workspace, undefined, { trashBackend: 'shred' })),
-      (error) => error.code === 'trash_legacy_config_unsupported',
+      (error) => (error as { code?: string }).code === 'trash_legacy_config_unsupported',
     );
     assert.equal(await readFile(join(workspace, 'note.txt'), 'utf8'), 'keep me');
   });
@@ -330,9 +336,9 @@ test('the Linux system trash preserves an existing same-name entry', async (t) =
   const workspace = join(root, 'workspace');
   const probeName = `p5-trash-probe-${randomUUID()}.txt`;
   const collisionName = `p5-collision-${randomUUID()}.txt`;
-  let trashRoot;
-  let existingPayload;
-  let existingInfo;
+  let trashRoot!: string;
+  let existingPayload!: string;
+  let existingInfo!: string;
   let createdExistingPayload = false;
   let createdExistingInfo = false;
   try {
@@ -379,7 +385,7 @@ test('the Linux system trash preserves an existing same-name entry', async (t) =
           assert.equal(await readFile(existingPayload, 'utf8'), 'existing trash item');
           await rm(existingPayload);
         } catch (error) {
-          if (error.code !== 'ENOENT') throw error;
+          if ((error as { code?: string }).code !== 'ENOENT') throw error;
         }
       }
       if (createdExistingInfo) {
@@ -411,11 +417,11 @@ test('delete refuses the boundary itself and a target that is not there', async 
   await withWorkspace(async (workspace) => {
     await assert.rejects(
       () => deleteTool.run({ path: '.' }, context(workspace)),
-      (error) => error.code === 'delete_target_is_boundary',
+      (error) => (error as { code?: string }).code === 'delete_target_is_boundary',
     );
     await assert.rejects(
       () => deleteTool.run({ path: 'gone.txt' }, context(workspace)),
-      (error) => error.code === 'delete_target_missing',
+      (error) => (error as { code?: string }).code === 'delete_target_missing',
     );
   });
 });
@@ -436,9 +442,9 @@ test('delete refuses a path outside its workspace and preserves the file', async
   });
 });
 
-function observed(workspace, limits) {
+function observed(workspace: string, limits?: Record<string, number>): ToolContext {
   const observations = createObservationLog();
-  return { config: { boundary: workspace, limits }, logger: silentLogger, observations };
+  return { config: { boundary: workspace, limits }, logger: silentLogger, observations } as unknown as ToolContext;
 }
 
 test('write replaces the whole content of a file observed in this run', async () => {
@@ -464,17 +470,17 @@ test('write refuses an unobserved target, one that changed since, and one that i
     const context = observed(workspace);
     await assert.rejects(
       () => writeTool.run({ path: 'note.txt', content: 'x' }, context),
-      (error) => error.code === 'write_not_observed',
+      (error) => (error as { code?: string }).code === 'write_not_observed',
     );
     await readTool.run({ path: 'note.txt' }, context);
     await writeFile(join(workspace, 'note.txt'), 'changed behind our back');
     await assert.rejects(
       () => writeTool.run({ path: 'note.txt', content: 'x' }, context),
-      (error) => error.code === 'write_version_stale',
+      (error) => (error as { code?: string }).code === 'write_version_stale',
     );
     await assert.rejects(
       () => writeTool.run({ path: 'missing.txt', content: 'x' }, context),
-      (error) => error.code === 'write_target_missing',
+      (error) => (error as { code?: string }).code === 'write_target_missing',
     );
     assert.equal(await readFile(join(workspace, 'note.txt'), 'utf8'), 'changed behind our back');
   });
@@ -487,7 +493,7 @@ test('a truncated read is not an observation, so it cannot authorise an overwrit
     assert.match((await readTool.run({ path: 'note.txt' }, context)).text, /truncated/);
     await assert.rejects(
       () => writeTool.run({ path: 'note.txt', content: 'x' }, context),
-      (error) => error.code === 'write_not_observed',
+      (error) => (error as { code?: string }).code === 'write_not_observed',
     );
     assert.equal(await readFile(join(workspace, 'note.txt'), 'utf8'), 'a'.repeat(40));
   });
@@ -523,7 +529,7 @@ test('write goes through the kernel and its failures reach the session log', asy
     kernel.register(writeTool);
     await assert.rejects(
       () => kernel.call('write', { path: 'note.txt', content: 'x' }),
-      (error) => error.code === 'write_not_observed',
+      (error) => (error as { code?: string }).code === 'write_not_observed',
     );
     await kernel.call('read', { path: 'note.txt' });
     assert.deepEqual(await kernel.call('write', { path: 'note.txt', content: 'two' }), { text: 'wrote note.txt (3 bytes)' });

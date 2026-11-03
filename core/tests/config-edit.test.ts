@@ -18,9 +18,39 @@ import {
   rulesOfLayer,
   writeConfigField,
 } from '../dist/kernel/config-edit.js';
+import type { PolicyRule } from '../dist/kernel/config-edit.js';
 
-const field = (id) => EDITABLE[id];
-const apply = (text, id, value) => editTomlValue(text, field(id).path, encodeValue(field(id), value).literal).text;
+// 解析结果是嵌套表；测试只按表结构读它，收窄集中在这里。
+type TomlTable = { readonly [key: string]: TomlTable };
+const readToml = (text: string): TomlTable => parse(text) as unknown as TomlTable;
+
+// 逐条改写的场景：标量写值或规则表增删改，两种条目共用一个用例形状。
+type Scenario = {
+  readonly name: string;
+  readonly text: string;
+  readonly kind: 'scalar' | 'rule';
+  readonly promised: boolean;
+  readonly exact?: string;
+  readonly action?: 'add' | 'update' | 'remove';
+};
+type Outcome = {
+  readonly name: string;
+  readonly promised: boolean;
+  readonly error?: string;
+  readonly semanticPass?: boolean;
+  readonly commentsPass?: boolean;
+  readonly exactBytes?: boolean;
+};
+
+type RuleDocumentRule = { readonly meta?: TomlTable };
+// 场景里要改的字段只到规则表为止；其余字节由原文保留。
+type EditableDocument = {
+  model: { model?: unknown };
+  policy: { rules: Record<string, unknown>[] };
+};
+
+const field = (id: string) => EDITABLE[id];
+const apply = (text: string, id: string, value: string) => editTomlValue(text, field(id).path, encodeValue(field(id), value).literal).text;
 
 const SAMPLE = `# 使用者默认
 [model]
@@ -37,8 +67,8 @@ test('a config value changes in place and everything else stays where it was', (
   assert.ok(edited.includes('api = "messages" # 线上形状'), '行尾那句注释留着');
   assert.ok(edited.includes('# 使用者默认'), '整行的注释留着');
   assert.ok(edited.indexOf('[model]') < edited.indexOf('[limits]'), '键的顺序不动');
-  assert.equal(parse(edited).model.model, '新模型名');
-  assert.equal(parse(edited).limits.contextTokens, 200000, '没编辑的字段还是原值');
+  assert.equal(readToml(edited).model.model, '新模型名');
+  assert.equal(readToml(edited).limits.contextTokens, 200000, '没编辑的字段还是原值');
   assert.notEqual(editTomlValue(SAMPLE, ['model', 'model'], '"gpt-4o"').created, true);
 });
 
@@ -55,90 +85,99 @@ test('a missing key is added inside its own table, a missing table at the end', 
 test('a root-level dotted key is the same thing as the one inside that table', () => {
   const edited = apply('model.model = "old" # 顶层写法\n\n[limits]\ncontextTokens = 1\n', 'model.model', 'new');
   assert.ok(edited.includes('model.model = "new" # 顶层写法'), edited);
-  assert.equal(parse(edited).model.model, 'new');
+  assert.equal(readToml(edited).model.model, 'new');
 });
 
 test('a missing sibling of a root-level dotted key stays in the root table', () => {
   const text = 'model.api = "messages"\n\n[limits]\ncontextTokens = 1\n';
   const edited = editTomlValue(text, ['model', 'model'], '"new"');
   assert.equal(edited.text, 'model.api = "messages"\nmodel.model = "new"\n\n[limits]\ncontextTokens = 1\n');
-  assert.equal(parse(edited.text).model.model, 'new');
+  assert.equal(readToml(edited.text).model.model, 'new');
 });
 
 test('mixed line endings and a CRLF file keep the shape each line already had', () => {
   const crlf = apply('[model]\r\nmodel = "old"\r\n', 'model.model', 'new');
   assert.equal(crlf, '[model]\r\nmodel = "new"\r\n');
-  assert.equal(parse(crlf).model.model, 'new');
+  assert.equal(readToml(crlf).model.model, 'new');
   // 文件同时包含 CRLF 和 LF 时，只保留被修改行原有的换行，并保持其他行不变。
   const mixed = apply('[model]\r\nmodel = "old"\napi = "messages"\r\n', 'model.model', 'new');
   assert.equal(mixed, '[model]\r\nmodel = "new"\napi = "messages"\r\n');
-  assert.equal(parse(mixed).model.api, 'messages', '没编辑的那一行连它的换行都没动');
+  assert.equal(readToml(mixed).model.api, 'messages', '没编辑的那一行连它的换行都没动');
 });
 
 test('a value this route cannot read is refused, and the shape is named', () => {
   const array = '[model]\nmodel = "a"\nrules = [\n  "one",\n]\n';
-  assert.throws(() => editTomlValue(array, ['model', 'rules'], '"x"'), (error) => error.code === 'config_edit_shape_unsupported' && /an array/.test(error.detail));
+  assert.throws(() => editTomlValue(array, ['model', 'rules'], '"x"'), (error: unknown) => {
+    const failure = error as { code?: string; detail: string };
+    return failure.code === 'config_edit_shape_unsupported' && /an array/.test(failure.detail);
+  });
   const multiline = '[model]\nabout = """\n两行\n"""\n';
-  assert.throws(() => editTomlValue(multiline, ['model', 'about'], '"x"'), (error) => error.code === 'config_edit_shape_unsupported' && /a multi-line string/.test(error.detail));
+  assert.throws(() => editTomlValue(multiline, ['model', 'about'], '"x"'), (error: unknown) => {
+    const failure = error as { code?: string; detail: string };
+    return failure.code === 'config_edit_shape_unsupported' && /a multi-line string/.test(failure.detail);
+  });
   const inline = '[model]\nextra = { api = "messages" }\n';
-  assert.throws(() => editTomlValue(inline, ['model', 'extra'], '"x"'), (error) => error.code === 'config_edit_shape_unsupported' && /an inline table/.test(error.detail));
+  assert.throws(() => editTomlValue(inline, ['model', 'extra'], '"x"'), (error: unknown) => {
+    const failure = error as { code?: string; detail: string };
+    return failure.code === 'config_edit_shape_unsupported' && /an inline table/.test(failure.detail);
+  });
 });
 
 // 多行字符串中的键名和表头样式文本仍是字符串内容；更新应定位到实际配置字段。
 test('a multi-line string body is not read as a key line or a table header', () => {
   const body = editTomlValue('[model]\nabout = """\nmodel = "正文里的这一行"\n"""\nmodel = "表里的那一条"\n', ['model', 'model'], '"新值"');
   assert.equal(body.text, '[model]\nabout = """\nmodel = "正文里的这一行"\n"""\nmodel = "新值"\n');
-  assert.equal(parse(body.text).model.about, 'model = "正文里的这一行"\n', '那一段正文一个字没动');
+  assert.equal(readToml(body.text).model.about, 'model = "正文里的这一行"\n', '那一段正文一个字没动');
 
   const header = editTomlValue('[model]\nabout = """\n[limits]\nstill inside\n"""\nmodel = "old"\n', ['model', 'model'], '"new"');
-  assert.equal(parse(header.text).model.model, 'new');
-  assert.equal(parse(header.text).model.about, '[limits]\nstill inside\n', '那一段里的表头形状没有切断这一段');
+  assert.equal(readToml(header.text).model.model, 'new');
+  assert.equal(readToml(header.text).model.about, '[limits]\nstill inside\n', '那一段里的表头形状没有切断这一段');
   assert.ok(header.text.includes('[limits]'), '那一句还留在正文里');
 
   // 表中缺少目标字段时，将新字段写在完整的键值行后，不插入未结束的多行字符串。
   const added = editTomlValue('[model]\nabout = """\n两行\n"""\n', ['model', 'model'], '"补的"');
   assert.equal(added.text, '[model]\nmodel = "补的"\nabout = """\n两行\n"""\n');
-  assert.equal(parse(added.text).model.model, '补的');
+  assert.equal(readToml(added.text).model.model, '补的');
 });
 
 // TOML 键名和表名允许周围有空白或使用引号；更新字段时保留原有写法。
 test('a quoted key and a spaced or quoted table header are the same key', () => {
   assert.equal(editTomlValue('[model]\n"model" = "old"\n', ['model', 'model'], '"new"').text, '[model]\n"model" = "new"\n');
   assert.equal(editTomlValue('[model]\n\'model\' = "old"\n', ['model', 'model'], '"new"').text, '[model]\n\'model\' = "new"\n');
-  assert.equal(parse(editTomlValue('["model"]\nmodel = "old"\n', ['model', 'model'], '"new"').text).model.model, 'new');
-  assert.equal(parse(editTomlValue('[ model ]\nmodel = "old"\n', ['model', 'model'], '"new"').text).model.model, 'new');
+  assert.equal(readToml(editTomlValue('["model"]\nmodel = "old"\n', ['model', 'model'], '"new"').text).model.model, 'new');
+  assert.equal(readToml(editTomlValue('[ model ]\nmodel = "old"\n', ['model', 'model'], '"new"').text).model.model, 'new');
   assert.equal(editTomlValue('[ model ]\nmodel = "old"\n', ['model', 'model'], '"new"').created, false, '那一张表已经在了，不是补一张新的');
   // 顶层点号键周围的空白也应正确解析并保留。
-  assert.equal(parse(editTomlValue('model . model = "old"\n', ['model', 'model'], '"new"').text).model.model, 'new');
+  assert.equal(readToml(editTomlValue('model . model = "old"\n', ['model', 'model'], '"new"').text).model.model, 'new');
 });
 
 test('escaped table and key names resolve to the configured path', () => {
   const text = '["mo\\u0064el"]\n"mo\\u0064el" = "old" # 保留这一行\n';
   const edited = editTomlValue(text, ['model', 'model'], '"new"');
   assert.equal(edited.text, '["mo\\u0064el"]\n"mo\\u0064el" = "new" # 保留这一行\n');
-  assert.equal(parse(edited.text).model.model, 'new');
+  assert.equal(readToml(edited.text).model.model, 'new');
 });
 
 test('a key with the same name in another table is not the one being changed', () => {
   const edited = apply('[model]\nmodel = "在这里改"\n\n[other]\nmodel = "这一份不动"\n', 'model.model', '新');
-  assert.equal(parse(edited).model.model, '新');
-  assert.equal(parse(edited).other.model, '这一份不动');
+  assert.equal(readToml(edited).model.model, '新');
+  assert.equal(readToml(edited).other.model, '这一份不动');
 });
 
 test('each field only takes a value of its own shape', () => {
   assert.equal(encodeValue(field('model.api'), 'chat-completions').literal, '"chat-completions"');
-  assert.throws(() => encodeValue(field('model.api'), 'openai'), (error) => error.code === 'config_field_value');
+  assert.throws(() => encodeValue(field('model.api'), 'openai'), (error: unknown) => (error as { code?: string }).code === 'config_field_value');
   assert.equal(encodeValue(field('policy.mode'), 'none').literal, '"none"');
   assert.equal(encodeValue(field('policy.mode'), 'never').literal, '"never"');
-  assert.throws(() => encodeValue(field('policy.mode'), 'yolo'), (error) => error.code === 'config_field_value');
+  assert.throws(() => encodeValue(field('policy.mode'), 'yolo'), (error: unknown) => (error as { code?: string }).code === 'config_field_value');
   // 允许端点地址包含查询参数，但不允许在地址中写入凭据。
   assert.equal(encodeValue(field('model.baseURL'), 'https://a.example.com:443/v1?api=k').value, 'https://a.example.com:443/v1?api=k');
-  assert.throws(() => encodeValue(field('model.baseURL'), 'https://user:pass@a.example.com/v1'), (error) => /credentials/.test(error.detail), '凭据不写进配置（D13）');
-  assert.throws(() => encodeValue(field('model.baseURL'), 'a.example.com/v1'), (error) => error.code === 'config_field_value');
+  assert.throws(() => encodeValue(field('model.baseURL'), 'https://user:pass@a.example.com/v1'), (error: unknown) => /credentials/.test((error as { detail: string }).detail), '凭据不写进配置（D13）');
+  assert.throws(() => encodeValue(field('model.baseURL'), 'a.example.com/v1'), (error: unknown) => (error as { code?: string }).code === 'config_field_value');
   assert.equal(encodeValue(field('model.baseURL'), ' http://127.0.0.1:8080/v1 ').value, 'http://127.0.0.1:8080/v1');
-  assert.throws(() => encodeValue(field('model.apiKeyEnv'), 'LIGULE KEY'), (error) => error.code === 'config_field_value');
-  assert.throws(() => encodeValue(field('model.model'), '   '), (error) => error.code === 'config_field_value');
-  assert.throws(() => editableField('model.unknown'), (error) => error.code === 'config_field_unknown');
+  assert.throws(() => encodeValue(field('model.apiKeyEnv'), 'LIGULE KEY'), (error: unknown) => (error as { code?: string }).code === 'config_field_value');
+  assert.throws(() => encodeValue(field('model.model'), '   '), (error: unknown) => (error as { code?: string }).code === 'config_field_value');
+  assert.throws(() => editableField('model.unknown'), (error: unknown) => (error as { code?: string }).code === 'config_field_unknown');
   // 引号和反斜杠按 TOML 基本字符串规则转义，且不改变行结构。
   assert.equal(encodeValue(field('model.model'), 'a"b\\c').literal, '"a\\"b\\\\c"');
 });
@@ -150,32 +189,32 @@ test('the write needs the version it read, lands atomically and reports the new 
     await writeFile(file, SAMPLE, 'utf8');
     const first = await writeConfigField(file, { field: 'model.model', value: '第一次', version: configVersion(SAMPLE) });
     assert.equal(first.created, false);
-    assert.equal(parse(await readFile(file, 'utf8')).model.model, '第一次');
-    await assert.rejects(readFile(`${file}.tmp`), (error) => error.code === 'ENOENT', '临时文件改名走了，不留在原地');
+    assert.equal(readToml(await readFile(file, 'utf8')).model.model, '第一次');
+    await assert.rejects(readFile(`${file}.tmp`), (error: unknown) => (error as { code?: string }).code === 'ENOENT', '临时文件改名走了，不留在原地');
 
     // 文件被其他进程或编辑器修改后应报告冲突，并保留对方的修改。
     const outside = SAMPLE.replace('gpt-4o', '别人写的');
     await writeFile(file, outside, 'utf8');
     await assert.rejects(
       () => writeConfigField(file, { field: 'model.model', value: '我要写的', version: first.version }),
-      (error) => error.code === 'config_version_stale',
+      (error: unknown) => (error as { code?: string }).code === 'config_version_stale',
     );
-    assert.equal(parse(await readFile(file, 'utf8')).model.model, '别人写的', '冲突那一次一个字都没写');
+    assert.equal(readToml(await readFile(file, 'utf8')).model.model, '别人写的', '冲突那一次一个字都没写');
 
     const again = await writeConfigField(file, { field: 'model.api', value: 'chat-completions', version: configVersion(outside) });
     assert.equal(again.version, configVersion(await readFile(file, 'utf8')));
-    assert.equal(parse(await readFile(file, 'utf8')).model.api, 'chat-completions');
+    assert.equal(readToml(await readFile(file, 'utf8')).model.api, 'chat-completions');
 
     // 文件不存在时使用空版本创建配置，并同时创建所需目录。
     const fresh = join(directory, 'new', 'config.toml');
     const createdFile = await writeConfigField(fresh, { field: 'model.model', value: '新建里的', version: '' });
     assert.equal(createdFile.created, true);
-    assert.equal(parse(await readFile(fresh, 'utf8')).model.model, '新建里的');
+    assert.equal(readToml(await readFile(fresh, 'utf8')).model.model, '新建里的');
 
     // 审批档位作为标量字段使用相同的写入流程。
     const tier = await writeConfigField(file, { field: 'policy.mode', value: 'auto', version: configVersion(await readFile(file, 'utf8')) });
     assert.equal(tier.created, true, '那一份文件里原来没有 [policy]，补一张表');
-    assert.equal(parse(await readFile(file, 'utf8')).policy.mode, 'auto');
+    assert.equal(readToml(await readFile(file, 'utf8')).policy.mode, 'auto');
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -201,7 +240,7 @@ reason = "只读的那一条"
 contextTokens = 200000
 `;
 
-const readRules = (text) => rulesOfLayer(parse(text));
+const readRules = (text: string) => rulesOfLayer(parse(text));
 
 test('adding a rule lands at the end of that table, before the comment belonging to the next one', () => {
   const edited = editRuleTable(RULES, 'add', 0, { tool: 'find', decision: 'allow' });
@@ -213,7 +252,7 @@ test('adding a rule lands at the end of that table, before the comment belonging
   assert.ok(edited.text.includes('# 使用者默认\n'), '文件头上那句注释留着');
   assert.ok(edited.text.includes('mode = "ask" # 逐次问人'), '行尾注释留着');
   assert.ok(edited.text.indexOf('[limits]') > edited.text.indexOf('tool = "find"'), '新块落在下一张表之前');
-  assert.equal(parse(edited.text).limits.contextTokens, 200000);
+  assert.equal(readToml(edited.text).limits.contextTokens, 200000);
 });
 
 test('adding the first rule to a populated document keeps a section break', () => {
@@ -255,25 +294,28 @@ test('a rule statement whose value is a multi-line string is dropped whole', () 
   assert.deepEqual(readRules(edited.text), [{ tool: 'read', decision: 'allow' }]);
   // 将多行字符串改为单行值时，若当前更新方式无法闭合字符串，应报告错误且不写入。
   assert.throws(() => editRuleTable(text, 'update', 0, { tool: 'read', decision: 'allow', reason: '一句' }),
-    (error) => error.code === 'config_edit_shape_unsupported' && /a multi-line string/.test(error.detail));
+    (error: unknown) => {
+      const failure = error as { code?: string; detail: string };
+      return failure.code === 'config_edit_shape_unsupported' && /a multi-line string/.test(failure.detail);
+    });
   // 未由 Host 管理的多行字段保持原样，新字段插入在该字段之前。
   const owned = editRuleTable('[[policy.rules]]\ntool = "read"\ndecision = "allow"\nowner = """\n两句\n"""\n', 'update', 0, { tool: 'read', decision: 'allow', match: 'git *' });
   assert.equal(owned.text, '[[policy.rules]]\ntool = "read"\ndecision = "allow"\nmatch = "git *"\nowner = """\n两句\n"""\n');
-  assert.equal(parse(owned.text).policy.rules[0].owner, '两句\n');
+  assert.equal(readToml(owned.text).policy.rules[0].owner, '两句\n');
 });
 
 test('a key the host does not own inside a rule is left where it is', () => {
   const edited = editRuleTable('[[policy.rules]]\ntool = "read"\ndecision = "allow"\nowner = "另一个人写的"\n', 'update', 0, { tool: 'read', decision: 'deny' });
   assert.ok(edited.text.includes('owner = "另一个人写的"'), edited.text);
-  assert.deepEqual({ ...parse(edited.text).policy.rules[0] }, { tool: 'read', decision: 'deny', owner: '另一个人写的' });
+  assert.deepEqual({ ...readToml(edited.text).policy.rules[0] }, { tool: 'read', decision: 'deny', owner: '另一个人写的' });
 });
 
 // 仅含数组表的配置中，新增标量字段必须放在数组表之前，避免生成无效 TOML。
 test('a scalar added while the table exists only as an array of tables lands above those blocks', () => {
   const edited = editTomlValue('[[policy.rules]]\ntool = "read"\ndecision = "allow"\n', ['policy', 'mode'], '"ask"');
   assert.equal(edited.text, '[policy]\nmode = "ask"\n\n[[policy.rules]]\ntool = "read"\ndecision = "allow"\n');
-  assert.equal(parse(edited.text).policy.mode, 'ask');
-  assert.equal(parse(edited.text).policy.rules.length, 1);
+  assert.equal(readToml(edited.text).policy.mode, 'ask');
+  assert.equal(readToml(edited.text).policy.rules.length, 1);
   const commented = editTomlValue('# 让模型自己读\n[[policy.rules]]\ntool = "read"\ndecision = "allow"\n', ['policy', 'mode'], '"auto"');
   assert.ok(commented.text.startsWith('[policy]\nmode = "auto"\n\n# 让模型自己读\n[[policy.rules]]'), '那句注释仍说的是下面那一段：' + commented.text);
 });
@@ -282,8 +324,8 @@ test('a missing parent table is inserted before a commented descendant with its 
   const text = '# 子表说明\r\n[model.service]\r\nname = "one"\r\n';
   const edited = editTomlValue(text, ['model', 'model'], '"new"');
   assert.equal(edited.text, '[model]\r\nmodel = "new"\r\n\r\n# 子表说明\r\n[model.service]\r\nname = "one"\r\n');
-  assert.equal(parse(edited.text).model.model, 'new');
-  assert.equal(parse(edited.text).model.service.name, 'one');
+  assert.equal(readToml(edited.text).model.model, 'new');
+  assert.equal(readToml(edited.text).model.service.name, 'one');
 });
 
 test('a missing key uses the line ending of its own table row', () => {
@@ -292,7 +334,7 @@ test('a missing key uses the line ending of its own table row', () => {
 });
 
 test('a rule index this file does not have is said plainly, and an empty file gets the table', () => {
-  assert.throws(() => editRuleTable(RULES, 'update', 9, { tool: 'read', decision: 'allow' }), (error) => error.code === 'config_rule_index');
+  assert.throws(() => editRuleTable(RULES, 'update', 9, { tool: 'read', decision: 'allow' }), (error: unknown) => (error as { code?: string }).code === 'config_rule_index');
   assert.equal(editRuleTable('', 'add', 0, { tool: 'read', decision: 'allow' }).text, '[[policy.rules]]\ntool = "read"\ndecision = "allow"\n');
 });
 
@@ -309,7 +351,7 @@ test('the rule shape is owned by the host: unknown keys, empty values and a wron
     { tool: 'read', decision: 'allow', match: '' },
     'read',
   ]) {
-    assert.throws(() => checkedRule(bad), (error) => error.code === 'config_rule_invalid', JSON.stringify(bad));
+    assert.throws(() => checkedRule(bad), (error: unknown) => (error as { code?: string }).code === 'config_rule_invalid', JSON.stringify(bad));
   }
 });
 
@@ -340,12 +382,12 @@ test('the rule table writes through the same lock, version check and read-back',
       rule: { tool: 'search', decision: 'deny', reason: '这一台机器上不让搜' },
       version,
     });
-    assert.equal(added.rules.length, 3);
+    assert.equal(added.rules!.length, 3);
     assert.deepEqual(readRules(await readFile(file, 'utf8'))[2], { tool: 'search', decision: 'deny', reason: '这一台机器上不让搜' });
 
     await assert.rejects(
       () => writeConfigField(file, { field: 'policy.rules', op: 'remove', index: 0, version }),
-      (error) => error.code === 'config_version_stale',
+      (error: unknown) => (error as { code?: string }).code === 'config_version_stale',
       '旧版本那一次不落笔',
     );
     const removed = await writeConfigField(file, {
@@ -354,8 +396,8 @@ test('the rule table writes through the same lock, version check and read-back',
       index: 0,
       version: added.version,
     });
-    assert.equal(removed.rules.length, 2);
-    assert.deepEqual(removed.rules[0], { tool: 'exec', match: 'git status*', decision: 'allow', reason: '只读的那一条' });
+    assert.equal(removed.rules!.length, 2);
+    assert.deepEqual(removed.rules![0], { tool: 'exec', match: 'git status*', decision: 'allow', reason: '只读的那一条' });
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -373,7 +415,7 @@ test('a quoted key lands in place through the write route', async () => {
     assert.equal(first.version, configVersion(await readFile(file, 'utf8')));
     const onDisk = await readFile(file, 'utf8');
     assert.equal(onDisk, '[ model ]\n"model" = "新模型名" # 那一家的名字\napi = "messages"\r\napiKeyEnv = \'LIGULE_KEY\'\r\n');
-    assert.equal(parse(onDisk).model.api, 'messages', '没编辑的那几行连换行都没动');
+    assert.equal(readToml(onDisk).model.api, 'messages', '没编辑的那几行连换行都没动');
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -389,15 +431,15 @@ test('a file another writer holds is refused while that lock is active', async (
     try {
       await assert.rejects(
         () => writeConfigField(file, { field: 'model.model', value: '第二个写入者', version: configVersion(SAMPLE) }),
-        (error) => error.code === 'config_locked',
+        (error: unknown) => (error as { code?: string }).code === 'config_locked',
       );
-      assert.equal(parse(await readFile(file, 'utf8')).model.model, 'gpt-4o', '锁在那里的那一次一个字都没写');
+      assert.equal(readToml(await readFile(file, 'utf8')).model.model, 'gpt-4o', '锁在那里的那一次一个字都没写');
     } finally {
       await held();
     }
     const after = await writeConfigField(file, { field: 'model.model', value: '锁放了才写', version: configVersion(SAMPLE) });
     assert.equal(after.created, false);
-    assert.equal(parse(await readFile(file, 'utf8')).model.model, '锁放了才写');
+    assert.equal(readToml(await readFile(file, 'utf8')).model.model, '锁放了才写');
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -414,14 +456,14 @@ test('removing a rule keeps the comments sitting on the next rule', () => {
   const text = '[[policy.rules]]\ntool = "read"\ndecision = "allow"\n\n# 只读的 diff\n[[policy.rules]]\ntool = "exec"\nmatch = "git diff*"\ndecision = "allow"\n';
   const edited = editRuleTable(text, 'remove', 0);
   assert.equal(edited.text, '# 只读的 diff\n[[policy.rules]]\ntool = "exec"\nmatch = "git diff*"\ndecision = "allow"\n');
-  assert.equal(parse(edited.text).policy.rules.length, 1, '留下的那一条一个字没动');
+  assert.equal(readToml(edited.text).policy.rules.length, 1, '留下的那一条一个字没动');
 });
 
 test('removing a rule removes its nested tables and preserves the next rule comments', () => {
   const text = '# 第一项\n[[policy.rules]]\ntool = "first"\ndecision = "deny"\n[policy.rules.meta]\nnote = "discard"\n\n# 第二项\n[[policy.rules]]\ntool = "second"\ndecision = "allow"\n[policy.rules.meta]\nnote = "keep"\n';
   const edited = editRuleTable(text, 'remove', 0);
   assert.equal(edited.text, '# 第二项\n[[policy.rules]]\ntool = "second"\ndecision = "allow"\n[policy.rules.meta]\nnote = "keep"\n');
-  const parsed = parse(edited.text).policy.rules[0];
+  const parsed = readToml(edited.text).policy.rules[0];
   assert.deepEqual({ ...parsed, meta: { ...parsed.meta } }, { tool: 'second', decision: 'allow', meta: { note: 'keep' } });
 });
 
@@ -429,13 +471,13 @@ test('updating a rule inserts fields before its nested table and preserves that 
   const text = '[[policy.rules]]\ntool = "read"\ndecision = "allow"\n[policy.rules.meta]\nnote = "keep"\n';
   const edited = editRuleTable(text, 'update', 0, { tool: 'read', decision: 'deny', match: 'src/**' });
   assert.equal(edited.text, '[[policy.rules]]\ntool = "read"\ndecision = "deny"\nmatch = "src/**"\n[policy.rules.meta]\nnote = "keep"\n');
-  assert.equal(parse(edited.text).policy.rules[0].meta.note, 'keep');
+  assert.equal(readToml(edited.text).policy.rules[0].meta.note, 'keep');
 });
 
 test('removing or appending around an interleaved unrelated table keeps its bytes and table ownership', () => {
   const text = '# 目标规则\n[[policy.rules]]\ntool = "read"\ndecision = "allow"\n\n# 独立表\n[unrelated]\nvalue = 1\n\n# 规则子表\n[policy.rules.meta]\nnote = "属于规则"\n\n# 后续表\n[after]\nvalue = 2\n';
   const removed = editRuleTable(text, 'remove', 0).text;
-  const removedValue = parse(removed);
+  const removedValue = readToml(removed);
   assert.deepEqual({ unrelated: { ...removedValue.unrelated }, after: { ...removedValue.after } }, { unrelated: { value: 1 }, after: { value: 2 } });
   assert.ok(!removed.includes('# 目标规则'));
   assert.ok(!removed.includes('# 规则子表'));
@@ -443,8 +485,9 @@ test('removing or appending around an interleaved unrelated table keeps its byte
   assert.ok(removed.includes('# 后续表\n[after]\nvalue = 2\n'));
 
   const added = editRuleTable(text, 'add', 1, { tool: 'find', decision: 'allow' }).text;
-  const addedValue = parse(added);
-  assert.deepEqual(addedValue.policy.rules.map((rule) => ({
+  const addedValue = readToml(added);
+  const addedRules = addedValue.policy.rules as unknown as RuleDocumentRule[];
+  assert.deepEqual(addedRules.map((rule) => ({
     ...rule,
     ...(rule.meta === undefined ? {} : { meta: { ...rule.meta } }),
   })), [
@@ -460,10 +503,10 @@ test('removing or appending around an interleaved unrelated table keeps its byte
 
 test('the 37 R2 span scenarios run against the built editor', () => {
   const fields = ['tool', 'match', 'decision', 'reason'];
-  const nextRule = { tool: 'find', decision: 'allow' };
-  const updateRule = { tool: 'read', decision: 'deny' };
-  const cases = [];
-  const addScalar = (name, text, literal = '"old-model"', promised = true) => {
+  const nextRule: PolicyRule = { tool: 'find', decision: 'allow' };
+  const updateRule: Record<string, string> = { tool: 'read', decision: 'deny' };
+  const cases: Scenario[] = [];
+  const addScalar = (name: string, text: string, literal = '"old-model"', promised = true) => {
     cases.push({ name, text, kind: 'scalar', exact: text.replace(literal, '"new-model"'), promised });
   };
 
@@ -482,7 +525,7 @@ test('the 37 R2 span scenarios run against the built editor', () => {
   addScalar('scalar-rich-unknown', '[model]\nmodel = "old-model"\n[future]\nnumber = 0xDEAD_BEEF\nfloating = 1_000.50\nnegativeZero = -0.0\ninfinite = inf\nnotANumber = nan\nwhen = 2026-10-10T10:11:12.123456789+08:00\nlocal = 2026-10-10\nvalues = [{ dotted = { key = "值" } }, { dotted = { key = "其他" } }]\n');
 
   const canonical = '# 文件说明\n[policy]\nmode = "ask"\n\n# REMOVE-ME\n[[policy.rules]]\ntool = "read"\ndecision = "allow"\n\n# KEEP-ME\n[[policy.rules]]\ntool = "exec"\ndecision = "allow"\n\n# INDEPENDENT\n\n[future]\nvalue = 42\n';
-  const ruleDocuments = [
+  const ruleDocuments: [string, string, boolean][] = [
     ['rules-basic', canonical, true],
     ['rules-crlf', canonical.replaceAll('\n', '\r\n'), true],
     ['rules-escaped-table', canonical.replaceAll('[[policy.rules]]', '[["po\\u006cicy".rules]]'), false],
@@ -493,11 +536,11 @@ test('the 37 R2 span scenarios run against the built editor', () => {
     ['rules-unknown-rule-field', canonical.replace('tool = "read"', 'tool = "read"\ncustom = { nested = [1, 2, 3] }'), true],
   ];
   for (const [name, text, promised] of ruleDocuments) {
-    for (const action of ['add', 'update', 'remove']) cases.push({ name: `${name}-${action}`, text, kind: 'rule', action, promised });
+    for (const action of ['add', 'update', 'remove'] as const) cases.push({ name: `${name}-${action}`, text, kind: 'rule', action, promised });
   }
 
-  const expectedValues = (item) => {
-    const value = parse(item.text);
+  const expectedValues = (item: Scenario) => {
+    const value = readToml(item.text) as unknown as EditableDocument;
     if (item.kind === 'scalar') value.model.model = 'new-model';
     else if (item.action === 'add') value.policy.rules.push(nextRule);
     else if (item.action === 'remove') value.policy.rules.splice(0, 1);
@@ -509,21 +552,22 @@ test('the 37 R2 span scenarios run against the built editor', () => {
     }
     return value;
   };
-  const results = [];
+  const results: Outcome[] = [];
   for (const item of cases) {
     try {
       const output = item.kind === 'scalar'
         ? editTomlValue(item.text, ['model', 'model'], '"new-model"').text
-        : editRuleTable(item.text, item.action, 0, item.action === 'add' ? nextRule : updateRule).text;
+        : editRuleTable(item.text, item.action!, 0, item.action === 'add' ? nextRule : updateRule as PolicyRule).text;
       // TOML 解析表使用空原型；新增项是普通对象，两者的原型不属于配置语义。
-      const semanticPass = isDeepStrictEqual(structuredClone(parse(output)), structuredClone(expectedValues(item)));
+      const semanticPass = isDeepStrictEqual(structuredClone(readToml(output)), structuredClone(expectedValues(item)));
       const commentsPass = ['# KEEP-ME', '# INDEPENDENT'].every(value => !item.text.includes(value) || output.includes(value))
         && (!item.text.includes('# REMOVE-ME') || output.includes('# REMOVE-ME') === (item.action !== 'remove'));
       const exactBytes = item.exact === undefined ? undefined : output === item.exact;
       const result = { name: item.name, promised: item.promised, semanticPass, commentsPass, ...(exactBytes === undefined ? {} : { exactBytes }) };
       results.push(result);
     } catch (error) {
-      const result = { name: item.name, promised: item.promised, error: error.code ?? error.name };
+      const failure = error as { code?: string; name?: string };
+      const result = { name: item.name, promised: item.promised, error: failure.code ?? failure.name };
       results.push(result);
     }
   }
@@ -549,8 +593,8 @@ test('atomic config writes preserve permissions and do not touch another tempora
     }
     await writeConfigField(file, { field: 'model.model', value: 'second', version: first.version });
     if (process.platform !== 'win32') assert.equal((await stat(file)).mode & 0o777, 0o640);
-    await assert.rejects(writeConfigField(file, { field: 'model.model', value: 'stale', version: first.version }), error => error.code === 'config_version_stale');
-    assert.equal(parse(await readFile(file, 'utf8')).model.model, 'second');
+    await assert.rejects(writeConfigField(file, { field: 'model.model', value: 'stale', version: first.version }), (error: unknown) => (error as { code?: string }).code === 'config_version_stale');
+    assert.equal(readToml(await readFile(file, 'utf8')).model.model, 'second');
     assert.deepEqual((await readdir(directory)).sort(), ['config.toml', 'config.toml.tmp']);
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -581,7 +625,7 @@ test('mcp.servers set appends a per-server table and keeps the rest byte for byt
     const text = await readFile(file, 'utf8');
     assert.ok(text.includes('[mcp.servers.runner]'), '已有服务器不动');
     assert.ok(text.includes('command = "npx" # 启动命令'), '已有服务器的注释留着');
-    const parsed = parse(text);
+    const parsed = readToml(text);
     assert.deepEqual(JSON.parse(JSON.stringify(parsed.mcp.servers.weather)), { command: 'npx', args: ['-y', 'weather-mcp'], env: { KEY: '${WEATHER_KEY}' } });
     assert.deepEqual((await import('../dist/capability/mcp.js')).mcpServerConfigs(parsed).map((entry) => entry.name), ['runner', 'weather'], '读取侧认得写出的配置');
 
@@ -591,20 +635,20 @@ test('mcp.servers set appends a per-server table and keeps the rest byte for byt
       server: { name: 'runner', command: 'node', args: ['server.js'], cwd: 'tools' },
     });
     assert.equal(second.created, false);
-    const after = parse(await readFile(file, 'utf8'));
+    const after = readToml(await readFile(file, 'utf8'));
     assert.deepEqual(JSON.parse(JSON.stringify(after.mcp.servers.runner)), { command: 'node', args: ['server.js'], cwd: 'tools' });
     assert.deepEqual(after.mcp.servers.weather.command, 'npx', '其他服务器不受影响');
 
     // remove 只需要名字。
     const third = await writeConfigField(file, { field: 'mcp.servers', version: second.version, op: 'remove', server: { name: 'weather' } });
     assert.equal(third.created, false);
-    const final = parse(await readFile(file, 'utf8'));
+    const final = readToml(await readFile(file, 'utf8'));
     assert.deepEqual(Object.keys(JSON.parse(JSON.stringify(final.mcp.servers))), ['runner']);
     assert.ok((await readFile(file, 'utf8')).includes('# 使用者默认'), '文件其余部分不动');
 
     await assert.rejects(
       writeConfigField(file, { field: 'mcp.servers', version: third.version, op: 'remove', server: { name: 'weather' } }),
-      (error) => error.code === 'config_mcp_unknown', '删除不存在的服务器要说清',
+      (error: unknown) => (error as { code?: string }).code === 'config_mcp_unknown', '删除不存在的服务器要说清',
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -627,7 +671,7 @@ test('invalid mcp server entries are refused before anything is written', async 
     ]) {
       await assert.rejects(
         writeConfigField(file, { field: 'mcp.servers', version, op: 'set', server }),
-        (error) => error.code === 'config_mcp_invalid', JSON.stringify(server),
+        (error: unknown) => (error as { code?: string }).code === 'config_mcp_invalid', JSON.stringify(server),
       );
     }
     assert.equal(await readFile(file, 'utf8'), MCP_SAMPLE, '拒绝的写入不落盘');

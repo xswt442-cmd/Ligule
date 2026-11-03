@@ -1,6 +1,7 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,10 +11,22 @@ import {
   execTool, resolveShell, withNativeExitCode,
 } from '../dist/index.js';
 import { decode, runManagedExec, settleManagedCompletion } from '../dist/capability/exec.js';
+import type { ExecRunContext, ManagedExecLease } from '../dist/capability/exec.js';
+import type { CapabilityLimits } from '../dist/capability/limits.js';
+import type { PermissionContext } from '../dist/kernel/permission.js';
+import type { PolicyAsk, PolicyMode, PolicyQuestion } from '../dist/kernel/policy.js';
 import { KernelError } from '../dist/kernel/error.js';
 import { bindScript } from '../dist/capability/script-binding.js';
 import { probeLinuxSandboxIsolation } from '../dist/capability/sandbox-linux.js';
 import { setTrusted } from '../dist/kernel/workspace-trust.js';
+
+type CodedFailure = { code: string; cause?: unknown };
+
+type ExecOutcome = { text: string; exitCode: number | null };
+
+type ExecLimits = Partial<Record<keyof CapabilityLimits, number>>;
+
+type RecordedShell = { kind: string; executable: string; segments: string[]; tail?: string };
 
 // Host 选择命令后端并传入这里；测试使用当前机器实际支持的后端。
 // 被测的是 exec 自己的那几件事（头尾分页、标准输入、取消、退出码），所以脚本片段落到一个临时文件里再跑：
@@ -28,23 +41,26 @@ const directory = mkdtempSync(join(tmpdir(), 'ligule-exec-'));
 // 这一份跑完就收掉：留在系统临时目录里的话，每跑一次 `npm test` 就多一份，几十次之后没人会再去清。
 after(() => rmSync(directory, { recursive: true, force: true }));
 let counter = 0;
-function nodeCommand(code) {
+function nodeCommand(code: string) {
   const script = join(directory, `case-${(counter += 1)}.js`).replace(/\\/g, '/');
   writeFileSync(script, code);
   return `node "${script}"`;
 }
 
-async function run(command, limits, signal, permission = fullAccess) {
+async function run(command: string, limits?: ExecLimits, signal?: AbortSignal, permission = fullAccess) {
   const boundary = process.cwd();
   const scriptBinding = await bindScript({ command, shell, boundary, workspaceRoot: boundary, cwd: boundary, permission });
   return execTool.run({ command }, {
-    config: { boundary, limits }, permission, signal,
+    config: { boundary, limits: limits as CapabilityLimits }, permission, signal,
     shell: withNativeExitCode(shell, command),
     ...(scriptBinding === undefined ? {} : { scriptBinding }),
   });
 }
 
-async function runManagedNodeScript(workspace, name, source, permission, onManagedProcess) {
+async function runManagedNodeScript<TResult>(
+  workspace: string, name: string, source: string, permission: PermissionContext,
+  onManagedProcess: (lease: ManagedExecLease) => Promise<TResult>,
+): Promise<TResult> {
   const scriptPath = join(workspace, name);
   writeFileSync(scriptPath, source);
   const command = `node "${scriptPath.replaceAll('\\', '/')}"`;
@@ -58,13 +74,13 @@ async function runManagedNodeScript(workspace, name, source, permission, onManag
   }, onManagedProcess);
 }
 
-function processIsRunning(pid) {
+function processIsRunning(pid: number) {
   if (process.platform === 'linux') {
     try {
       const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
       return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[0] !== 'Z';
     } catch (error) {
-      if (error.code === 'ENOENT') return false;
+      if ((error as CodedFailure).code === 'ENOENT') return false;
       throw error;
     }
   }
@@ -72,12 +88,12 @@ function processIsRunning(pid) {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    if (error.code === 'ESRCH') return false;
+    if ((error as CodedFailure).code === 'ESRCH') return false;
     throw error;
   }
 }
 
-async function assertStopped(pid) {
+async function assertStopped(pid: number) {
   const deadline = Date.now() + 2_000;
   while (Date.now() < deadline) {
     if (!processIsRunning(pid)) return;
@@ -86,7 +102,7 @@ async function assertStopped(pid) {
   assert.fail(`test-owned descendant process ${pid} remained alive`);
 }
 
-async function startTestMonitor(name) {
+async function startTestMonitor(name: string) {
   const marker = join(directory, `${name}-${(counter += 1)}.ready`);
   const code = `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ready');setInterval(()=>{},1000)`;
   const child = spawn(process.execPath, ['-e', code], { stdio: 'ignore', windowsHide: true });
@@ -100,12 +116,12 @@ async function startTestMonitor(name) {
   return child;
 }
 
-function assertRunning(child, label) {
+function assertRunning(child: ChildProcess, label: string) {
   assert.notEqual(child.pid, undefined);
-  assert.equal(processIsRunning(child.pid), true, `${label} should still be running`);
+  assert.equal(processIsRunning(child.pid!), true, `${label} should still be running`);
 }
 
-async function stopTestMonitor(child) {
+async function stopTestMonitor(child: ChildProcess) {
   if (child.pid === undefined) return;
   if (child.exitCode !== null || child.signalCode !== null) return;
   const exited = new Promise((resolve) => child.once('exit', resolve));
@@ -159,7 +175,7 @@ test('an abort terminates the command tree instead of waiting for it', async () 
   setTimeout(() => controller.abort(), 150);
   await assert.rejects(
     () => run(nodeCommand('setTimeout(() => {}, 20000)'), undefined, controller.signal),
-    (error) => error.code === 'exec_cancelled',
+    (error) => (error as CodedFailure).code === 'exec_cancelled',
   );
   assert.ok(Date.now() - started < 5000, 'the cancelled call should settle long before the command would');
 });
@@ -168,7 +184,7 @@ test('the configured execution timeout terminates a command with a distinct erro
   const started = Date.now();
   await assert.rejects(
     () => run(nodeCommand('setTimeout(() => {}, 20000)'), { execTimeoutMs: 150 }),
-    (error) => error.code === 'exec_timeout',
+    (error) => (error as CodedFailure).code === 'exec_timeout',
   );
   assert.ok(Date.now() - started < 5000, 'the timeout should settle long before the command would');
 });
@@ -191,9 +207,10 @@ test('a null managed completion exposes cleanup failure and retains the interrup
       throw cleanupFailure;
     }),
     error => {
-      assert.equal(error.code, 'exec_script_snapshot_cleanup_failed');
-      assert.ok(error.cause instanceof AggregateError);
-      assert.deepEqual(error.cause.errors.map(item => item.code), [
+      const failure = error as CodedFailure;
+      assert.equal(failure.code, 'exec_script_snapshot_cleanup_failed');
+      assert.ok(failure.cause instanceof AggregateError);
+      assert.deepEqual(failure.cause.errors.map(item => item.code), [
         'exec_process_interrupted', 'exec_script_snapshot_cleanup_failed',
       ]);
       return true;
@@ -216,7 +233,7 @@ test('managed completion cleans up rejected exit states without erasing their er
 
 test('managed exec reports and retries script-snapshot cleanup after an interrupted shell exit', {
   timeout: 15_000,
-  skip: process.platform !== 'linux' || process.getuid() === 0 ? 'requires an unprivileged Linux Guardian' : false,
+  skip: process.platform !== 'linux' || process.getuid?.() === 0 ? 'requires an unprivileged Linux Guardian' : false,
 }, async (t) => {
   const workspace = mkdtempSync(join(directory, 'managed-interrupted-'));
   t.after(() => {
@@ -224,8 +241,8 @@ test('managed exec reports and retries script-snapshot cleanup after an interrup
     rmSync(workspace, { recursive: true, force: true });
   });
   const scriptPath = join(workspace, 'interrupt.js');
-  let lease;
-  let completionError;
+  let lease!: ManagedExecLease;
+  let completionError!: CodedFailure;
   await runManagedNodeScript(workspace, 'interrupt.js',
     "require('node:fs').chmodSync(__dirname, 0o500); process.kill(process.ppid, 'SIGTERM'); setInterval(() => {}, 1000);\n",
     fullAccess, async (managedLease) => {
@@ -234,7 +251,7 @@ test('managed exec reports and retries script-snapshot cleanup after an interrup
       try {
         await managedLease.completion;
       } catch (error) {
-        completionError = error;
+        completionError = error as CodedFailure;
       } finally {
         clearTimeout(watchdog);
       }
@@ -252,7 +269,7 @@ test('managed exec reports and retries script-snapshot cleanup after an interrup
 
 test('managed exec retries private temporary-directory cleanup after the process exits', {
   timeout: 15_000,
-  skip: process.platform !== 'linux' || process.getuid() === 0 ? 'requires an unprivileged Linux sandbox' : false,
+  skip: process.platform !== 'linux' || process.getuid?.() === 0 ? 'requires an unprivileged Linux sandbox' : false,
 }, async (t) => {
   const probe = await probeLinuxSandboxIsolation();
   if (!probe.available) return t.skip(probe.reason);
@@ -273,17 +290,17 @@ test('managed exec retries private temporary-directory cleanup after the process
   const permission = createPermissionContext('workspace-write', 'disabled', {
     filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
   }, { workspaceTrusted: true });
-  let lease;
+  let lease!: ManagedExecLease;
   const cleanupError = await runManagedNodeScript(workspace, 'cleanup.js',
     "const fs = require('node:fs'); const path = require('node:path'); const temp = process.env.TMPDIR; if (!temp) throw new Error('sandbox TMPDIR is missing'); fs.writeFileSync(path.join(temp, 'ligule-cleanup-canary'), 'test'); fs.chmodSync(temp, 0o500);\n",
     permission, async (managedLease) => {
       lease = managedLease;
       try { await managedLease.completion; }
-      catch (error) { return error; }
+      catch (error) { return error as CodedFailure; }
       return undefined;
     });
 
-  assert.equal(cleanupError.code, 'exec_temp_cleanup_failed');
+  assert.equal(cleanupError!.code, 'exec_temp_cleanup_failed');
   const tempEntries = readdirSync(hostTempRoot);
   assert.equal(tempEntries.length, 1);
   const privateTemp = join(hostTempRoot, tempEntries[0]);
@@ -297,15 +314,15 @@ test('managed exec retries private temporary-directory cleanup after the process
 test('execution timeout configuration stays within its fixed bound', async () => {
   await assert.rejects(
     () => run(nodeCommand('console.log("unused")'), { execTimeoutMs: 0 }),
-    (error) => error.code === 'exec_timeout_invalid',
+    (error) => (error as CodedFailure).code === 'exec_timeout_invalid',
   );
   await assert.rejects(
     () => run(nodeCommand('console.log("unused")'), { execTimeoutMs: 600_001 }),
-    (error) => error.code === 'exec_timeout_invalid',
+    (error) => (error as CodedFailure).code === 'exec_timeout_invalid',
   );
   await assert.rejects(
-    () => run(nodeCommand('console.log("unused")'), { execTimeoutMs: null }),
-    (error) => error.code === 'exec_timeout_invalid',
+    () => run(nodeCommand('console.log("unused")'), { execTimeoutMs: null } as unknown as ExecLimits),
+    (error) => (error as CodedFailure).code === 'exec_timeout_invalid',
   );
 });
 
@@ -313,15 +330,15 @@ test('the execution layer requires permission and explicit network access for fu
   await assert.rejects(
     () => execTool.run({ command: 'node -e "process.exit(0)"' }, {
       config: { boundary: process.cwd() }, shell,
-    }),
-    (error) => error.code === 'exec_permission_required',
+    } as unknown as ExecRunContext),
+    (error) => (error as CodedFailure).code === 'exec_permission_required',
   );
   const networkLimitedFullAccess = createPermissionContext('full-access', 'policy', {
     filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
   }, { workspaceTrusted: true });
   await assert.rejects(
     () => run(nodeCommand('console.log("unused")'), undefined, undefined, networkLimitedFullAccess),
-    (error) => error.code === 'permission_network_isolation_unavailable',
+    (error) => (error as CodedFailure).code === 'permission_network_isolation_unavailable',
   );
 });
 
@@ -389,10 +406,10 @@ test('Linux sandbox timeout stops descendants before they can change the workspa
   });
   await assert.rejects(
     () => execTool.run({ command }, {
-      config: { boundary: workspace, limits: { execTimeoutMs: 1_000 } }, permission,
+      config: { boundary: workspace, limits: { execTimeoutMs: 1_000 } as ExecLimits as CapabilityLimits }, permission,
       shell: withNativeExitCode(shell, command),
     }),
-    (error) => error.code === 'exec_timeout',
+    (error) => (error as CodedFailure).code === 'exec_timeout',
   );
   await delay(2_100);
   assert.equal(existsSync(join(workspace, 'started')), true, 'the child process must have started inside the sandbox');
@@ -421,7 +438,7 @@ test('Linux sandbox cancellation stops descendants before they can change the wo
     while (Date.now() < deadline && !existsSync(join(workspace, 'started'))) await delay(10);
     assert.equal(existsSync(join(workspace, 'started')), true, 'the child process must have started inside the sandbox');
     controller.abort();
-    await assert.rejects(() => execution, (error) => error.code === 'exec_cancelled');
+    await assert.rejects(() => execution, (error) => (error as CodedFailure).code === 'exec_cancelled');
     await delay(1_100);
     assert.equal(existsSync(join(workspace, 'leaked-after-cancel')), false, 'a cancelled descendant must not write afterward');
   } finally {
@@ -452,7 +469,7 @@ test('timeout terminates a detached descendant without leaving it alive', async 
   ].join('');
   await assert.rejects(
     () => run(nodeCommand(script), { execTimeoutMs: 3_000 }),
-    (error) => error.code === 'exec_timeout',
+    (error) => (error as CodedFailure).code === 'exec_timeout',
   );
   const pid = Number(readFileSync(childPidFile, 'utf8'));
   await assertStopped(pid);
@@ -475,7 +492,7 @@ test('cancellation terminates a detached descendant without leaving it alive', a
     assert.ok(existsSync(childPidFile), 'the command should record its owned child PID before cancellation');
     const pid = Number(readFileSync(childPidFile, 'utf8'));
     controller.abort();
-    await assert.rejects(() => execution, (error) => error.code === 'exec_cancelled');
+    await assert.rejects(() => execution, (error) => (error as CodedFailure).code === 'exec_cancelled');
     await assertStopped(pid);
   } finally {
     controller.abort();
@@ -484,10 +501,10 @@ test('cancellation terminates a detached descendant without leaving it alive', a
 });
 
 test('an empty command line and a working directory outside the boundary are rejected', async () => {
-  await assert.rejects(() => run('   '), (error) => error.code === 'exec_command_required');
+  await assert.rejects(() => run('   '), (error) => (error as CodedFailure).code === 'exec_command_required');
   await assert.rejects(
     () => execTool.run({ command: 'dir', cwd: '..' }, { config: { boundary: process.cwd() }, permission: fullAccess, shell }),
-    (error) => error.code === 'path_escapes_boundary',
+    (error) => (error as CodedFailure).code === 'path_escapes_boundary',
   );
 });
 
@@ -500,7 +517,7 @@ test('the decision chain sees the command text before anything is spawned', asyn
   kernel.register(execTool);
   await assert.rejects(
     () => kernel.call('exec', { command: 'rm -rf /tmp/nowhere' }),
-    (error) => error.code === 'policy_denied',
+    (error) => (error as CodedFailure).code === 'policy_denied',
   );
 });
 
@@ -508,8 +525,8 @@ test('approved explicit multi-process termination kills only its listed test pro
   skip: process.platform !== 'win32' && process.platform !== 'linux',
   timeout: 20_000,
 }, async () => {
-  const targets = [];
-  const monitors = [];
+  const targets: ChildProcess[] = [];
+  const monitors: ChildProcess[] = [];
   try {
     targets.push(await startTestMonitor('batch-target-a'));
     targets.push(await startTestMonitor('batch-target-b'));
@@ -519,7 +536,7 @@ test('approved explicit multi-process termination kills only its listed test pro
     const command = targetPids.map((pid) => process.platform === 'win32'
       ? `Stop-Process -Id ${pid} -Force`
       : `kill -KILL ${pid}`).join('; ');
-    const createApprovalKernel = (mode, ask) => {
+    const createApprovalKernel = (mode: PolicyMode, ask: PolicyAsk) => {
       const kernel = createKernel({
         config: createConfig({ user: { boundary: directory, workspaceRoot: directory } }),
         permission: fullAccess,
@@ -535,7 +552,7 @@ test('approved explicit multi-process termination kills only its listed test pro
     assert.equal(noneRequests, 0, 'Policy none cannot bypass required trusted approval');
     for (const child of [...targets, ...monitors]) assertRunning(child, 'process after Policy none');
 
-    const declined = [];
+    const declined: PolicyQuestion[] = [];
     const declineKernel = createApprovalKernel('ask', async (request) => {
       declined.push(request);
       return false;
@@ -543,19 +560,19 @@ test('approved explicit multi-process termination kills only its listed test pro
     await assert.rejects(() => declineKernel.call('exec', { command }), { code: 'ask_declined' });
     assert.equal(declined.length, 1);
     assert.equal(declined[0].command, command, 'the approval displays the exact PID list that will execute');
-    assert.match(declined[0].reason, /process ownership is unknown/u);
+    assert.match(declined[0].reason!, /process ownership is unknown/u);
     for (const child of [...targets, ...monitors]) assertRunning(child, 'process after denied approval');
 
-    const approved = [];
+    const approved: PolicyQuestion[] = [];
     const approveKernel = createApprovalKernel('ask', async (request) => {
       approved.push(request);
       return true;
     });
-    const result = await approveKernel.call('exec', { command });
+    const result = await approveKernel.call('exec', { command }) as ExecOutcome;
     assert.equal(result.exitCode, 0, result.text);
     assert.equal(approved.length, 1);
     assert.equal(approved[0].command, command);
-    for (const child of targets) await assertStopped(child.pid);
+    for (const child of targets) await assertStopped(child.pid!);
     for (const child of monitors) assertRunning(child, 'independent monitoring process after approval');
   } finally {
     for (const child of [...targets, ...monitors]) await stopTestMonitor(child);
@@ -576,7 +593,7 @@ test('the record names the backend a command was judged and run under', async ()
   await kernel.call('exec', { command: 'git status' });
   const [entry] = await session.read();
   // 尾巴补没补由这台机器的 PATH 决定（`git` 是个可执行文件才补），两种都在这一条里接受，但不接受第三种值。
-  const { tail, ...chosen } = entry.shell;
+  const { tail, ...chosen } = entry.shell as RecordedShell;
   assert.deepEqual(chosen, { kind: shell.kind, executable: shell.executable, segments: ['git status'] });
   assert.ok(tail === undefined || tail === '; exit $LASTEXITCODE', `unexpected tail: ${tail}`);
 });
