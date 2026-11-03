@@ -73,7 +73,7 @@ test('run directories refuse silent overwrite and preserve previous evidence wit
     const active = join(root, 'active');
     await mkdir(active);
     await writeFile(join(active, 'run.json'), `${JSON.stringify({ identity: IDENTITY, plan: {}, executionStatus: 'running' })}\n`, 'utf8');
-    await writeFile(join(active, 'run-state.json'), `${JSON.stringify({ status: 'running', pid: process.pid })}\n`, 'utf8');
+    await writeFile(join(active, 'run-state.json'), `${JSON.stringify({ status: 'collecting', pid: process.pid })}\n`, 'utf8');
     await assert.rejects(() => prepareRunDirectory(active, true, join(root, 'unused')), /active_benchmark_run/u);
   } finally {
     await rm(root, { recursive: true, force: true });

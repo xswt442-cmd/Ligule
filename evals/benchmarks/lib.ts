@@ -16,6 +16,20 @@ export type ProcessResult = {
   error?: string;
 };
 
+export async function activeBenchmarkOwner(directory: string): Promise<string | undefined> {
+  for (const name of ['run-state.json', 'collect-state.json']) {
+    const path = resolve(directory, name);
+    if (!existsSync(path)) continue;
+    let state: { status?: unknown; pid?: unknown };
+    try { state = JSON.parse(await readFile(path, 'utf8')) as typeof state; }
+    catch { throw new Error(`run_state_invalid:${path}`); }
+    if ((state.status === 'running' || state.status === 'collecting') && isProcessAlive(state.pid)) {
+      return `${name}:${state.status}:pid=${String(state.pid)}`;
+    }
+  }
+  return undefined;
+}
+
 export function isProcessAlive(pid: unknown): boolean {
   if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) return false;
   try {
@@ -193,15 +207,8 @@ export async function prepareRunDirectory(requested: string | undefined, force: 
     if (record.identity === undefined || (record.plan === undefined && record.executionStatus !== 'blocked')) {
       throw new Error(`output_directory_not_benchmark_run:${directory}`);
     }
-    const stateFile = resolve(directory, 'run-state.json');
-    if (existsSync(stateFile)) {
-      let state: { status?: unknown; pid?: unknown };
-      try { state = JSON.parse(await readFile(stateFile, 'utf8')) as typeof state; }
-      catch { throw new Error(`run_state_invalid:${directory}`); }
-      if (state.status === 'running' && isProcessAlive(state.pid)) {
-        throw new Error(`active_benchmark_run:${directory}; stop it or use --collect-only`);
-      }
-    }
+    const owner = await activeBenchmarkOwner(directory);
+    if (owner !== undefined) throw new Error(`active_benchmark_run:${directory}:${owner}`);
     const previous = `${directory}.previous-${stamp}`;
     await rename(directory, previous);
     process.stdout.write(`Preserved existing output at ${previous}\n`);
