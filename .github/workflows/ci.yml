@@ -58,7 +58,7 @@ jobs:
         run: |
           dbus-run-session -- bash -e -c '
             printf "%s" "ligule-ci-test-password" | gnome-keyring-daemon --unlock --components=secrets
-            LIGULE_CREDENTIAL_NATIVE_REQUIRED=1 node --test core/tests/credentials.test.js core/tests/credential-unavailable.test.js
+            LIGULE_CREDENTIAL_NATIVE_REQUIRED=1 node --experimental-strip-types --test core/tests/credentials.test.ts core/tests/credential-unavailable.test.ts
           '
       - name: prepare an isolated macOS keychain
         id: keychain
@@ -74,7 +74,7 @@ jobs:
         if: runner.os != 'Linux'
         env:
           LIGULE_CREDENTIAL_NATIVE_REQUIRED: '1'
-        run: node --test core/tests/credentials.test.js core/tests/credential-unavailable.test.js
+        run: node --experimental-strip-types --test core/tests/credentials.test.ts core/tests/credential-unavailable.test.ts
       - name: remove the test keychain
         if: always() && runner.os == 'macOS' && steps.keychain.outcome == 'success'
         run: security delete-keychain "$PWD/testplace/tmp/credentials.keychain-db"
