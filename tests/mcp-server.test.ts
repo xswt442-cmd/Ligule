@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import type { ServerResponse } from 'node:http';
 import { access, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,15 +9,125 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { LoggingMessageNotificationSchema } from '../core/node_modules/@modelcontextprotocol/sdk/dist/esm/types.js';
 import { createConnection } from '../core/dist/host/connection.js';
 import { hostProviderFromConfig, serveHost } from '../core/dist/host/host.js';
+import type { HostOptions } from '../core/dist/host/host.js';
 import { createMemoryConnectionPair } from '../core/dist/host/memory.js';
 import { detectPermissionCapabilities } from '../core/dist/capability/permission-capabilities.js';
+import type { PermissionCapabilitySnapshot } from '../core/dist/capability/permission-capabilities.js';
 import { createConfig } from '../core/dist/kernel/config.js';
 import { modeDirectories } from '../core/dist/kernel/modes.js';
 import { createPermissionContext } from '../core/dist/kernel/permission.js';
 import { listenFetchable } from './helpers/port.ts';
 import { connectMcp } from './helpers/mcp-control.mjs';
 import { requestAgentControl } from '../core/dist/host/agent-control-runtime.js';
+import type { AgentControlRequest } from '../core/dist/host/agent-control-runtime.js';
 import { setTrusted } from '../core/dist/kernel/workspace-trust.js';
+
+type McpResult = {
+  isError?: boolean;
+  structuredContent?: unknown;
+  content?: readonly { text?: string }[];
+};
+
+type FailurePayload = { code?: string };
+
+type Interaction = {
+  type: string;
+  requestId: string;
+  details: { tool?: string; args: { path?: string }; questions: { question: string }[] };
+};
+
+type Effective = {
+  policy: { mode: string };
+  loopIterations: number;
+  generation: {
+    model: { provider: string; model: string };
+    thinking: { supported: boolean; effort: string };
+    outputTokens: number;
+    maxOutputTokens: number;
+  };
+  mode: string;
+};
+
+type RunOutcome = {
+  state: string;
+  output: { text?: string; structured?: unknown };
+  validation: { status: string; schemaDigest: string };
+  stopReason?: string;
+  artifacts?: unknown[];
+};
+
+type EventRecord = {
+  seq: number;
+  kind: string;
+  json: string;
+  offset: number;
+  totalCharacters: number;
+  nextOffset: number | null;
+};
+
+type RunEvent = { kind: string; newOperationId?: string; cursor: number };
+
+type ToolData = {
+  sessionId: string;
+  settingsApplied: boolean;
+  applies: string;
+  effective: Effective;
+  pending: Effective;
+  available: { services: { id: string; models: { id: string }[] }[] };
+  sessions: { sessionId: string; name: string; createdAt: string }[];
+  operationId: string;
+  state: string;
+  timedOut: boolean;
+  result: RunOutcome;
+  code: string;
+  pendingInteractions: Interaction[];
+  waitingFor: string;
+  events: RunEvent[];
+  hasMoreEvents: boolean;
+  queue: unknown[];
+  queuePaused: boolean;
+  records: EventRecord[];
+  provisionalOutput: { provisional: boolean; text: string } | null;
+  resolved: boolean;
+  queued: boolean;
+  queueItemId: string;
+  currentOperationId: string;
+  hasMore: boolean;
+  nextBefore: number | null;
+};
+
+type ControlSnapshot = { nextCursor: number; pendingInteractions?: readonly Interaction[] };
+
+type TraceEntry = { time: string; action: string } & Record<string, unknown>;
+
+type ToolCaller = {
+  callTool(call: { name: string; arguments: Record<string, unknown> }): Promise<McpResult>;
+};
+
+type Gate = {
+  readonly started: boolean;
+  entered: Promise<void>;
+  waiting: Promise<void>;
+  markStarted(): void;
+  release(): void;
+};
+
+type HttpRequestEntry = {
+  url?: string;
+  model: string;
+  inputTags: string[];
+  lastRole?: string;
+  toolNames: (string | undefined)[];
+};
+
+type ProviderMessage = { role: string; content?: unknown };
+type ProviderBody = {
+  messages: ProviderMessage[];
+  tools?: { function?: { name?: string } }[];
+  max_tokens?: number;
+};
+
+type McpContext = Awaited<ReturnType<typeof connectMcp>>;
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const workspaceRoot = resolve(process.env.LIGULE_MCP_E2E_WORKSPACE_ROOT ?? repoRoot);
@@ -24,29 +135,29 @@ const testplaceRoot = resolve(process.env.LIGULE_MCP_E2E_TESTPLACE_ROOT ?? join(
 const cliPath = resolve(process.env.LIGULE_MCP_CLI ?? join(repoRoot, 'tui', 'dist', 'cli.js'));
 const sdkRoot = resolve(process.env.LIGULE_MCP_SDK_ROOT ?? join(repoRoot, 'core', 'node_modules', '@modelcontextprotocol', 'sdk'));
 
-function recordTrace(trace, action, fields = {}) {
+function recordTrace(trace: TraceEntry[], action: string, fields: Record<string, unknown> = {}) {
   trace.push({ time: new Date().toISOString(), action, ...fields });
 }
 
-function toolData(result, action) {
+function toolData(result: McpResult, action: string): ToolData {
   assert.equal(result.isError, undefined, `${action}: ${JSON.stringify(result.structuredContent ?? result)}`);
   assert.ok(result.structuredContent !== undefined, `${action}: MCP result has no structuredContent`);
-  return result.structuredContent;
+  return result.structuredContent as ToolData;
 }
 
-function toolFailurePayload(result) {
-  let payload;
-  try { payload = JSON.parse(result.content?.[0]?.text ?? '{}'); }
+function toolFailurePayload(result: McpResult): FailurePayload {
+  let payload: FailurePayload;
+  try { payload = JSON.parse(result.content?.[0]?.text ?? '{}') as FailurePayload; }
   catch { payload = {}; }
-  const actual = result.structuredContent?.code ?? payload.code;
+  const actual = (result.structuredContent as FailurePayload | undefined)?.code ?? payload.code;
   return { ...payload, code: actual };
 }
 
-function toolFailureCode(result) {
+function toolFailureCode(result: McpResult) {
   return toolFailurePayload(result).code;
 }
 
-function toolFailure(result, code, action) {
+function toolFailure(result: McpResult, code: string, action: string) {
   assert.equal(result.isError, true, `${action}: expected an MCP tool error`);
   const payload = toolFailurePayload(result);
   const actual = payload.code;
@@ -54,7 +165,7 @@ function toolFailure(result, code, action) {
   return payload;
 }
 
-async function waitFor(check, label, within = 10_000) {
+async function waitFor<T>(check: () => T | undefined | Promise<T | undefined>, label: string, within = 10_000): Promise<T> {
   const until = Date.now() + within;
   while (Date.now() < until) {
     const value = await check();
@@ -64,14 +175,14 @@ async function waitFor(check, label, within = 10_000) {
   throw new Error(`mcp_e2e_wait_timeout:${label}`);
 }
 
-async function waitForOutcome(client, operationId) {
+async function waitForOutcome(client: ToolCaller, operationId: string) {
   return await waitFor(async () => {
     const result = toolData(await client.callTool({ name: 'ligule_run_status', arguments: { operationId } }), 'run_status');
     return result.state === 'running' ? undefined : result;
   }, `operation ${operationId} to settle`);
 }
 
-async function localControl(dataRoot, projectRoot, sessionId, request) {
+async function localControl(dataRoot: string, projectRoot: string, sessionId: string, request: AgentControlRequest): Promise<unknown> {
   const previousHome = process.env.LIGULE_HOME;
   process.env.LIGULE_HOME = dataRoot;
   try { return await requestAgentControl(projectRoot, sessionId, request); }
@@ -81,21 +192,21 @@ async function localControl(dataRoot, projectRoot, sessionId, request) {
   }
 }
 
-async function waitForLocalInteraction(client, dataRoot, projectRoot, sessionId, operationId, label) {
+async function waitForLocalInteraction(client: ToolCaller, dataRoot: string, projectRoot: string, sessionId: string, operationId: string, label: string) {
   let cursor = 0;
-  return await waitFor(async () => {
+  return await waitFor<{ run: ToolData; interaction?: Interaction }>(async () => {
     const run = toolData(await client.callTool({ name: 'ligule_run_status', arguments: { operationId } }), `${label}_status`);
     if (run.state !== 'running') return { run };
-    const snapshot = await localControl(dataRoot, projectRoot, sessionId, {
+    const snapshot = (await localControl(dataRoot, projectRoot, sessionId, {
       action: 'status', after: cursor, limit: 50, waitMs: 0,
-    });
+    })) as ControlSnapshot;
     cursor = Math.max(cursor, snapshot.nextCursor);
     const interaction = snapshot.pendingInteractions?.[0];
     return interaction === undefined ? undefined : { run, interaction };
   }, label);
 }
 
-async function findHistoryRecord(client, sessionId, predicate) {
+async function findHistoryRecord(client: ToolCaller, sessionId: string, predicate: (record: EventRecord) => boolean) {
   let page = toolData(await client.callTool({ name: 'ligule_session_read', arguments: { sessionId, limit: 50 } }), 'session_read_history_page');
   for (;;) {
     const found = page.records.find(predicate);
@@ -107,7 +218,7 @@ async function findHistoryRecord(client, sessionId, predicate) {
   }
 }
 
-function sse(response, delta) {
+function sse(response: ServerResponse, delta: Record<string, unknown>) {
   const frames = [
     { choices: [{ index: 0, delta, finish_reason: delta.tool_calls === undefined ? 'stop' : 'tool_calls' }] },
     { choices: [], usage: { prompt_tokens: 20, completion_tokens: 5 } },
@@ -116,11 +227,20 @@ function sse(response, delta) {
   response.end(`${frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('')}data: [DONE]\n\n`);
 }
 
-function tomlString(value) {
+function tomlString(value: string) {
   return JSON.stringify(value.replaceAll('\\', '/'));
 }
 
-async function seedFullAccessSession({ projectRoot, sessionDirectory, homeDirectory, baseURL, apiKeyName, capabilities }) {
+type SeedOptions = {
+  projectRoot: string;
+  sessionDirectory: string;
+  homeDirectory: string;
+  baseURL: string;
+  apiKeyName: string;
+  capabilities: PermissionCapabilitySnapshot['capabilities'];
+};
+
+async function seedFullAccessSession({ projectRoot, sessionDirectory, homeDirectory, baseURL, apiKeyName, capabilities }: SeedOptions) {
   const config = createConfig({ user: {
     boundary: projectRoot,
     workspaceRoot: projectRoot,
@@ -138,7 +258,7 @@ async function seedFullAccessSession({ projectRoot, sessionDirectory, homeDirect
     policy: { mode: 'ask' },
     limits: { contextTokens: 200000 },
     loop: { iterations: 8, modelCalls: 16 },
-  } });
+  } }) as HostOptions['config'] & { policy: NonNullable<HostOptions['policy']> };
   const permission = createPermissionContext('read-only', 'policy', capabilities);
   const pair = createMemoryConnectionPair();
   const host = serveHost({
@@ -155,7 +275,7 @@ async function seedFullAccessSession({ projectRoot, sessionDirectory, homeDirect
   });
   const client = createConnection(pair.client);
   try {
-    const created = await client.request('session.create', {
+    const created = (await client.request('session.create', {
       projectRoot,
       initialMode: 'minimal',
       initialPolicy: 'ask',
@@ -164,7 +284,7 @@ async function seedFullAccessSession({ projectRoot, sessionDirectory, homeDirect
       initialThinkingEffort: 'high',
       initialOutputTokens: 128000,
       initialLoopIterations: 5,
-    });
+    })) as { sessionId: string };
     await client.request('permission.set', {
       sessionId: created.sessionId,
       permissionProfile: 'full-access',
@@ -179,11 +299,11 @@ async function seedFullAccessSession({ projectRoot, sessionDirectory, homeDirect
   }
 }
 
-function gate() {
-  let open;
-  let started;
-  const waiting = new Promise((resolve) => { open = resolve; });
-  const entered = new Promise((resolve) => { started = resolve; });
+function gate(): Gate {
+  let open!: () => void;
+  let started!: () => void;
+  const waiting = new Promise<void>((resolve) => { open = resolve; });
+  const entered = new Promise<void>((resolve) => { started = resolve; });
   let isStarted = false;
   let isOpen = false;
   return {
@@ -201,8 +321,8 @@ function gate() {
 // suite-level guard therefore covers four startups; the individual protocol steps are still
 // bounded by their own waits, and the product has no timeout of its own here.
 test('a real stdio MCP client controls, reads, cancels, and reopens Host sessions', { timeout: 180_000 }, async (t) => {
-  const trace = [];
-  const clients = new Set();
+  const trace: TraceEntry[] = [];
+  const clients = new Set<McpContext>();
   const tempParent = resolve(process.env.LIGULE_MCP_E2E_TEMP_ROOT ?? join(testplaceRoot, 'tmp'));
   await mkdir(tempParent, { recursive: true });
   const tempRoot = await mkdtemp(join(tempParent, 'mcp-stdio-e2e-'));
@@ -217,8 +337,8 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
   const approvalMarker = join(projectRoot, 'approval-denied.txt');
   const apiKeyName = 'LIGULE_MCP_E2E_API_KEY';
   const apiKey = 'local-stub-key';
-  const httpRequests = [];
-  const providerGates = new Map([
+  const httpRequests: HttpRequestEntry[] = [];
+  const providerGates = new Map<string, Gate>([
     ['MCP_E2E_GATE_A', gate()],
     ['MCP_E2E_GATE_B', gate()],
     ['MCP_E2E_CANCEL_GATE', gate()],
@@ -231,11 +351,11 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
       for await (const chunk of request) chunks.push(chunk);
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       assert.equal(request.headers.authorization, `Bearer ${apiKey}`);
-      const lastUser = body.messages.filter((message) => message.role === 'user').at(-1)?.content ?? '';
+      const lastUser = body.messages.filter((message: { role: string }) => message.role === 'user').at(-1)?.content ?? '';
       const inputTags = ['MCP_E2E_DELAYED', 'MCP_E2E_LARGE_', 'MCP_E2E_CANCEL_GATE', 'MCP_E2E_EXEC_BLOCKED', 'MCP_E2E_DISCONNECT_GATE', 'MCP_E2E_APPROVAL_DENIED', 'MCP_E2E_STRUCTURED']
         .filter((tag) => lastUser.includes(tag));
       httpRequests.push({ url: request.url, model: body.model, inputTags, lastRole: body.messages.at(-1)?.role,
-        toolNames: (body.tools ?? []).map((tool) => tool.function?.name) });
+        toolNames: (body.tools ?? []).map((tool: { function?: { name?: string } }) => tool.function?.name) });
       if (body.messages.at(-1)?.role === 'tool') {
         sse(response, { content: 'MCP task finished' });
         return;
@@ -246,7 +366,7 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
         return;
       }
       if (lastUser.includes('MCP_E2E_STRUCTURED')) {
-        assert.ok((body.tools ?? []).some((tool) => tool.function?.name === 'ligule_delegation_result'));
+        assert.ok((body.tools ?? []).some((tool: { function?: { name?: string } }) => tool.function?.name === 'ligule_delegation_result'));
         callId += 1;
         sse(response, { tool_calls: [{ index: 0, id: `mcp-e2e-call-${callId}`, type: 'function', function: {
           name: 'ligule_delegation_result', arguments: JSON.stringify({ result: { answer: 'validated by Host' } }),
@@ -260,8 +380,8 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
         if (!response.destroyed) sse(response, { content: 'gated task finished' });
         return;
       }
-      let tool;
-      let args;
+      let tool: string | undefined;
+      let args: Record<string, unknown> | undefined;
       if (lastUser.includes('MCP_E2E_EXEC_BLOCKED')) {
         tool = 'exec';
         args = { command: 'node --version' };
@@ -284,8 +404,8 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
   });
 
   let serverStarted = false;
-  let logPath;
-  const contexts = [];
+  let logPath!: string;
+  const contexts: McpContext[] = [];
   const key = `http://127.0.0.1:${await listenFetchable(endpoint)}/v1`;
   serverStarted = true;
   await writeFile(join(dataRoot, 'config.toml'), [
@@ -319,7 +439,7 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     clients.add(context);
     return context;
   };
-  const close = async (context) => {
+  const close = async (context: McpContext) => {
     if (!clients.has(context)) return;
     clients.delete(context);
     await context.close();
@@ -331,29 +451,29 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     recordTrace(trace, 'initialize', { server: first.client.getServerVersion() });
 
     const listed = await first.client.listTools();
-    const toolNames = listed.tools.map((tool) => tool.name).sort();
+    const toolNames = listed.tools.map((tool: { name: string }) => tool.name).sort();
     assert.deepEqual(toolNames, [
       'ligule_interaction_reply', 'ligule_run', 'ligule_run_await', 'ligule_run_cancel', 'ligule_run_get', 'ligule_run_start', 'ligule_run_status', 'ligule_session_close', 'ligule_session_configure', 'ligule_session_create',
       'ligule_session_list', 'ligule_session_open', 'ligule_session_read', 'ligule_session_send',
     ]);
-    const readSchema = listed.tools.find((tool) => tool.name === 'ligule_session_read').inputSchema;
+    const readSchema = listed.tools.find((tool: { name: string }) => tool.name === 'ligule_session_read').inputSchema;
     assert.ok(readSchema.properties.at && readSchema.properties.offset, 'tools/list publishes bounded exact-event chunk reads');
     assert.deepEqual(readSchema.required, ['sessionId']);
     recordTrace(trace, 'tools_list', { toolNames });
 
     await assert.rejects(
       first.client.callTool({ name: 'not_a_ligule_tool', arguments: {} }),
-      (error) => error.code === -32602,
+      (error: unknown) => (error as { code?: number }).code === -32602,
       'unknown tools fail as MCP InvalidParams',
     );
     await assert.rejects(
       first.client.callTool({ name: 'ligule_session_create', arguments: {} }),
-      (error) => error.code === -32602,
+      (error: unknown) => (error as { code?: number }).code === -32602,
       'missing required schema arguments fail as MCP InvalidParams',
     );
     await assert.rejects(
       first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId: 'x', input: 'ok', extra: true } }),
-      (error) => error.code === -32602,
+      (error: unknown) => (error as { code?: number }).code === -32602,
       'additional arguments fail the declared schema',
     );
     recordTrace(trace, 'schema_rejections', { unknownTool: -32602, missingArgument: -32602, extraArgument: -32602 });
@@ -376,8 +496,8 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     const sessions = toolData(await first.client.callTool({ name: 'ligule_session_list', arguments: { projectRoot: project, limit: 20 } }), 'session_list');
     assert.ok(sessions.sessions.some((session) => session.sessionId === sessionId));
     const normalizedLegacy = sessions.sessions.find((session) => session.sessionId === legacy.sessionId);
-    assert.equal(normalizedLegacy.name.length, 120, 'legacy session names are bounded at the MCP boundary');
-    assert.equal(normalizedLegacy.createdAt.length, 128, 'legacy timestamps are bounded at the MCP boundary');
+    assert.equal(normalizedLegacy!.name.length, 120, 'legacy session names are bounded at the MCP boundary');
+    assert.equal(normalizedLegacy!.createdAt.length, 128, 'legacy timestamps are bounded at the MCP boundary');
     const legacyLines = (await readFile(legacyPath, 'utf8')).trimEnd().split('\n').map((line) => JSON.parse(line));
     assert.equal(legacyLines[0].createdAt.length, 140, 'MCP normalization does not rewrite the stored timestamp');
     assert.equal(legacyLines[1].name.length, 140, 'MCP normalization does not rewrite the stored name');
@@ -438,9 +558,9 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     assert.ok(userRecord.totalCharacters > 8192);
     assert.ok(userRecord.json.length <= 8192);
     let reconstructed = userRecord.json;
-    let offset = userRecord.nextOffset;
+    let offset: number | null = userRecord.nextOffset;
     while (offset !== null) {
-      const chunk = toolData(await first.client.callTool({
+      const chunk: EventRecord[] = toolData(await first.client.callTool({
         name: 'ligule_session_read', arguments: { sessionId, at: userRecord.seq, offset },
       }), 'session_read_chunk').records;
       assert.equal(chunk.length, 1);
@@ -461,7 +581,7 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     const sessionB = toolData(await first.client.callTool({ name: 'ligule_session_create', arguments: { projectRoot: project } }), 'session_create_b');
     const operationA = toolData(await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_E2E_GATE_A' } }), 'run_start_gate_a');
     const operationB = toolData(await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId: sessionB.sessionId, input: 'MCP_E2E_GATE_B' } }), 'run_start_gate_b');
-    await Promise.all([providerGates.get('MCP_E2E_GATE_A').entered, providerGates.get('MCP_E2E_GATE_B').entered]);
+    await Promise.all([providerGates.get('MCP_E2E_GATE_A')!.entered, providerGates.get('MCP_E2E_GATE_B')!.entered]);
     const waitExpired = toolData(await first.client.callTool({ name: 'ligule_run_await', arguments: {
       operationId: operationB.operationId, timeoutMs: 1,
     } }), 'run_await_timeout');
@@ -471,8 +591,8 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     assert.equal(cancelledA.state, 'cancelled');
     const stillRunningB = toolData(await first.client.callTool({ name: 'ligule_run_status', arguments: { operationId: operationB.operationId } }), 'run_status_b_after_cancel_a');
     assert.equal(stillRunningB.state, 'running', 'cancelling A leaves B blocked on its independent Provider response');
-    providerGates.get('MCP_E2E_GATE_A').release();
-    providerGates.get('MCP_E2E_GATE_B').release();
+    providerGates.get('MCP_E2E_GATE_A')!.release();
+    providerGates.get('MCP_E2E_GATE_B')!.release();
     const completedB = toolData(await first.client.callTool({ name: 'ligule_run_await', arguments: {
       operationId: operationB.operationId, timeoutMs: 5_000,
     } }), 'run_await_after_timeout');
@@ -484,12 +604,12 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     });
 
     const cancelRun = toolData(await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_E2E_CANCEL_GATE' } }), 'run_start_cancel_gate');
-    await providerGates.get('MCP_E2E_CANCEL_GATE').entered;
+    await providerGates.get('MCP_E2E_CANCEL_GATE')!.entered;
     const concurrent = await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'must be rejected' } });
     toolFailure(concurrent, 'run_already_running', 'run_start_concurrent');
     const cancelled = toolData(await first.client.callTool({ name: 'ligule_run_cancel', arguments: { operationId: cancelRun.operationId } }), 'run_cancel_gate');
     assert.equal(cancelled.state, 'cancelled');
-    providerGates.get('MCP_E2E_CANCEL_GATE').release();
+    providerGates.get('MCP_E2E_CANCEL_GATE')!.release();
     recordTrace(trace, 'run_cancel_is_scoped_to_active_operation', { operationId: cancelRun.operationId, state: cancelled.state, concurrentCode: toolFailureCode(concurrent) });
 
     const sandbox = await detectPermissionCapabilities();
@@ -502,9 +622,9 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     const blockedApproval = blockedState.interaction;
     if (sandboxAvailable) {
       assert.equal(blockedApproval?.type, 'approval', 'the local user must receive a policy approval for the restricted Shell call');
-      const denied = await localControl(dataRoot, project, sessionId, {
-        action: 'reply', requestId: blockedApproval.requestId, type: 'approval', decision: 'deny',
-      });
+      const denied = (await localControl(dataRoot, project, sessionId, {
+        action: 'reply', requestId: blockedApproval!.requestId, type: 'approval', decision: 'deny',
+      })) as { source?: string };
       assert.equal(denied.source, 'human');
     } else assert.equal(blockedApproval, undefined, 'unavailable sandbox capability must refuse before approval');
     assert.equal((await waitForOutcome(first.client, blockedExec.operationId)).state, 'done');
@@ -520,7 +640,7 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     const approvalRun = toolData(await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_E2E_APPROVAL_DENIED' } }), 'run_start_approval');
     const approvalDone = await waitForOutcome(first.client, approvalRun.operationId);
     assert.equal(approvalDone.state, 'done');
-    await assert.rejects(access(approvalMarker), (error) => error.code === 'ENOENT', 'the denied create operation left no file');
+    await assert.rejects(access(approvalMarker), (error: unknown) => (error as { code?: string }).code === 'ENOENT', 'the denied create operation left no file');
     const deniedToolRecord = await findHistoryRecord(first.client, sessionId, (record) => record.kind === 'tool' && record.json.includes('approval-denied.txt'));
     const deniedTool = deniedToolRecord === undefined ? undefined : JSON.parse(deniedToolRecord.record.json);
     assert.equal(deniedTool?.result?.kind, 'refusal');
@@ -534,10 +654,10 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     await close(locked);
 
     const disconnectRun = toolData(await first.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_E2E_DISCONNECT_GATE' } }), 'run_start_disconnect_gate');
-    await providerGates.get('MCP_E2E_DISCONNECT_GATE').entered;
+    await providerGates.get('MCP_E2E_DISCONNECT_GATE')!.entered;
     const closeAt = performance.now();
     await close(first);
-    providerGates.get('MCP_E2E_DISCONNECT_GATE').release();
+    providerGates.get('MCP_E2E_DISCONNECT_GATE')!.release();
     const closeMs = Math.round(performance.now() - closeAt);
     assert.ok(closeMs < 2_000, `stdio disconnect took ${closeMs}ms to release the Host`);
     recordTrace(trace, 'stdio_disconnect_releases_active_run', { operationId: disconnectRun.operationId, closeMs });
@@ -568,7 +688,7 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     }
     if (serverStarted) {
       endpoint.closeAllConnections();
-      await new Promise((done) => endpoint.close(done));
+      await new Promise<void>((done) => endpoint.close(() => done()));
     }
     const readings = join(testplaceRoot, 'readings', 'phase5');
     await mkdir(readings, { recursive: true });
@@ -596,7 +716,7 @@ test('operator tools configure real sessions, answer Host interactions, and run 
   const markerDenied = join(projectRoot, 'operator-denied.txt');
   const markerHardDenied = join(projectRoot, 'policy-forbidden.txt');
   const markerSensitive = join(projectRoot, 'operator-secret-executed.txt');
-  const requests = [];
+  const requests: ProviderBody[] = [];
   const queueGate = gate();
   const cancelGate = gate();
   const draftGate = gate();
@@ -607,7 +727,7 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     requests.push(body);
     const last = body.messages.at(-1);
-    const userText = body.messages.filter((message) => message.role === 'user').at(-1)?.content ?? '';
+    const userText = body.messages.filter((message: { role: string }) => message.role === 'user').at(-1)?.content ?? '';
     if (userText.includes('MCP_OPERATOR_DRAFT_GATE')) {
       response.writeHead(200, { 'content-type': 'text/event-stream' });
       response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: 'A separately inspectable provisional fragment.' } }] })}\n\n`);
@@ -630,9 +750,9 @@ test('operator tools configure real sessions, answer Host interactions, and run 
       return;
     }
     if (userText.includes('MCP_OPERATOR_STRUCTURED')) {
-      assert.ok((body.tools ?? []).some((tool) => tool.function?.name === 'ligule_delegation_result'));
-      assert.ok((body.tools ?? []).some((tool) => tool.function?.name === 'read'));
-      assert.equal((body.tools ?? []).some((tool) => tool.function?.name === 'create'), false,
+      assert.ok((body.tools ?? []).some((tool: { function?: { name?: string } }) => tool.function?.name === 'ligule_delegation_result'));
+      assert.ok((body.tools ?? []).some((tool: { function?: { name?: string } }) => tool.function?.name === 'read'));
+      assert.equal((body.tools ?? []).some((tool: { function?: { name?: string } }) => tool.function?.name === 'create'), false,
         'the per-run inline mode narrows the persistent full mode');
       callId += 1;
       sse(response, { tool_calls: [{ index: 0, id: `operator-call-${callId}`, type: 'function', function: {
@@ -654,8 +774,8 @@ test('operator tools configure real sessions, answer Host interactions, and run 
       if (!response.destroyed) sse(response, { content: 'gate released' });
       return;
     }
-    let tool;
-    let args;
+    let tool: string | undefined;
+    let args: Record<string, unknown> | undefined;
     if (userText.includes('MCP_OPERATOR_APPROVE')) {
       tool = 'create'; args = { path: 'operator-approved.txt', content: 'approved by the operator' };
     } else if (userText.includes('MCP_OPERATOR_DENY')) {
@@ -682,8 +802,8 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     '[policy]', 'mode = "ask"', '', '[host]', `sessionDirectory = ${tomlString(sessionDirectory)}`,
     '', '[limits]', 'contextTokens = 200000', '', '[loop]', 'iterations = 8', 'modelCalls = 16', '',
   ].join('\n'));
-  let preauthorizedSessionId;
-  let context;
+  let preauthorizedSessionId = '';
+  let context!: McpContext;
   try {
     await setTrusted(projectRoot, true, join(dataRoot, 'tui-trust.json'));
     preauthorizedSessionId = await seedFullAccessSession({
@@ -692,14 +812,14 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     context = await connectMcp({ cliPath, projectRoot, dataRoot, apiKeyName, apiKey: fixtureCredential, sdkRoot, operator: true });
   } catch (error) {
     endpoint.closeAllConnections();
-    await new Promise((done) => endpoint.close(done));
+    await new Promise<void>((done) => endpoint.close(() => done()));
     await rm(tempRoot, { recursive: true, force: true });
     throw error;
   }
-  const notifications = [];
-  context.client.setNotificationHandler(LoggingMessageNotificationSchema, (notification) => { notifications.push(notification); });
+  const notifications: unknown[] = [];
+  context.client.setNotificationHandler(LoggingMessageNotificationSchema, (notification: unknown) => { notifications.push(notification); });
   try {
-    const names = (await context.client.listTools()).tools.map((tool) => tool.name).sort();
+    const names = (await context.client.listTools()).tools.map((tool: { name: string }) => tool.name).sort();
     assert.equal(names.length, 14);
     const project = await realpath(projectRoot);
     const invalidInitialModel = await context.client.callTool({ name: 'ligule_session_create', arguments: {
@@ -805,7 +925,7 @@ test('operator tools configure real sessions, answer Host interactions, and run 
       assert.deepEqual(failedStructure.result.artifacts, [{ kind: 'session', sessionId: structuredSession.sessionId }]);
       const failedTurn = await findHistoryRecord(context.client, structuredSession.sessionId,
         record => record.kind === 'turn' && record.json.includes('delegation_result_missing'));
-      assert.equal(JSON.parse(failedTurn.record.json).status, 'failed');
+      assert.equal(JSON.parse(failedTurn!.record.json).status, 'failed');
       if (input.endsWith('INVALID')) {
         assert.ok(await findHistoryRecord(context.client, structuredSession.sessionId,
           record => record.kind === 'tool' && record.json.includes('delegation_result_invalid')));
@@ -838,7 +958,7 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     const unsupported = await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId, changes: { thinking: { effort: 'high' } } } });
     toolFailure(unsupported, 'provider_thinking_unsupported', 'unsupported_thinking');
     await assert.rejects(context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId, changes: { mode: 'minimal', policy: 'ask' } } }),
-      (error) => error.code === -32602, 'schema rejects cross-category partial configuration');
+      (error: unknown) => (error as { code?: number }).code === -32602, 'schema rejects cross-category partial configuration');
     const changed = toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId, changes: { outputTokens: 1024 } } }), 'session_configure_output');
     assert.equal(changed.applies, 'now');
     assert.equal(changed.effective.generation.outputTokens, 1024);
@@ -851,7 +971,7 @@ test('operator tools configure real sessions, answer Host interactions, and run 
       const status = toolData(await context.client.callTool({ name: 'ligule_run_status', arguments: { operationId: approveRun.operationId } }), 'operator_approval_status');
       return status.pendingInteractions.some((interaction) => interaction.type === 'approval') ? status : undefined;
     }, 'approval request');
-    const approval = approvalStatus.pendingInteractions.find((interaction) => interaction.type === 'approval');
+    const approval = approvalStatus.pendingInteractions.find((interaction) => interaction.type === 'approval')!;
     assert.equal(approval.details.tool, 'create');
     assert.equal(approval.details.args.path, 'operator-approved.txt');
     assert.equal(approvalStatus.waitingFor, 'approval');
@@ -888,14 +1008,14 @@ test('operator tools configure real sessions, answer Host interactions, and run 
       sessionId, requestId: denyStatus.requestId, type: 'approval', decision: 'deny',
     } }), 'operator_denial_reply');
     assert.equal((await waitForOutcome(context.client, denyRun.operationId)).state, 'done');
-    await assert.rejects(access(markerDenied), (error) => error.code === 'ENOENT');
+    await assert.rejects(access(markerDenied), (error: unknown) => (error as { code?: string }).code === 'ENOENT');
 
     toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId, changes: { policy: 'never' } } }), 'operator_set_never');
     const hardDenyRun = toolData(await context.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_OPERATOR_HARD_DENY' } }), 'operator_hard_deny_run');
     const hardDenyDone = await waitForOutcome(context.client, hardDenyRun.operationId);
     assert.equal(hardDenyDone.state, 'done');
     assert.equal(hardDenyDone.pendingInteractions.length, 0, 'a Policy hard denial is not exposed as an overridable approval');
-    await assert.rejects(access(markerHardDenied), (error) => error.code === 'ENOENT');
+    await assert.rejects(access(markerHardDenied), (error: unknown) => (error as { code?: string }).code === 'ENOENT');
     toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId, changes: { policy: 'ask' } } }), 'operator_restore_ask');
 
     const questionRun = toolData(await context.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_OPERATOR_QUESTION' } }), 'operator_question_run');
@@ -920,7 +1040,7 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     const sensitiveTool = JSON.parse(sensitiveToolRecord.record.json);
     assert.equal(sensitiveTool.result.kind, 'refusal');
     assert.equal(sensitiveTool.result.code, 'control_interaction_sensitive');
-    await assert.rejects(access(markerSensitive), (error) => error.code === 'ENOENT', 'sensitive approval data is denied before the command side effect');
+    await assert.rejects(access(markerSensitive), (error: unknown) => (error as { code?: string }).code === 'ENOENT', 'sensitive approval data is denied before the command side effect');
 
     const beforeSensitiveHeader = toolData(await context.client.callTool({
       name: 'ligule_session_read', arguments: { sessionId, limit: 50 },
@@ -938,7 +1058,7 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     const sensitiveHeaderTool = JSON.parse(sensitiveHeaderToolRecord.record.json);
     assert.equal(sensitiveHeaderTool.result.kind, 'refusal');
     assert.equal(sensitiveHeaderTool.result.code, 'control_interaction_sensitive');
-    await assert.rejects(access(markerSensitive), (error) => error.code === 'ENOENT', 'credential header is rejected without writing the file');
+    await assert.rejects(access(markerSensitive), (error: unknown) => (error as { code?: string }).code === 'ENOENT', 'credential header is rejected without writing the file');
 
     const staleRun = toolData(await context.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_OPERATOR_APPROVE' } }), 'operator_stale_approval_run');
     const staleApproval = await waitFor(async () => {
@@ -1013,7 +1133,7 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     draftGate.release();
     await context.close();
     endpoint.closeAllConnections();
-    await new Promise((done) => endpoint.close(done));
+    await new Promise<void>((done) => endpoint.close(() => done()));
     await rm(tempRoot, { recursive: true, force: true });
   }
 });

@@ -5,7 +5,22 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createConnection } from '../core/dist/host/connection.js';
+import type { Connection } from '../core/dist/host/connection.js';
 import { loadHostEnvironment } from '../core/dist/host/environment.js';
+
+// 协议回复没有生成类型；测试按自己读取的字段声明所需形状，再用窄转换标注。
+type Named = { sessionId: string };
+type Status = { running: boolean; model: string | null; serviceId: string; pendingModel: string | null };
+type Event = { seq: number; kind: string; status: string; code: string; userSeq: number; model: string };
+type Recorded = { events: Event[]; header: { projectRoot: string } };
+type View = {
+  model: { model: string; baseURL: string; api: string };
+  layers: { layer: string; version: string }[];
+  policyMode: string;
+};
+type Listing = { sessions: { id: string }[] };
+type Prefs = { settings: Record<string, unknown>; version: string };
+type Write = { version: string };
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 const cli = join(repository, 'tui', 'dist', 'cli.js');
@@ -40,9 +55,9 @@ test('project config cannot choose executable search backends while user and fla
   }
 });
 
-function deadline(pending, label) {
-  let timer;
-  const expired = new Promise((_, reject) => {
+function deadline<T>(pending: Promise<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<never>((_, reject) => {
     timer = setTimeout(() => reject(new Error(`${label} did not finish`)), 10_000);
   });
   return Promise.race([pending, expired]).finally(() => clearTimeout(timer));
@@ -55,7 +70,7 @@ function deadline(pending, label) {
 // never started" apart from "the request is slow" without enlarging the product timeout.
 const STARTUP_READY_MS = 60_000;
 
-async function ready(client, label = 'Host') {
+async function ready(client: Connection, label = 'Host') {
   const limit = Date.now() + STARTUP_READY_MS;
   for (;;) {
     const answered = await Promise.race([
@@ -67,7 +82,7 @@ async function ready(client, label = 'Host') {
   }
 }
 
-function startDesktop(projectRoot, dataRoot) {
+function startDesktop(projectRoot: string, dataRoot: string) {
   const child = spawn(process.execPath, [desktopEntry], {
     cwd: projectRoot,
     env: { ...process.env, LIGULE_HOME: dataRoot },
@@ -113,64 +128,64 @@ test('a real unconfigured host opens another workspace while settings remain ava
   try {
     await ready(client);
     assert.deepEqual(await deadline(client.request('prefs.read', {}), 'read preferences'), { settings: {}, version: '' });
-    const opened = await deadline(client.request('session.create', { projectRoot: second }), 'open unconfigured workspace');
-    const status = await deadline(client.request('status.get', { sessionId: opened.sessionId }), 'read session status');
+    const opened = await deadline(client.request('session.create', { projectRoot: second }), 'open unconfigured workspace') as Named;
+    const status = await deadline(client.request('status.get', { sessionId: opened.sessionId }), 'read session status') as Status;
     assert.equal(status.running, false);
     assert.equal(status.model, null);
-    const shown = await deadline(client.request('config.get', { projectRoot: second }), 'read model settings');
+    const shown = await deadline(client.request('config.get', { projectRoot: second }), 'read model settings') as View;
     assert.deepEqual(shown.model, {});
     assert.deepEqual(await client.request('credentials.status', { reference: 'LIGULE_BOOTSTRAP_KEY' }), { reference: 'LIGULE_BOOTSTRAP_KEY', source: 'environment', configured: true });
-    await assert.rejects(client.request('credentials.set', { reference: 'LIGULE_BOOTSTRAP_KEY', value: 'replacement' }), (error) => error.code === 'credential_environment_override');
-    await assert.rejects(client.request('credentials.delete', { reference: 'LIGULE_BOOTSTRAP_KEY' }), (error) => error.code === 'credential_environment_override');
-    const record = await client.request('session.read', { sessionId: opened.sessionId });
+    await assert.rejects(client.request('credentials.set', { reference: 'LIGULE_BOOTSTRAP_KEY', value: 'replacement' }), (error) => (error as { code: string }).code === 'credential_environment_override');
+    await assert.rejects(client.request('credentials.delete', { reference: 'LIGULE_BOOTSTRAP_KEY' }), (error) => (error as { code: string }).code === 'credential_environment_override');
+    const record = await client.request('session.read', { sessionId: opened.sessionId }) as Recorded;
     assert.equal(JSON.stringify({ shown, record }).includes('bootstrap-environment-key'), false);
-    await assert.rejects(client.request('run.start', { sessionId: opened.sessionId, input: 'an actual unconfigured run' }), error => error.code === 'host_model_config_missing');
-    const failed = await client.request('session.read', { sessionId: opened.sessionId });
+    await assert.rejects(client.request('run.start', { sessionId: opened.sessionId, input: 'an actual unconfigured run' }), error => (error as { code: string }).code === 'host_model_config_missing');
+    const failed = await client.request('session.read', { sessionId: opened.sessionId }) as Recorded;
     const turns = failed.events.filter(event => event.kind === 'turn');
     assert.equal(turns.length, 1);
     assert.equal(turns[0].status, 'failed');
     assert.equal(turns[0].code, 'host_model_config_missing');
-    assert.equal(turns[0].userSeq, failed.events.find(event => event.kind === 'user').seq);
-    let catalog = await client.request('config.get', { projectRoot: second });
+    assert.equal(turns[0].userSeq, failed.events.find(event => event.kind === 'user')!.seq);
+    let catalog = await client.request('config.get', { projectRoot: second }) as View;
     const services = [
       { id: 'alpha', name: 'Alpha', api: 'messages', baseURL: 'http://127.0.0.1:1', apiKeyEnv: 'LIGULE_BOOTSTRAP_KEY', models: ['alpha-1'] },
       { id: 'beta', name: 'Beta', api: 'chat-completions', baseURL: 'http://127.0.0.1:1', apiKeyEnv: 'LIGULE_BOOTSTRAP_KEY', models: ['beta-1', 'beta-2'] },
     ];
-    await client.request('config.set', { projectRoot: second, field: 'model.services', layer: 'user', version: catalog.layers.find(layer => layer.layer === 'user').version, value: services });
-    assert.equal((await client.request('status.get', { sessionId: opened.sessionId })).model, 'alpha-1');
-    assert.equal((await client.request('model.select', { sessionId: opened.sessionId, provider: 'beta', model: 'beta-2' })).when, 'now');
-    const peer = await client.request('session.create', { projectRoot: second });
-    assert.equal((await client.request('status.get', { sessionId: peer.sessionId })).model, 'alpha-1');
-    catalog = await client.request('config.get', { projectRoot: second });
-    await client.request('config.set', { projectRoot: second, field: 'model.selection', layer: 'user', version: catalog.layers.find(layer => layer.layer === 'user').version, value: { provider: 'alpha', model: 'alpha-1' } });
-    assert.equal((await client.request('status.get', { sessionId: opened.sessionId })).model, 'beta-2', '保存默认选择不切换已单独选择的会话');
+    await client.request('config.set', { projectRoot: second, field: 'model.services', layer: 'user', version: catalog.layers.find(layer => layer.layer === 'user')!.version, value: services });
+    assert.equal((await client.request('status.get', { sessionId: opened.sessionId }) as Status).model, 'alpha-1');
+    assert.equal((await client.request('model.select', { sessionId: opened.sessionId, provider: 'beta', model: 'beta-2' }) as { when: string }).when, 'now');
+    const peer = await client.request('session.create', { projectRoot: second }) as Named;
+    assert.equal((await client.request('status.get', { sessionId: peer.sessionId }) as Status).model, 'alpha-1');
+    catalog = await client.request('config.get', { projectRoot: second }) as View;
+    await client.request('config.set', { projectRoot: second, field: 'model.selection', layer: 'user', version: catalog.layers.find(layer => layer.layer === 'user')!.version, value: { provider: 'alpha', model: 'alpha-1' } });
+    assert.equal((await client.request('status.get', { sessionId: opened.sessionId }) as Status).model, 'beta-2', '保存默认选择不切换已单独选择的会话');
     await client.request('session.close', { sessionId: opened.sessionId });
     await client.request('session.open', { sessionId: opened.sessionId, projectRoot: second });
-    const restored = await client.request('status.get', { sessionId: opened.sessionId });
+    const restored = await client.request('status.get', { sessionId: opened.sessionId }) as Status;
     assert.equal(restored.model, 'beta-2');
     assert.equal(restored.serviceId, 'beta');
-    await assert.rejects(client.request('model.select', { sessionId: opened.sessionId, provider: 'alpha', model: 'unknown' }), error => error.code === 'model_not_available');
-    let signalStarted;
+    await assert.rejects(client.request('model.select', { sessionId: opened.sessionId, provider: 'alpha', model: 'unknown' }), error => (error as { code: string }).code === 'model_not_available');
+    let signalStarted: (value?: unknown) => void;
     const began = new Promise(resolve => { signalStarted = resolve; });
     client.onNotification(message => {
-      if (message.sessionId === opened.sessionId && message.event?.kind === 'user') signalStarted();
+      if (message.sessionId === opened.sessionId && (message.event as { kind?: string } | undefined)?.kind === 'user') signalStarted();
     });
     const running = client.request('run.start', { sessionId: opened.sessionId, input: 'cancel a real connection attempt' }).then(result => ({ result }), error => ({ error }));
     await deadline(began, 'observe the round input');
-    const selection = await client.request('model.select', { sessionId: opened.sessionId, provider: 'alpha', model: 'alpha-1' });
+    const selection = await client.request('model.select', { sessionId: opened.sessionId, provider: 'alpha', model: 'alpha-1' }) as { when: string };
     assert.equal(selection.when, 'round');
-    const during = await client.request('status.get', { sessionId: opened.sessionId });
+    const during = await client.request('status.get', { sessionId: opened.sessionId }) as Status;
     assert.equal(during.model, 'beta-2');
     assert.equal(during.pendingModel, 'alpha-1');
     await client.request('run.cancel', { sessionId: opened.sessionId });
-    const outcome = await deadline(running, 'cancel the actual model transport');
+    const outcome = await deadline(running, 'cancel the actual model transport') as { error?: { code: string } };
     assert.equal(outcome.error?.code, 'provider_cancelled');
-    const cancelled = await client.request('session.read', { sessionId: opened.sessionId });
-    assert.equal(cancelled.events.filter(event => event.kind === 'turn').at(-1).status, 'cancelled');
-    assert.equal(cancelled.events.filter(event => event.kind === 'turnContext').at(-1).model, 'beta-2');
-    assert.equal((await client.request('status.get', { sessionId: opened.sessionId })).model, 'alpha-1');
+    const cancelled = await client.request('session.read', { sessionId: opened.sessionId }) as Recorded;
+    assert.equal(cancelled.events.filter(event => event.kind === 'turn').at(-1)!.status, 'cancelled');
+    assert.equal(cancelled.events.filter(event => event.kind === 'turnContext').at(-1)!.model, 'beta-2');
+    assert.equal((await client.request('status.get', { sessionId: opened.sessionId }) as Status).model, 'alpha-1');
     await client.request('session.close', { sessionId: peer.sessionId });
-    const saved = await deadline(client.request('prefs.write', { json: '{"palette":"forest"}', version: '' }), 'save preferences');
+    const saved = await deadline(client.request('prefs.write', { json: '{"palette":"forest"}', version: '' }), 'save preferences') as Prefs;
     assert.deepEqual(saved.settings, { palette: 'forest' });
     assert.notEqual(saved.version, '');
     assert.deepEqual(JSON.parse(await readFile(join(data, 'desktop.json'), 'utf8')), saved.settings);
@@ -197,7 +212,7 @@ test('workspace history and local configuration keep their identity when the per
   for (const [path, name] of [[first, 'first-model'], [second, 'second-model']]) {
     await writeFile(join(path, '.ligule', 'config.local.toml'), `[model]\napi = "chat-completions"\nbaseURL = "http://127.0.0.1:1"\nmodel = "${name}"\n`, 'utf8');
   }
-  const start = (flags = []) => {
+  const start = (flags: string[] = []) => {
     const child = spawn(process.execPath, [cli, 'host', ...flags], { cwd: first, env: { ...process.env, LIGULE_HOME: data }, stdio: ['pipe', 'pipe', 'pipe'] });
     const exited = new Promise((done, reject) => { child.once('error', reject); child.once('close', done); });
     child.stderr.resume();
@@ -207,24 +222,24 @@ test('workspace history and local configuration keep their identity when the per
   let host = start();
   try {
     await ready(host.client);
-    const a = await deadline(host.client.request('session.create', {}), 'create first workspace session');
-    const b = await host.client.request('session.create', { projectRoot: second });
-    assert.equal((await host.client.request('session.read', { sessionId: a.sessionId })).header.projectRoot, first);
-    assert.equal((await host.client.request('session.read', { sessionId: b.sessionId })).header.projectRoot, second);
-    assert.deepEqual((await host.client.request('sessions.list', { projectRoot: first })).sessions.map(item => item.id), [a.sessionId]);
-    assert.deepEqual((await host.client.request('sessions.list', { projectRoot: second })).sessions.map(item => item.id), [b.sessionId]);
-    const settings = await host.client.request('config.get', {});
-    await host.client.request('config.set', { field: 'model.model', value: 'saved-for-first', layer: 'projectLocal', version: settings.layers.find(layer => layer.layer === 'projectLocal').version });
+    const a = await deadline(host.client.request('session.create', {}), 'create first workspace session') as Named;
+    const b = await host.client.request('session.create', { projectRoot: second }) as Named;
+    assert.equal((await host.client.request('session.read', { sessionId: a.sessionId }) as Recorded).header.projectRoot, first);
+    assert.equal((await host.client.request('session.read', { sessionId: b.sessionId }) as Recorded).header.projectRoot, second);
+    assert.deepEqual((await host.client.request('sessions.list', { projectRoot: first }) as Listing).sessions.map(item => item.id), [a.sessionId]);
+    assert.deepEqual((await host.client.request('sessions.list', { projectRoot: second }) as Listing).sessions.map(item => item.id), [b.sessionId]);
+    const settings = await host.client.request('config.get', {}) as View;
+    await host.client.request('config.set', { field: 'model.model', value: 'saved-for-first', layer: 'projectLocal', version: settings.layers.find(layer => layer.layer === 'projectLocal')!.version });
     assert.match(await readFile(join(first, '.ligule', 'config.local.toml'), 'utf8'), /saved-for-first/);
     assert.doesNotMatch(await readFile(join(second, '.ligule', 'config.local.toml'), 'utf8'), /saved-for-first/);
     await host.stop();
     host = start(['--config', `boundary = ${JSON.stringify(second)}`]);
     await ready(host.client);
-    const listed = await deadline(host.client.request('sessions.list', {}), 'list after a permission change');
+    const listed = await deadline(host.client.request('sessions.list', {}), 'list after a permission change') as Listing;
     assert.deepEqual(listed.sessions.map(item => item.id), [a.sessionId]);
     await host.client.request('session.open', { sessionId: a.sessionId });
-    assert.equal((await host.client.request('status.get', { sessionId: a.sessionId })).model, 'saved-for-first');
-    assert.equal((await host.client.request('session.read', { sessionId: a.sessionId })).header.projectRoot, first);
+    assert.equal((await host.client.request('status.get', { sessionId: a.sessionId }) as Status).model, 'saved-for-first');
+    assert.equal((await host.client.request('session.read', { sessionId: a.sessionId }) as Recorded).header.projectRoot, first);
   } finally {
     await host.stop();
     await rm(root, { recursive: true, force: true });
@@ -244,19 +259,19 @@ test('DesktopEntry keeps workspace identity separate from a shared permission bo
   let host = startDesktop(first, data);
   try {
     await ready(host.client);
-    const a = await deadline(host.client.request('session.create', {}), 'create DesktopEntry first workspace session');
-    const aRecord = await deadline(host.client.request('session.read', { sessionId: a.sessionId }), 'read DesktopEntry first session');
+    const a = await deadline(host.client.request('session.create', {}), 'create DesktopEntry first workspace session') as Named;
+    const aRecord = await deadline(host.client.request('session.read', { sessionId: a.sessionId }), 'read DesktopEntry first session') as Recorded;
     assert.equal(aRecord.header.projectRoot, first, 'the first session header follows DesktopEntry cwd, not the permission boundary');
 
-    const b = await deadline(host.client.request('session.create', { projectRoot: second }), 'create DesktopEntry second workspace session');
-    const bRecord = await deadline(host.client.request('session.read', { sessionId: b.sessionId }), 'read DesktopEntry second session');
+    const b = await deadline(host.client.request('session.create', { projectRoot: second }), 'create DesktopEntry second workspace session') as Named;
+    const bRecord = await deadline(host.client.request('session.read', { sessionId: b.sessionId }), 'read DesktopEntry second session') as Recorded;
     assert.equal(bRecord.header.projectRoot, second);
-    assert.deepEqual((await host.client.request('sessions.list', { projectRoot: first })).sessions.map((item) => item.id), [a.sessionId]);
-    assert.deepEqual((await host.client.request('sessions.list', { projectRoot: second })).sessions.map((item) => item.id), [b.sessionId]);
+    assert.deepEqual((await host.client.request('sessions.list', { projectRoot: first }) as Listing).sessions.map((item) => item.id), [a.sessionId]);
+    assert.deepEqual((await host.client.request('sessions.list', { projectRoot: second }) as Listing).sessions.map((item) => item.id), [b.sessionId]);
 
     for (const projectRoot of [first, second]) {
-      const shown = await host.client.request('config.get', { projectRoot });
-      const projectLayer = shown.layers.find((layer) => layer.layer === 'projectLocal');
+      const shown = await host.client.request('config.get', { projectRoot }) as View;
+      const projectLayer = shown.layers.find((layer) => layer.layer === 'projectLocal')!;
       await host.client.request('config.set', {
         projectRoot, field: 'policy.mode', value: 'never', layer: 'projectLocal', version: projectLayer.version,
       });
@@ -264,23 +279,23 @@ test('DesktopEntry keeps workspace identity separate from a shared permission bo
       assert.match(localConfig, /\[policy\]/);
       assert.match(localConfig, /mode = "never"/);
     }
-    assert.equal((await host.client.request('config.get', { projectRoot: first })).policyMode, 'never');
-    assert.equal((await host.client.request('config.get', { projectRoot: second })).policyMode, 'never');
-    await assert.rejects(readFile(join(boundary, '.ligule', 'config.local.toml')), (error) => error.code === 'ENOENT');
+    assert.equal((await host.client.request('config.get', { projectRoot: first }) as View).policyMode, 'never');
+    assert.equal((await host.client.request('config.get', { projectRoot: second }) as View).policyMode, 'never');
+    await assert.rejects(readFile(join(boundary, '.ligule', 'config.local.toml')), (error) => (error as { code: string }).code === 'ENOENT');
     await host.stop();
 
     host = startDesktop(first, data);
     await ready(host.client);
-    const listedFirst = await deadline(host.client.request('sessions.list', {}), 'list default DesktopEntry workspace after restart');
+    const listedFirst = await deadline(host.client.request('sessions.list', {}), 'list default DesktopEntry workspace after restart') as Listing;
     assert.deepEqual(listedFirst.sessions.map((item) => item.id), [a.sessionId]);
-    const listedSecond = await host.client.request('sessions.list', { projectRoot: second });
+    const listedSecond = await host.client.request('sessions.list', { projectRoot: second }) as Listing;
     assert.deepEqual(listedSecond.sessions.map((item) => item.id), [b.sessionId]);
     await host.client.request('session.open', { sessionId: a.sessionId });
     await host.client.request('session.open', { sessionId: b.sessionId, projectRoot: second });
-    assert.equal((await host.client.request('session.read', { sessionId: a.sessionId })).header.projectRoot, first);
-    assert.equal((await host.client.request('session.read', { sessionId: b.sessionId })).header.projectRoot, second);
-    assert.equal((await host.client.request('config.get', { projectRoot: first })).policyMode, 'never');
-    assert.equal((await host.client.request('config.get', { projectRoot: second })).policyMode, 'never');
+    assert.equal((await host.client.request('session.read', { sessionId: a.sessionId }) as Recorded).header.projectRoot, first);
+    assert.equal((await host.client.request('session.read', { sessionId: b.sessionId }) as Recorded).header.projectRoot, second);
+    assert.equal((await host.client.request('config.get', { projectRoot: first }) as View).policyMode, 'never');
+    assert.equal((await host.client.request('config.get', { projectRoot: second }) as View).policyMode, 'never');
     assert.match(await readFile(join(first, '.ligule', 'config.local.toml'), 'utf8'), /mode = "never"/);
     assert.match(await readFile(join(second, '.ligule', 'config.local.toml'), 'utf8'), /mode = "never"/);
     await host.stop();
