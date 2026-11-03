@@ -74,6 +74,10 @@ function packInfo(output, label) {
 }
 
 export async function packRelease(destination) {
+  // Build the runtime from the current checkout before packing so the recorded source SHA
+  // cannot describe a dist/ produced by a different commit.
+  process.stdout.write('building the workspace before packing\n');
+  execPnpm(['run', 'build'], { cwd: root, stdio: 'inherit' });
   const finalManifest = releaseManifest();
   const destinationDirectory = resolve(root, destination);
   await mkdir(join(root, 'testplace', 'tmp'), { recursive: true });
