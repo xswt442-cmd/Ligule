@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { benchmarkTimeoutMs, countsOf, positiveInteger, prepareRunDirectory, timeoutBasis } from './lib.ts';
+import { benchmarkTimeoutMs, countsOf, positiveInteger, prepareRunDirectory, readTarballProvenance, timeoutBasis } from './lib.ts';
 import { writeManifest } from './manifest.ts';
 
 const repository = fileURLToPath(new URL('../..', import.meta.url));
@@ -34,6 +35,28 @@ test('agent runner rejects unknown tasks and invalid outer timeouts before start
   const invalid = run(['--timeout-ms', '0']);
   assert.notEqual(invalid.status, 0);
   assert.match(invalid.stderr, /total_timeout_ms_must_be_positive_integer/u);
+});
+
+test('tarball provenance requires the sidecar digest and source SHA to match', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-provenance-'));
+  try {
+    const tarball = join(root, 'ligule.tgz');
+    await writeFile(tarball, 'fixture\n', 'utf8');
+    const sha = createHash('sha256').update('fixture\n').digest('hex');
+    const provenance = {
+      schemaVersion: 1, package: 'ligule', version: '0.1.2', tarball: 'ligule.tgz',
+      tarballSha256: sha, sourceGitSha: IDENTITY.gitSha, sourceDirty: false,
+      buildNodeVersion: 'v24.22.1', buildTimestamp: '2026-01-01T00:00:00.000Z', builder: 'fixture',
+    };
+    assert.equal((await readTarballProvenance(tarball, sha)).error, 'source_sidecar_missing');
+    await writeFile(`${tarball}.source.json`, `${JSON.stringify(provenance)}\n`, 'utf8');
+    assert.equal((await readTarballProvenance(tarball, sha)).provenance?.sourceGitSha, IDENTITY.gitSha);
+    assert.equal((await readTarballProvenance(tarball, '0'.repeat(64))).error, 'source_sidecar_digest_mismatch');
+    await writeFile(`${tarball}.source.json`, `${JSON.stringify({ ...provenance, sourceGitSha: 'short' })}\n`, 'utf8');
+    assert.equal((await readTarballProvenance(tarball, sha)).error, 'source_sidecar_git_sha_invalid');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('benchmark options reject zero repeats and invalid integers', () => {

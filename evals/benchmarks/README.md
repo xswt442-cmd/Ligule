@@ -6,7 +6,7 @@ Runs a frozen `terminal-bench@2.0` subset through the existing Harbor adapter an
 
 - Docker daemon reachable (`docker version`).
 - `uv` on `PATH`; the runner resolves Harbor `0.25.0` into the uv cache.
-- A built CLI tarball: `pnpm --filter ligule run pack-release`, then `--tarball <absolute path>` or `LIGULE_BENCH_TARBALL`.
+- A built CLI tarball: `pnpm --filter ligule run pack-release`, then `--tarball <absolute path>` or `LIGULE_BENCH_TARBALL`. Packing writes `<tarball>.source.json` with `sourceGitSha`, `sourceDirty`, `tarballSha256`, Node version, and build timestamp. The runner verifies the sidecar digest and uses its source SHA as the tested version; a missing/mismatched sidecar is recorded as `unknown`, never guessed.
 - Provider settings: `LIGULE_API_KEY`, `LIGULE_BENCH_BASE_URL`, `LIGULE_BENCH_MODEL`; optionally `LIGULE_BENCH_API` (`messages` by default). The base URL must not contain userinfo or credential-like query parameters; records keep only a sanitized URL. `git_sha` identifies the benchmark checkout, while the tarball is identified by its SHA-256; the tarball's source SHA is marked unknown when it cannot be verified.
 - Images without Node 24: set `LIGULE_BENCH_NODE_RUNTIME` to an official Linux Node 24 `.tar.gz` and `LIGULE_BENCH_NODE_RUNTIME_SHA256` to its official digest. Images that need a compiler for native npm modules: set `LIGULE_BENCH_BUILD_TOOLS=1`; the adapter installs only `build-essential`/`python3` when missing. `LIGULE_BENCH_APT_MIRROR=tsinghua` uses the adapter's temporary, signature-verified mirror when the default Debian mirror is unreachable.
 - The frozen dataset locally. Download once outside tracked files:

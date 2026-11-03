@@ -5,7 +5,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { arch, platform, release } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { activeBenchmarkOwner, benchmarkTimeoutMs, countsOf, positiveInteger, prepareRunDirectory, providerUrlProblem, runProcess, safeProviderUrl, timeoutBasis } from './lib.ts';
+import { activeBenchmarkOwner, benchmarkTimeoutMs, countsOf, positiveInteger, prepareRunDirectory, providerUrlProblem, readTarballProvenance, runProcess, safeProviderUrl, timeoutBasis } from './lib.ts';
 import { outputDirectoryFor, writeManifest } from './manifest.ts';
 import type { ManifestPlan, RunIdentity } from './manifest.ts';
 
@@ -152,7 +152,9 @@ async function runReport(runDirectory: string, apiKey: string, timeoutMs: number
 }
 
 async function main(): Promise<void> {
-  const plan = JSON.parse(await readFile(join(repository, 'evals', 'benchmarks', 'plan.json'), 'utf8')) as Plan;
+  const planPath = resolve(option('plan') ?? join(repository, 'evals', 'benchmarks', 'plan.json'));
+if (!existsSync(planPath)) throw new Error(`plan_missing:${planPath}`);
+  const plan = JSON.parse(await readFile(planPath, 'utf8')) as Plan;
   const requestedTasks = option('tasks')?.split(',').map((task) => task.trim()).filter(Boolean);
   const tasks = requestedTasks === undefined ? plan.tasks : plan.tasks.filter((task) => requestedTasks.includes(task.id));
   const unknownTasks = requestedTasks?.filter((id) => !plan.tasks.some((task) => task.id === id)) ?? [];
@@ -179,6 +181,7 @@ async function main(): Promise<void> {
     const prior = existsSync(join(runDirectory, 'run.json'))
       ? JSON.parse(await readFile(join(runDirectory, 'run.json'), 'utf8')) as {
           identity?: RunIdentity;
+          testedIdentity?: RunIdentity;
           model?: { baseUrl?: string | null; model?: string | null };
           plan?: Plan;
           tasks?: Plan['tasks'];
@@ -187,7 +190,8 @@ async function main(): Promise<void> {
         }
       : undefined;
     if (prior === undefined) throw new Error('collect_only_missing_run_json');
-    if (prior.identity?.gitSha === null || prior.identity?.gitSha === undefined) throw new Error('collect_only_missing_identity');
+    const collectedIdentity = prior.testedIdentity ?? prior.identity;
+    if (collectedIdentity?.gitSha === null || collectedIdentity?.gitSha === undefined) throw new Error('collect_only_missing_identity');
     const priorTaskIds = prior.tasks?.map((task) => task.id).sort();
     if (requestedTasks !== undefined && priorTaskIds !== undefined
       && JSON.stringify([...requestedTasks].sort()) !== JSON.stringify(priorTaskIds)) {
@@ -209,7 +213,7 @@ async function main(): Promise<void> {
     await writeFile(collectStatePath, `${JSON.stringify({ status: 'collecting', pid: process.pid, started: new Date().toISOString() }, null, 2)}\n`, 'utf8');
     try {
       const manifest = await writeManifest({
-        runDirectory, plan: collectedPlan, identity: prior.identity, model: collectedModel, baseUrl: safeProviderUrl(collectedBaseUrl) ?? undefined,
+        runDirectory, plan: collectedPlan, identity: collectedIdentity, model: collectedModel, baseUrl: safeProviderUrl(collectedBaseUrl) ?? undefined,
         jobPath, jobName: jobDefinition.job_name, startedAt, finishedAt,
       });
       let report;
@@ -226,7 +230,7 @@ async function main(): Promise<void> {
       if (counts === undefined) throw new Error('report_summary_missing_task_counts');
       await writeFile(join(runDirectory, 'collection.json'), `${JSON.stringify({
         collectedAt: new Date().toISOString(),
-        source: { gitSha: prior.identity.gitSha, model: collectedModel ?? null, baseUrl: collectedBaseUrl ?? null, started: startedAt, finished: finishedAt },
+        source: { gitSha: collectedIdentity.gitSha, model: collectedModel ?? null, baseUrl: collectedBaseUrl ?? null, started: startedAt, finished: finishedAt },
         manifest: manifest.path, attempts: manifest.attempts, notRun: manifest.notRun,
         startedWithoutResult: manifest.startedWithoutResult, counts,
         report: { directory: report.directory, json: report.json, markdown: report.markdown, summary: report.summary },
@@ -276,19 +280,23 @@ async function main(): Promise<void> {
 
   const identity = runIdentity();
   const blocked = Object.entries(checks).filter(([, check]) => !check.ok);
+  const tarballSha256 = tarball === undefined || !existsSync(tarball) ? null : await sha256(tarball);
+  const provenanceResult = tarball === undefined || tarballSha256 === null
+    ? { error: 'tarball_missing' }
+    : await readTarballProvenance(resolve(tarball), tarballSha256);
+  const testedIdentity: RunIdentity = provenanceResult.provenance === undefined
+    ? identity
+    : { ...identity, gitSha: provenanceResult.provenance.sourceGitSha, dirty: provenanceResult.provenance.sourceDirty };
   const baseRecord = {
     generatedAt: new Date().toISOString(),
     identity,
+    testedIdentity,
+    sourceProvenance: provenanceResult.provenance ?? { error: provenanceResult.error ?? 'unknown' },
     plan,
     datasetRoot,
     checks,
     tarball: tarball === undefined ? null : resolve(tarball),
-    tarballSha256: tarball === undefined || !existsSync(tarball) ? null : await sha256(tarball),
-    sourceProvenance: {
-      benchmarkGitSha: identity.gitSha,
-      tarballSourceSha: null,
-      note: 'git_sha identifies the benchmark checkout; the tarball is identified by SHA-256 only.',
-    },
+    tarballSha256,
     model: { api, baseUrl: safeProviderUrl(baseUrl), model: model ?? null },
   };
   if (blocked.length > 0) {
@@ -428,7 +436,7 @@ async function main(): Promise<void> {
   let manifestError: string | undefined;
   try {
     manifest = await writeManifest({
-      runDirectory, plan: { ...plan, tasks }, identity, model, baseUrl: safeProviderUrl(baseUrl) ?? undefined,
+      runDirectory, plan: { ...plan, tasks }, identity: testedIdentity, model, baseUrl: safeProviderUrl(baseUrl) ?? undefined,
       jobPath, jobName: job.job_name, startedAt: started, finishedAt: finished,
     });
   } catch (error) {

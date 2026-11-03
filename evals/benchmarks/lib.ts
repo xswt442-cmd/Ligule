@@ -134,6 +134,39 @@ export async function runProcess(
   });
 }
 
+export type TarballProvenance = {
+  sourceGitSha: string;
+  sourceDirty: boolean;
+  tarballSha256: string;
+  buildNodeVersion: string;
+  buildTimestamp: string;
+};
+
+export async function readTarballProvenance(tarball: string, actualSha256: string): Promise<{
+  provenance?: TarballProvenance;
+  error?: string;
+}> {
+  const path = `${tarball}.source.json`;
+  if (!existsSync(path)) return { error: 'source_sidecar_missing' };
+  let raw: Record<string, unknown>;
+  try { raw = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>; }
+  catch { return { error: 'source_sidecar_invalid_json' }; }
+  if (raw.schemaVersion !== 1) return { error: 'source_sidecar_unsupported' };
+  if (typeof raw.tarballSha256 !== 'string' || raw.tarballSha256 !== actualSha256) return { error: 'source_sidecar_digest_mismatch' };
+  if (typeof raw.sourceGitSha !== 'string' || !/^[0-9a-f]{40}$/u.test(raw.sourceGitSha)) return { error: 'source_sidecar_git_sha_invalid' };
+  if (typeof raw.sourceDirty !== 'boolean') return { error: 'source_sidecar_dirty_invalid' };
+  if (typeof raw.buildNodeVersion !== 'string' || typeof raw.buildTimestamp !== 'string') return { error: 'source_sidecar_build_metadata_invalid' };
+  return {
+    provenance: {
+      sourceGitSha: raw.sourceGitSha,
+      sourceDirty: raw.sourceDirty,
+      tarballSha256: raw.tarballSha256,
+      buildNodeVersion: raw.buildNodeVersion,
+      buildTimestamp: raw.buildTimestamp,
+    },
+  };
+}
+
 export function safeProviderUrl(value: string | undefined): string | null {
   if (value === undefined) return null;
   try {
