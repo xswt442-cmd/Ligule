@@ -4,13 +4,15 @@ import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
 
 const REPOSITORY_ROOT = fileURLToPath(new URL('..', import.meta.url));
-const SOURCE_ROOTS = ['core/src', 'tui/src', 'desktop', 'scripts', 'tests', 'core/tests', 'tui/tests'];
+const SOURCE_ROOTS: readonly string[] = ['core/src', 'tui/src', 'desktop', 'scripts', 'tests', 'core/tests', 'tui/tests'];
 const SOURCE_EXTENSIONS = new Set(['.js', '.mjs', '.cjs']);
 const SKIPPED_DIRECTORIES = new Set(['.git', 'node_modules', 'dist', 'vendor', 'release', 'testplace']);
 
-export function collectJavaScriptFiles(root = REPOSITORY_ROOT, directories = SOURCE_ROOTS) {
-  const found = [];
-  const visit = (directory) => {
+export type SyntaxFailure = { file: string; output: string };
+
+export function collectJavaScriptFiles(root: string = REPOSITORY_ROOT, directories: readonly string[] = SOURCE_ROOTS): string[] {
+  const found: string[] = [];
+  const visit = (directory: string): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
       if (entry.isDirectory()) {
         if (!SKIPPED_DIRECTORIES.has(entry.name)) visit(join(directory, entry.name));
@@ -28,8 +30,8 @@ export function collectJavaScriptFiles(root = REPOSITORY_ROOT, directories = SOU
   return [...new Set(found)].sort();
 }
 
-export function checkJavaScriptFiles(files, node = process.execPath) {
-  const failures = [];
+export function checkJavaScriptFiles(files: readonly string[], node: string = process.execPath): SyntaxFailure[] {
+  const failures: SyntaxFailure[] = [];
   for (const file of files) {
     const result = spawnSync(node, ['--check', file], { encoding: 'utf8', windowsHide: true });
     if (result.error !== undefined || result.status !== 0) {
@@ -42,7 +44,7 @@ export function checkJavaScriptFiles(files, node = process.execPath) {
   return failures;
 }
 
-function extensionOf(name) {
+function extensionOf(name: string): string {
   const dot = name.lastIndexOf('.');
   return dot < 0 ? '' : name.slice(dot);
 }

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
-import { checkJavaScriptFiles, collectJavaScriptFiles } from '../scripts/check-js-syntax.mjs';
+import { checkJavaScriptFiles, collectJavaScriptFiles } from '../scripts/check-js-syntax.ts';
 
 test('the repository syntax checker scans tests/ and rejects invalid JavaScript', async () => {
   const parent = join(process.cwd(), 'testplace', 'tmp');

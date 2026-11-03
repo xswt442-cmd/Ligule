@@ -16,7 +16,7 @@
     "check-pack": "pnpm --filter ligule run check-pack",
     "verify-install": "pnpm --filter ligule run verify-install",
     "check:dependencies": "node scripts/check-dependencies.mjs",
-    "check:syntax": "node scripts/check-js-syntax.mjs",
+    "check:syntax": "node scripts/check-js-syntax.ts",
     "prepare-runtime": "pnpm --filter ligule-desktop run prepare-runtime",
     "registry-version": "node scripts/registry-version.js"
   },
