@@ -44,6 +44,7 @@ export const shellOutput: Scenario = {
       if (record) {
         samples.push({
           workload: `${bytes / (1024 * 1024)}-MiB-output`,
+          outputBytes: bytes,
           durationMs,
           benchmarkProcessRssDeltaBytes,
           returnedTextCharacters: result.text.length,
