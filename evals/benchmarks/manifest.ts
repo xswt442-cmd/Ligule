@@ -26,18 +26,14 @@ type HarborTrial = {
   task_name?: unknown;
   trial_name?: unknown;
   task_id?: unknown;
-  exception_info?: unknown;
-  verifier_result?: { rewards?: Record<string, unknown> } | null;
-  started_at?: unknown;
-  finished_at?: unknown;
 };
 
 export type TaskCounts = { pass: number; fail: number; infra_error: number; not_run: number; total: number };
 
 export type ManifestResult = {
   path: string;
-  counts: TaskCounts;
-  results: { taskId: string; status: string; reward: number | null }[];
+  attempts: number;
+  notRun: number;
 };
 
 async function findFiles(root: string, name: string): Promise<string[]> {
@@ -52,16 +48,9 @@ function posixRelative(root: string, path: string): string {
   return relative(root, path).split(sep).join('/');
 }
 
-function numericReward(result: HarborTrial, key: string): number | null {
-  const value = result.verifier_result?.rewards?.[key];
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
-function classify(result: HarborTrial, key: string, threshold: number): { status: string; reward: number | null } {
-  const reward = numericReward(result, key);
-  if (result.exception_info !== null && result.exception_info !== undefined) return { status: 'infra_error', reward };
-  if (reward === null) return { status: 'infra_error', reward: null };
-  return { status: reward >= threshold ? 'pass' : 'fail', reward };
+function trialResultPath(root: string, path: string): boolean {
+  const parts = posixRelative(root, path).split('/');
+  return parts.length === 4 && parts[0] === 'harbor' && parts[2].includes('__');
 }
 
 export async function writeManifest({
@@ -88,17 +77,21 @@ export async function writeManifest({
   const trialFiles = existsSync(harborDirectory) ? await findFiles(harborDirectory, 'result.json') : [];
   const trials = new Map<string, { path: string; result: HarborTrial }[]>();
   for (const path of trialFiles) {
+    if (!trialResultPath(runDirectory, path)) continue;
     let result: HarborTrial;
     try { result = JSON.parse(await readFile(path, 'utf8')) as HarborTrial; }
-    catch { continue; }
-    if (typeof result.task_name !== 'string' || typeof result.trial_name !== 'string') continue;
+    catch (error) {
+      throw new Error(`malformed_harbor_result:${posixRelative(runDirectory, path)}:${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (typeof result.task_name !== 'string' || typeof result.trial_name !== 'string') {
+      throw new Error(`malformed_harbor_result:${posixRelative(runDirectory, path)}`);
+    }
     const list = trials.get(result.task_name) ?? [];
     list.push({ path, result });
     trials.set(result.task_name, list);
   }
 
   const attempts: Record<string, unknown>[] = [];
-  const classifications: ManifestResult['results'] = [];
   for (const task of plan.tasks) {
     const taskTrials = (trials.get(task.id) ?? []).sort((left, right) => String(left.result.trial_name).localeCompare(String(right.result.trial_name)));
     if (taskTrials.length === 0) {
@@ -107,13 +100,11 @@ export async function writeManifest({
         trial_name: null, harbor_task_id: null, result_file: null,
         trajectory_file: null, artifact_files: [], not_run_reason: 'harbor_not_completed',
       });
-      classifications.push({ taskId: task.id, status: 'not_run', reward: null });
       continue;
     }
     taskTrials.slice(0, plan.attempts_per_task).forEach((trial, index) => {
       const resultDirectory = join(trial.path, '..');
       const trajectory = join(resultDirectory, 'agent', 'trajectory.json');
-      const classified = classify(trial.result, plan.verifier.reward_key, plan.verifier.pass_threshold);
       attempts.push({
         task_id: task.id,
         category: task.category,
@@ -125,7 +116,6 @@ export async function writeManifest({
         artifact_files: [],
         not_run_reason: null,
       });
-      classifications.push({ taskId: task.id, status: classified.status, reward: classified.reward });
     });
   }
 
@@ -169,14 +159,11 @@ export async function writeManifest({
   };
   const path = join(runDirectory, 'manifest.json');
   await writeFile(path, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
-  const counts: TaskCounts = { pass: 0, fail: 0, infra_error: 0, not_run: 0, total: attempts.length };
-  for (const entry of classifications) {
-    if (entry.status === 'pass') counts.pass += 1;
-    else if (entry.status === 'fail') counts.fail += 1;
-    else if (entry.status === 'not_run') counts.not_run += 1;
-    else counts.infra_error += 1;
-  }
-  return { path, counts, results: classifications };
+  return {
+    path,
+    attempts: attempts.length,
+    notRun: attempts.filter((attempt) => attempt.not_run_reason !== null).length,
+  };
 }
 
 export function outputDirectoryFor(runDirectory: string): string {

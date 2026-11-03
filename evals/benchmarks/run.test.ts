@@ -80,7 +80,32 @@ test('task summary counts require all report denominators', () => {
   assert.equal(countsOf({ pass: 1 }), undefined);
 });
 
-test('the manifest classifies pass, fail, infrastructure error, and not-run attempts', async () => {
+test('the manifest rejects malformed trial results instead of hiding them as not-run', async () => {
+  const runDirectory = await mkdtemp(join(tmpdir(), 'ligule-manifest-broken-'));
+  try {
+    const job = join(runDirectory, 'job.json');
+    await writeFile(job, '{}\n', 'utf8');
+    const trial = join(runDirectory, 'harbor', 'job-1', 'broken__1');
+    await mkdir(trial, { recursive: true });
+    await writeFile(join(trial, 'result.json'), '{"task_name": "broken"\n', 'utf8');
+    const plan = {
+      dataset: { name: 'terminal-bench', version: '2.0' },
+      tasks: [{ id: 'broken', category: 'fixture', covers: 'broken' }],
+      attempts_per_task: 1,
+      concurrency: 1,
+      model: { model_calls: 1, timeout_ms: 1, request_timeout_ms: 1 },
+      verifier: { reward_key: 'reward', pass_threshold: 1 },
+    };
+    await assert.rejects(() => writeManifest({
+      runDirectory, plan, identity: IDENTITY, model: 'fixture-model', baseUrl: 'https://provider.invalid/v1',
+      jobPath: job, startedAt: '2026-01-01T00:00:00.000Z', finishedAt: '2026-01-01T00:01:00.000Z',
+    }), /malformed_harbor_result/u);
+  } finally {
+    await rm(runDirectory, { recursive: true, force: true });
+  }
+});
+
+test('the manifest records attempts without inventing task outcomes', async () => {
   const runDirectory = await mkdtemp(join(tmpdir(), 'ligule-manifest-'));
   try {
     const job = join(runDirectory, 'job.json');
@@ -117,7 +142,7 @@ test('the manifest classifies pass, fail, infrastructure error, and not-run atte
       runDirectory, plan, identity: IDENTITY, model: 'fixture-model', baseUrl: 'https://provider.invalid/v1',
       jobPath: job, startedAt: '2026-01-01T00:00:00.000Z', finishedAt: '2026-01-01T01:00:00.000Z',
     });
-    assert.deepEqual(result.counts, { pass: 1, fail: 1, infra_error: 1, not_run: 1, total: 4 });
+    assert.deepEqual({ attempts: result.attempts, notRun: result.notRun }, { attempts: 4, notRun: 1 });
     const manifest = JSON.parse(await readFile(join(runDirectory, 'manifest.json'), 'utf8')) as {
       experiment: Record<string, unknown>;
       attempts: Record<string, unknown>[];
@@ -132,6 +157,7 @@ test('the manifest classifies pass, fail, infrastructure error, and not-run atte
     assert.equal(missing?.result_file, null);
     assert.equal(missing?.trial_name, null);
     assert.equal(missing?.not_run_reason, 'harbor_not_completed');
+    assert.equal('counts' in result, false);
     assert.equal(JSON.stringify(manifest).includes('\\'), false);
   } finally {
     await rm(runDirectory, { recursive: true, force: true });

@@ -74,11 +74,31 @@ function harborEnvironment(apiKey: string): NodeJS.ProcessEnv {
   };
 }
 
-function trialContainerNames(taskIds: readonly string[]): string[] {
-  const listed = spawnSync('docker', ['ps', '--format', '{{.Names}}'], { encoding: 'utf8', windowsHide: true, timeout: 30_000 });
+async function currentTrialNames(harborDirectory: string): Promise<string[]> {
+  if (!existsSync(harborDirectory)) return [];
+  const names: string[] = [];
+  for (const job of await readdir(harborDirectory, { withFileTypes: true })) {
+    if (!job.isDirectory()) continue;
+    for (const trial of await readdir(join(harborDirectory, job.name), { withFileTypes: true })) {
+      if (trial.isDirectory() && trial.name.includes('__')) names.push(trial.name);
+    }
+  }
+  return names;
+}
+
+function trialContainerNames(trialNames: readonly string[]): string[] {
+  const listed = spawnSync('docker', ['ps', '--format', '{{.Names}}|{{.Label "com.docker.compose.project"}}'], {
+    encoding: 'utf8', windowsHide: true, timeout: 30_000,
+  });
   if (listed.status !== 0) return [];
-  return (listed.stdout ?? '').split(/\r?\n/u).filter((name) =>
-    name.includes('__env-main-') && taskIds.some((id) => name.startsWith(`${id}__`)));
+  const current = new Set(trialNames.map((name) => name.toLowerCase()));
+  return (listed.stdout ?? '').split(/\r?\n/u).flatMap((line) => {
+    const [name, project = ''] = line.split('|');
+    if (!name.includes('__env-main-')) return [];
+    const lowerName = name.toLowerCase();
+    const lowerProject = project.toLowerCase();
+    return [...current].some((trial) => lowerName.startsWith(`${trial}__`) || lowerProject.startsWith(`${trial}__env`)) ? [name] : [];
+  });
 }
 
 function removeContainers(names: readonly string[]): { removed: string[]; failed: string[] } {
@@ -152,28 +172,45 @@ async function main(): Promise<void> {
     const runDirectory = resolve(requested);
     const jobPath = join(runDirectory, 'job.json');
     if (!existsSync(jobPath)) throw new Error(`collect_only_missing_job_json:${jobPath}`);
-    const identity = runIdentity();
     const prior = existsSync(join(runDirectory, 'run.json'))
-      ? JSON.parse(await readFile(join(runDirectory, 'run.json'), 'utf8')) as { model?: { baseUrl?: string | null; model?: string | null } }
+      ? JSON.parse(await readFile(join(runDirectory, 'run.json'), 'utf8')) as {
+          identity?: RunIdentity;
+          model?: { baseUrl?: string | null; model?: string | null };
+          plan?: Plan;
+          tasks?: Plan['tasks'];
+          started?: string;
+          finished?: string;
+        }
+      : undefined;
+    if (prior === undefined) throw new Error('collect_only_missing_run_json');
+    if (prior.identity?.gitSha === null || prior.identity?.gitSha === undefined) throw new Error('collect_only_missing_identity');
+    const collectedPlan = prior.plan === undefined ? { ...plan, tasks } : { ...prior.plan, tasks: prior.tasks ?? prior.plan.tasks };
+    const collectedModel = prior.model?.model ?? model ?? undefined;
+    const collectedBaseUrl = prior.model?.baseUrl ?? baseUrl ?? undefined;
+    const state = existsSync(join(runDirectory, 'run-state.json'))
+      ? JSON.parse(await readFile(join(runDirectory, 'run-state.json'), 'utf8')) as { started?: string; finished?: string }
       : {};
-    const collectedModel = model ?? prior.model?.model ?? undefined;
-    const collectedBaseUrl = baseUrl ?? prior.model?.baseUrl ?? undefined;
+    const startedAt = prior.started ?? state.started ?? new Date().toISOString();
+    const finishedAt = prior.finished ?? state.finished ?? new Date().toISOString();
     const manifest = await writeManifest({
-      runDirectory, plan: { ...plan, tasks }, identity, model: collectedModel, baseUrl: collectedBaseUrl, jobPath,
-      startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+      runDirectory, plan: collectedPlan, identity: prior.identity, model: collectedModel, baseUrl: collectedBaseUrl, jobPath,
+      startedAt, finishedAt,
     });
     let report;
     try { report = await runReport(runDirectory, apiKey ?? 'unused-for-collection'); }
     catch (error) {
       await writeFile(join(runDirectory, 'collection.json'), `${JSON.stringify({
-        collectedAt: new Date().toISOString(), manifest: manifest.path, counts: manifest.counts,
+        collectedAt: new Date().toISOString(), manifest: manifest.path, attempts: manifest.attempts, notRun: manifest.notRun,
         error: error instanceof Error ? error.message : String(error),
       }, null, 2)}\n`, 'utf8');
       throw error;
     }
-    const counts = countsOf(report.summary) ?? manifest.counts;
+    const counts = countsOf(report.summary);
+    if (counts === undefined) throw new Error('report_summary_missing_task_counts');
     await writeFile(join(runDirectory, 'collection.json'), `${JSON.stringify({
-      collectedAt: new Date().toISOString(), manifest: manifest.path, counts,
+      collectedAt: new Date().toISOString(),
+      source: { gitSha: prior.identity.gitSha, model: collectedModel ?? null, baseUrl: collectedBaseUrl ?? null, started: startedAt, finished: finishedAt },
+      manifest: manifest.path, counts,
       report: { directory: report.directory, json: report.json, markdown: report.markdown, summary: report.summary },
     }, null, 2)}\n`, 'utf8');
     process.stdout.write(`Collected existing Harbor output: pass ${counts.pass}, fail ${counts.fail}, infra_error ${counts.infra_error}, not_run ${counts.not_run}, total ${counts.total}\nArtifacts: ${runDirectory}\n`);
@@ -279,6 +316,17 @@ async function main(): Promise<void> {
   };
   const jobPath = join(runDirectory, 'job.json');
   await writeFile(jobPath, `${JSON.stringify(job, null, 2)}\n`, 'utf8');
+  const started = new Date().toISOString();
+  await writeFile(join(runDirectory, 'run.json'), `${JSON.stringify({
+    ...baseRecord,
+    executionStatus: 'running',
+    started,
+    timeoutMs,
+    timeoutBasis: timeoutBasis(plan, tasks.length),
+    jobPath,
+    harborDirectory,
+    tasks,
+  }, null, 2)}\n`, 'utf8');
 
   const args = [
     'run', '--no-project', '--with', `harbor==${HARBOR_VERSION}`, 'harbor', 'run',
@@ -292,7 +340,6 @@ async function main(): Promise<void> {
     '--max-retries', '0',
     '--yes',
   ];
-  const started = new Date().toISOString();
   await writeFile(join(runDirectory, 'run-state.json'), `${JSON.stringify({
     status: 'running',
     started,
@@ -330,7 +377,7 @@ async function main(): Promise<void> {
     error: execution.error?.message ?? null,
   }, null, 2)}\n`, 'utf8');
 
-  const leftovers = executionStatus === 'completed' ? [] : trialContainerNames(tasks.map((task) => task.id));
+  const leftovers = executionStatus === 'completed' ? [] : trialContainerNames(await currentTrialNames(harborDirectory));
   const cleanup = leftovers.length === 0 ? { removed: [], failed: [] } : removeContainers(leftovers);
 
   let manifest;
@@ -349,7 +396,7 @@ async function main(): Promise<void> {
     try { report = await runReport(runDirectory, apiKey as string); }
     catch (error) { reportError = error instanceof Error ? error.message : String(error); }
   }
-  const taskCounts = report === undefined ? manifest?.counts : countsOf(report.summary) ?? manifest?.counts;
+  const taskCounts = report === undefined ? undefined : countsOf(report.summary);
   const record = {
     ...baseRecord,
     executionStatus,
@@ -366,7 +413,7 @@ async function main(): Promise<void> {
     stdout: stdoutPath,
     stderr: stderrPath,
     tasks,
-    manifest: manifest === undefined ? { error: manifestError } : { path: manifest.path, counts: manifest.counts, results: manifest.results },
+    manifest: manifest === undefined ? { error: manifestError } : { path: manifest.path, attempts: manifest.attempts, notRun: manifest.notRun },
     report: report === undefined ? { error: reportError } : {
       directory: report.directory,
       json: report.json,
