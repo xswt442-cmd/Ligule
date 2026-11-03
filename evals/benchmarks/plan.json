@@ -19,7 +19,7 @@
   "concurrency": 3,
   "timeout_multipliers": {
     "task": 1.0,
-    "agent": 1.0,
+    "agent": 4.0,
     "agent_setup": 4.0,
     "environment_build": 2.0
   },
