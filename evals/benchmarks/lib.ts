@@ -149,8 +149,11 @@ export async function readTarballProvenance(tarball: string, actualSha256: strin
   const path = `${tarball}.source.json`;
   if (!existsSync(path)) return { error: 'source_sidecar_missing' };
   let raw: Record<string, unknown>;
-  try { raw = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>; }
-  catch { return { error: 'source_sidecar_invalid_json' }; }
+  try {
+    const parsed = JSON.parse(await readFile(path, 'utf8')) as unknown;
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return { error: 'source_sidecar_invalid_json' };
+    raw = parsed as Record<string, unknown>;
+  } catch { return { error: 'source_sidecar_invalid_json' }; }
   if (raw.schemaVersion !== 1) return { error: 'source_sidecar_unsupported' };
   if (typeof raw.tarballSha256 !== 'string' || raw.tarballSha256 !== actualSha256) return { error: 'source_sidecar_digest_mismatch' };
   if (typeof raw.sourceGitSha !== 'string' || !/^[0-9a-f]{40}$/u.test(raw.sourceGitSha)) return { error: 'source_sidecar_git_sha_invalid' };

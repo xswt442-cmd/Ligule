@@ -42,7 +42,7 @@ pnpm run bench:agent -- --plan evals/benchmarks/canary-plan.json \
   --dataset-dir evals/benchmarks/canary --tasks canary
 ```
 
-The canary image uses a locally available base image so the check does not depend on a Docker Hub pull. It validates the provider, Ligule Session/tool path, Harbor adapter, report manifest, and verifier without mixing the result into the eight-task benchmark.
+The canary image uses a locally available base image so the check does not depend on a Docker Hub pull. It validates the provider, Ligule Session/tool path, Harbor adapter, report manifest, and verifier without mixing the result into the eight-task benchmark. To recover a canary run with `--collect-only`, pass the same plan: `--plan evals/benchmarks/canary-plan.json`.
 
 ## Plan and scoring
 

@@ -54,6 +54,8 @@ test('tarball provenance requires the sidecar digest and source SHA to match', a
     assert.equal((await readTarballProvenance(tarball, '0'.repeat(64))).error, 'source_sidecar_digest_mismatch');
     await writeFile(`${tarball}.source.json`, `${JSON.stringify({ ...provenance, sourceGitSha: 'short' })}\n`, 'utf8');
     assert.equal((await readTarballProvenance(tarball, sha)).error, 'source_sidecar_git_sha_invalid');
+    await writeFile(`${tarball}.source.json`, 'null\n', 'utf8');
+    assert.equal((await readTarballProvenance(tarball, sha)).error, 'source_sidecar_invalid_json');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
