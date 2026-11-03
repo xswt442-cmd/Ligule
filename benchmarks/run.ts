@@ -1,4 +1,5 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { environmentInformation, markdownReport, summaryOf, writeJson } from './lib.ts';
@@ -16,26 +17,40 @@ function option(name: string): string | undefined {
   return index < 0 ? undefined : process.argv[index + 1];
 }
 
-function integerOption(name: string, fallback: number): number {
+function integerOption(name: string, fallback: number, minimum: number): number {
   const value = option(name);
   if (value === undefined) return fallback;
   const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`invalid --${name}: ${value}`);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum) throw new Error(`invalid --${name}: ${value}; minimum is ${minimum}`);
   return parsed;
 }
 
-const repeats = integerOption('repeats', 5);
-const warmup = integerOption('warmup', 1);
+const repeats = integerOption('repeats', 5, 1);
+const warmup = integerOption('warmup', 1, 0);
+const allowBlocked = process.argv.includes('--allow-blocked');
+const force = process.argv.includes('--force');
 const selected = option('scenario')?.split(',').map((name) => name.trim()).filter(Boolean);
+const unknownScenarios = selected?.filter((name) => !SCENARIOS.some((scenario) => scenario.name === name)) ?? [];
+if (unknownScenarios.length > 0) throw new Error(`unknown benchmark scenario: ${unknownScenarios.join(', ')}; available: ${SCENARIOS.map((scenario) => scenario.name).join(', ')}`);
 const scenarios = selected === undefined ? SCENARIOS : SCENARIOS.filter((scenario) => selected.includes(scenario.name));
-if (scenarios.length === 0) throw new Error(`no benchmark scenario matches ${selected?.join(',')}`);
+if (scenarios.length === 0) throw new Error('no benchmark scenario selected');
 
 const generatedAt = new Date().toISOString();
 const environment = environmentInformation(repository);
 const stamp = generatedAt.replace(/[:.]/g, '-');
-const runDirectory = option('output') === undefined
-  ? join(repository, 'testplace', 'benchmarks', `${stamp}-${String(environment.gitSha ?? 'nogit').slice(0, 7)}`)
-  : resolve(option('output') as string);
+const requestedOutput = option('output');
+let runDirectory: string;
+if (requestedOutput === undefined) {
+  runDirectory = join(repository, 'testplace', 'benchmarks', `${stamp}-${String(environment.gitSha ?? 'nogit').slice(0, 7)}`);
+} else {
+  runDirectory = resolve(requestedOutput);
+  if (existsSync(runDirectory)) {
+    if (!force) throw new Error(`output_directory_exists:${runDirectory}; pass --force to preserve it as a previous run`);
+    const previous = `${runDirectory}.previous-${stamp}`;
+    await rename(runDirectory, previous);
+    process.stdout.write(`Preserved existing output at ${previous}\n`);
+  }
+}
 const workRoot = join(runDirectory, 'tmp');
 await mkdir(workRoot, { recursive: true });
 
@@ -56,10 +71,13 @@ for (const scenario of scenarios) {
   process.stdout.write(`${scenario.name}: ${results[results.length - 1].status} (${Math.round(performance.now() - started)} ms)\n`);
 }
 
+const blockedScenarios = results.filter((result) => result.status === 'blocked').map((result) => result.name);
 const summary = {
   generatedAt,
   repeats,
   warmup,
+  allowBlocked,
+  blockedScenarios,
   environment,
   scenarios: results.map((result) => ({
     name: result.name,
@@ -86,4 +104,7 @@ for (const scenario of summary.scenarios) {
 }
 process.stdout.write(`\nArtifacts: ${runDirectory}\n`);
 
-if (results.some((result) => result.status === 'error')) process.exitCode = 1;
+if (blockedScenarios.length > 0 && !allowBlocked) {
+  process.stdout.write(`Blocked scenarios: ${blockedScenarios.join(', ')}. Pass --allow-blocked for a partial diagnostic run.\n`);
+}
+if (results.some((result) => result.status === 'error') || (blockedScenarios.length > 0 && !allowBlocked)) process.exitCode = 1;

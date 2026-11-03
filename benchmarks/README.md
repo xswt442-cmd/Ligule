@@ -10,7 +10,9 @@ pnpm run bench:perf -- --repeats 9 --warmup 1
 pnpm run bench:perf -- --scenario session-jsonl --repeats 20
 ```
 
-The default is 5 recorded samples and 1 warmup per scenario. Build the workspace first; `bench:perf` does this. Each run writes `raw.jsonl`, `summary.json`, and `summary.md` under `testplace/benchmarks/<timestamp>-<sha>/`, which is not tracked.
+The default is 5 recorded samples and at least 1 warmup; `--repeats` must be at least 1. Unknown scenario names fail the run instead of being ignored. Build the workspace first; `bench:perf` does this. Each run writes `raw.jsonl`, `summary.json`, and `summary.md` under `testplace/benchmarks/<timestamp>-<sha>/`, which is not tracked.
+
+An explicit `--output` fails if the directory already exists; `--force` renames the old directory to `<output>.previous-<timestamp>` and keeps it. A scenario that reports `blocked` (for example, an unavailable execution backend) makes the run exit non-zero unless `--allow-blocked` is passed for a deliberate partial diagnostic run.
 
 ## Scenarios
 
