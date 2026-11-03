@@ -155,16 +155,27 @@ async function main(): Promise<void> {
   const planPath = resolve(option('plan') ?? join(repository, 'evals', 'benchmarks', 'plan.json'));
 if (!existsSync(planPath)) throw new Error(`plan_missing:${planPath}`);
   const plan = JSON.parse(await readFile(planPath, 'utf8')) as Plan;
+  const collectOnly = process.argv.includes('--collect-only');
+  let validationTasks = plan.tasks;
+  if (collectOnly) {
+    const requestedOutput = option('output');
+    if (requestedOutput !== undefined) {
+      const priorPath = join(resolve(requestedOutput), 'run.json');
+      if (existsSync(priorPath)) {
+        const prior = JSON.parse(await readFile(priorPath, 'utf8')) as { plan?: Plan; tasks?: Plan['tasks'] };
+        if (prior.plan !== undefined) validationTasks = prior.tasks ?? prior.plan.tasks;
+      }
+    }
+  }
   const requestedTasks = option('tasks')?.split(',').map((task) => task.trim()).filter(Boolean);
-  const tasks = requestedTasks === undefined ? plan.tasks : plan.tasks.filter((task) => requestedTasks.includes(task.id));
-  const unknownTasks = requestedTasks?.filter((id) => !plan.tasks.some((task) => task.id === id)) ?? [];
+  const tasks = requestedTasks === undefined ? validationTasks : validationTasks.filter((task) => requestedTasks.includes(task.id));
+  const unknownTasks = requestedTasks?.filter((id) => !validationTasks.some((task) => task.id === id)) ?? [];
   if (unknownTasks.length > 0) throw new Error(`unknown benchmark tasks: ${unknownTasks.join(', ')}`);
   if (tasks.length === 0) throw new Error('no benchmark tasks selected');
   const timeoutOverride = positiveInteger(option('timeout-ms') ?? process.env.LIGULE_BENCH_TOTAL_TIMEOUT_MS, 'total_timeout_ms');
   const timeoutMs = benchmarkTimeoutMs(plan, tasks.length, timeoutOverride);
   const reportTimeoutMs = positiveInteger(process.env.LIGULE_BENCH_REPORT_TIMEOUT_MS, 'report_timeout_ms') ?? 10 * 60 * 1000;
   const force = process.argv.includes('--force');
-  const collectOnly = process.argv.includes('--collect-only');
   const tarball = option('tarball') ?? process.env.LIGULE_BENCH_TARBALL;
   const datasetRoot = resolve(option('dataset-dir') ?? process.env.LIGULE_BENCH_DATASET_DIR
     ?? join(repository, 'testplace', 'benchmarks', 'datasets', `${plan.dataset.name}@${plan.dataset.version}`));
