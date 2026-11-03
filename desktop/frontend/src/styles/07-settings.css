@@ -18,6 +18,8 @@
   align-content: start;
   gap: var(--space-2);
   inline-size: min(30rem, 92vw);
+  /* `inset: 0` 会把高度拉伸到整屏；确认框按内容高度显示，内容过长时再滚动。 */
+  block-size: fit-content;
   max-block-size: 82vh;
   padding: var(--space-3) 1.1rem;
   background: var(--bg-raised);
