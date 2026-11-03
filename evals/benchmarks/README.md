@@ -31,10 +31,17 @@ Exit codes: `0` completed, `1` Harbor failed, `2` blocked because a prerequisite
 
 The plan fixes the dataset version, task IDs, one attempt per task, concurrency, model-call/timeout budget, and the verifier authority. Harbor's task verifier runs in its own environment and decides pass/fail. The runner uses the existing `evals.harbor.ligule_agent:LiguleAgent` adapter and `--allow-full-access` behavior inside the task container; it does not create approvals or read verifier files.
 
-Generate the maintainer report with the existing report tooling after the run:
+Generate the maintainer report with the existing report tooling after the run. The report tool reads a separate input folder with a `manifest.json`; the runner preserves raw Harbor output but does not invent that manifest:
+
+1. Create an input folder and copy `run.json` from the benchmark run.
+2. Add `manifest.json` following [evals/report/README.md](../report/README.md) and [manifest.schema.json](../report/manifest.schema.json). Use `run.json.identity`, the plan, tarball SHA-256, dataset version, model/provider, and limits for `experiment`; set `verifier.result_schema` to `harbor.models.trial.result.TrialResult@0.25.0`, `reward_key`, and the numeric threshold.
+3. For each executed trial under `harbor/<job>/<task>__<id>/`, add an `attempts` entry with the task ID and category, attempt number, trial name, Harbor task ID, the relative `result.json` path, the relative `agent/trajectory.json` path when present, and artifact paths. Paths must stay inside the input folder and cannot be symlinks. A planned but unstarted attempt keeps `result_file`, `trial_name`, and `harbor_task_id` null and provides `not_run_reason`.
+4. Run:
 
 ```sh
 uv run --no-project --with harbor==0.25.0 python evals/report/report.py <run-input-folder> --output-dir <report-folder>
 ```
+
+The report tool validates every attempt against Harbor's result model and keeps pass/fail/not_run/infra_error separate. It does not read Harbor output directly.
 
 `eval:smoke` validates the adapter, ATIF export, and report fixtures without Docker or an external provider; it is infrastructure validation, not a benchmark score. Absolute agent results are meaningful only with the recorded SHA, tarball digest, dataset version, model, budget, and platform.

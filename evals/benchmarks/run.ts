@@ -2,10 +2,23 @@ import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { arch, platform, release } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repository = fileURLToPath(new URL('../..', import.meta.url));
+
+function runIdentity(): Record<string, unknown> {
+  const sha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repository, encoding: 'utf8', windowsHide: true });
+  const status = spawnSync('git', ['status', '--porcelain'], { cwd: repository, encoding: 'utf8', windowsHide: true });
+  return {
+    gitSha: sha.status === 0 ? sha.stdout.trim() : null,
+    dirty: status.status === 0 ? status.stdout.trim() !== '' : null,
+    node: process.version,
+    platform: `${platform()} ${release()}`,
+    arch: arch(),
+  };
+}
 
 type PlanTask = { id: string; category: string; covers: string };
 type Plan = {
@@ -96,6 +109,7 @@ async function main(): Promise<void> {
   const blocked = Object.entries(checks).filter(([, check]) => !check.ok);
   const baseRecord = {
     generatedAt: new Date().toISOString(),
+    identity: runIdentity(),
     plan,
     datasetRoot,
     checks,
