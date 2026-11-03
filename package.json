@@ -13,6 +13,7 @@
     "test:engineering": "node scripts/test-summary-reporter-check.mjs && node --experimental-strip-types --test --test-reporter=./scripts/test-summary-reporter.mjs .github/engineering/tests/*.test.mjs .github/engineering/tests/*.test.ts",
     "test": "pnpm run build && pnpm run test:core && pnpm run test:tui && pnpm run test:integration && pnpm run test:engineering",
     "bench:perf": "pnpm run build && node --experimental-strip-types benchmarks/run.ts",
+    "bench:agent": "node --experimental-strip-types evals/benchmarks/run.ts",
     "eval:smoke": "node scripts/eval-smoke.mjs",
     "check-pack": "pnpm --filter ligule run check-pack",
     "verify-install": "pnpm --filter ligule run verify-install",
