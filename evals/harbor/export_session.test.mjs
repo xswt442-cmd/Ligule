@@ -239,6 +239,20 @@ test('machine CLI parser filters response bodies and rejects localized output', 
   }
 });
 
+test('a trial that stopped inside the agent is still scored, not reported as an agent error', async () => {
+  const root = await mkdtemp(join(temporaryRoot, 'ligule-harbor-scorable-'));
+  try {
+    const helper = await packagedHelper(root);
+    assert.equal(helper.isScorableTrial({ version: 1, status: 'failed', state: 'failed', sessionId: 's', runId: 'r', errorCode: 'loop_model_budget_exhausted' }), true);
+    assert.equal(helper.isScorableTrial({ version: 1, status: 'completed', state: 'completed', sessionId: 's', runId: 'r' }), true);
+    // 没有会话就没有可评分的工作区，这类结果必须让 Harbor 看见是评测故障。
+    assert.equal(helper.isScorableTrial({ version: 1, status: 'failed', state: 'unknown', errorCode: 'ligule_process_timeout' }), false);
+    assert.equal(helper.isScorableTrial({ version: 1, status: 'failed', state: 'unknown', errorCode: 'ligule_cli_result_invalid_json' }), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('terminates the CLI process group when its runtime budget expires', async () => {
   const root = await mkdtemp(join(temporaryRoot, 'ligule-harbor-cancel-'));
   try {

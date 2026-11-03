@@ -403,7 +403,14 @@ async function runMode(args) {
     process.exitCode = 1;
   }
   await writeResult(logsDirectory, result);
-  if (result.status !== 'completed' || result.state !== 'completed' || child.status !== 0) process.exitCode = 1;
+  if (!isScorableTrial(result)) process.exitCode = 1;
+}
+
+// 代理层面的失败（预算耗尽、模型调用失败、被中断）仍是一次可评分的 trial：
+// 它跑出了会话，就让 verifier 对它留下的工作区打分，而不是记成 agent error
+// 把这一题挤出分母。没有会话说明评测本身没跑起来，那才是基础设施故障。
+export function isScorableTrial(result) {
+  return isObject(result) && typeof result.sessionId === 'string' && typeof result.runId === 'string';
 }
 
 async function main() {
