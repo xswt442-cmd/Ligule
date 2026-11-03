@@ -136,6 +136,11 @@ function codeOf(result: unknown) {
   try { return JSON.parse(first.text as string).code; } catch { return undefined; }
 }
 
+// SDK 的结果只给出宽泛的 content/structuredContent；测试按自己读取的字段声明形状，窄转换只在这里做一次。
+async function callTool(client: Client, name: string, args: Record<string, unknown>): Promise<ToolReply> {
+  return await client.callTool({ name, arguments: args }) as unknown as ToolReply;
+}
+
 test('a real stdio MCP process uses its grant ceiling and detects revocation', async () => {
   await fixture(async ({ projectRoot, otherProject, home }) => {
     const trustPath = join(home, 'tui-trust.json');
@@ -160,21 +165,18 @@ test('a real stdio MCP process uses its grant ceiling and detects revocation', a
       const receiptTool = listed.tools.find((tool) => tool.name === 'ligule_run_get');
       assert.match(receiptTool?.description ?? '', /without opening its writer/u);
 
-      const made = await client.callTool({
-        name: 'ligule_session_create',
-        arguments: { projectRoot, initial: { permission: { profile: 'workspace-write', network: 'policy' }, policy: 'auto' } },
-      }) as unknown as ToolReply;
+      const made = await callTool(client, 'ligule_session_create', { projectRoot, initial: { permission: { profile: 'workspace-write', network: 'policy' }, policy: 'auto' } });
       assert.equal(made.isError, undefined);
       const sessionId = made.structuredContent.sessionId;
       assert.equal(typeof sessionId, 'string');
 
-      const missingSessionRun = await client.callTool({ name: 'ligule_run_get', arguments: {
+      const missingSessionRun = await callTool(client, 'ligule_run_get', {
         sessionId: 'session-not-opened-by-this-control', runId: 'run-not-owned',
-      } }) as unknown as ToolReply;
+      });
       assert.equal(missingSessionRun.isError, true);
       assert.equal(codeOf(missingSessionRun), 'session_not_found');
 
-      const config = await client.callTool({ name: 'ligule_session_configure', arguments: { sessionId } }) as unknown as ToolReply;
+      const config = await callTool(client, 'ligule_session_configure', { sessionId });
       assert.equal(config.isError, undefined, `${JSON.stringify(config)}\n${stderr()}`);
       assert.equal(config.structuredContent.effective.permission.profile, 'workspace-write');
       assert.equal(config.structuredContent.effective.permission.network, 'policy');
@@ -183,41 +185,30 @@ test('a real stdio MCP process uses its grant ceiling and detects revocation', a
       assert.equal(config.structuredContent.effective.policy.mode, 'auto');
       assert.deepEqual(config.structuredContent.effective.search, { configured: false, available: false, code: 'search_not_configured' });
 
-      const noApproval = await client.callTool({
-        name: 'ligule_session_configure', arguments: { sessionId, changes: { policy: 'none' } },
-      }) as unknown as ToolReply;
+      const noApproval = await callTool(client, 'ligule_session_configure', { sessionId, changes: { policy: 'none' } });
       assert.equal(noApproval.isError, undefined, `${JSON.stringify(noApproval)}\n${stderr()}`);
       assert.equal(noApproval.structuredContent.effective.policy.mode, 'none');
-      const legacyNever = await client.callTool({
-        name: 'ligule_session_configure', arguments: { sessionId, changes: { policy: 'never' } },
-      }) as unknown as ToolReply;
+      const legacyNever = await callTool(client, 'ligule_session_configure', { sessionId, changes: { policy: 'never' } });
       assert.equal(legacyNever.isError, true);
       assert.equal(codeOf(legacyNever), 'agent_control_policy_exceeds_grant');
 
-      const missingRun = await client.callTool({ name: 'ligule_run_await', arguments: { operationId: 'missing', timeoutMs: 0 } }) as unknown as ToolReply;
+      const missingRun = await callTool(client, 'ligule_run_await', { operationId: 'missing', timeoutMs: 0 });
       assert.equal(missingRun.isError, true);
       assert.equal(codeOf(missingRun), 'operation_not_found');
 
-      const tooHigh = await client.callTool({
-        name: 'ligule_session_configure',
-        arguments: { sessionId, changes: { permission: { profile: 'full-access' } } },
-      }) as unknown as ToolReply;
+      const tooHigh = await callTool(client, 'ligule_session_configure', { sessionId, changes: { permission: { profile: 'full-access' } } });
       assert.equal(tooHigh.isError, true);
       assert.equal(codeOf(tooHigh), 'agent_control_permission_exceeds_grant');
-      const crossProject = await client.callTool({
-        name: 'ligule_session_create', arguments: { projectRoot: otherProject },
-      }) as unknown as ToolReply;
+      const crossProject = await callTool(client, 'ligule_session_create', { projectRoot: otherProject });
       assert.equal(crossProject.isError, true);
       assert.equal(codeOf(crossProject), 'control_project_forbidden');
 
       const revoked = await revokeDelegationGrant(storePath, grant.id, (await listDelegationGrants(storePath)).version);
       assert.equal(revoked.grants[0].revokedAt !== null, true);
-      const afterRevoke = await client.callTool({ name: 'ligule_session_configure', arguments: { sessionId } }) as unknown as ToolReply;
+      const afterRevoke = await callTool(client, 'ligule_session_configure', { sessionId });
       assert.equal(afterRevoke.isError, true);
       assert.equal(codeOf(afterRevoke), 'agent_control_grant_revoked');
-      const afterRevokeRun = await client.callTool({
-        name: 'ligule_run_start', arguments: { sessionId, input: 'must not run after grant revocation' },
-      }) as unknown as ToolReply;
+      const afterRevokeRun = await callTool(client, 'ligule_run_start', { sessionId, input: 'must not run after grant revocation' });
       assert.equal(afterRevokeRun.isError, true);
       assert.equal(codeOf(afterRevokeRun), 'agent_control_grant_revoked');
     } finally {
@@ -231,15 +222,12 @@ test('operator mode without a grant still cannot elevate permission', async () =
     await setTrusted(projectRoot, true, join(home, 'tui-trust.json'));
     const { client, stderr } = await connect(projectRoot, home, undefined, true);
     try {
-      const made = await client.callTool({ name: 'ligule_session_create', arguments: { projectRoot } }) as unknown as ToolReply;
+      const made = await callTool(client, 'ligule_session_create', { projectRoot });
       assert.equal(made.isError, undefined);
       const sessionId = made.structuredContent.sessionId;
-      const current = await client.callTool({ name: 'ligule_session_configure', arguments: { sessionId } }) as unknown as ToolReply;
+      const current = await callTool(client, 'ligule_session_configure', { sessionId });
       assert.equal(current.structuredContent?.effective?.permission?.profile, 'read-only', `${JSON.stringify(current)}\n${stderr()}`);
-      const elevate = await client.callTool({
-        name: 'ligule_session_configure',
-        arguments: { sessionId, changes: { permission: { profile: 'workspace-write' } } },
-      }) as unknown as ToolReply;
+      const elevate = await callTool(client, 'ligule_session_configure', { sessionId, changes: { permission: { profile: 'workspace-write' } } });
       assert.equal(elevate.isError, true);
       assert.equal(codeOf(elevate), 'permission_control_unavailable');
     } finally { await client.close(); }
@@ -263,7 +251,7 @@ test('a second local Host can observe and take over the active MCP-owned Session
     const { client, stderr } = await connect(projectRoot, home, grant.id, true);
     let host: Host | undefined;
     try {
-      const made = await client.callTool({ name: 'ligule_session_create', arguments: { projectRoot } }) as unknown as ToolReply;
+      const made = await callTool(client, 'ligule_session_create', { projectRoot });
       assert.equal(made.isError, undefined, `${JSON.stringify(made)}\n${stderr()}`);
       const sessionId = made.structuredContent.sessionId;
       const { layers, ...environment } = await loadHostEnvironment(projectRoot, fileURLToPath(new URL('../modes/', import.meta.url)));
@@ -325,7 +313,7 @@ test('a second local Host can observe and take over the active MCP-owned Session
       } }, localConnection);
       assert.deepEqual(takeover, { sessionId, ownership: 'human', released: true, operationId: null });
 
-      const refused = await client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'continue' } }) as unknown as ToolReply;
+      const refused = await callTool(client, 'ligule_run_start', { sessionId, input: 'continue' });
       assert.equal(refused.isError, true);
       assert.equal(codeOf(refused), 'control_session_taken_over');
 
@@ -364,7 +352,7 @@ test('Desktop human input and question answers reach the single MCP-owned real H
     const { client, stderr } = await connect(projectRoot, home, undefined, false, { LIGULE_AGENT_CONTROL_TEST_KEY: 'test-key' });
     let host: Host | undefined;
     try {
-      const made = await client.callTool({ name: 'ligule_session_create', arguments: { projectRoot } }) as unknown as ToolReply;
+      const made = await callTool(client, 'ligule_session_create', { projectRoot });
       assert.equal(made.isError, undefined, `${JSON.stringify(made)}\n${stderr()}`);
       const sessionId = made.structuredContent.sessionId;
       const { layers, ...environment } = await loadHostEnvironment(projectRoot, fileURLToPath(new URL('../modes/', import.meta.url)));
@@ -375,7 +363,7 @@ test('Desktop human input and question answers reach the single MCP-owned real H
         permissionControl: true,
       });
       const localConnection = { notify() {}, async request() { return { decision: 'deny' }; } };
-      const started = await client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'Ask the local user which route to take.' } }) as unknown as ToolReply;
+      const started = await callTool(client, 'ligule_run_start', { sessionId, input: 'Ask the local user which route to take.' });
       assert.equal(started.isError, undefined, `${JSON.stringify(started)}\n${stderr()}`);
       const operationId = started.structuredContent.operationId;
       assert.equal(started.structuredContent.source, 'controller');
@@ -401,12 +389,12 @@ test('Desktop human input and question answers reach the single MCP-owned real H
         },
       } }, localConnection) as { source: string };
       assert.equal(answered.source, 'human');
-      const eventStatus = await client.callTool({ name: 'ligule_run_status', arguments: { operationId, after: 0, limit: 50 } }) as unknown as ToolReply;
+      const eventStatus = await callTool(client, 'ligule_run_status', { operationId, after: 0, limit: 50 });
       assert.equal(eventStatus.isError, undefined, `${JSON.stringify(eventStatus)}\n${stderr()}`);
       assert.equal(eventStatus.structuredContent.events.some((event) => event.kind === 'interaction.resolved' && event.source === 'human'), true);
-      const resolved = await client.callTool({ name: 'ligule_run_await', arguments: { operationId, timeoutMs: 10_000 } }) as unknown as ToolReply;
+      const resolved = await callTool(client, 'ligule_run_await', { operationId, timeoutMs: 10_000 });
       if (resolved.isError === true) {
-        const current = await client.callTool({ name: 'ligule_run_status', arguments: { operationId, after: 0, limit: 20 } }) as unknown as ToolReply;
+        const current = await callTool(client, 'ligule_run_status', { operationId, after: 0, limit: 20 });
         assert.fail(`${JSON.stringify({ resolved, current })}\n${stderr()}`);
       }
       assert.equal(resolved.structuredContent.state, 'done', `${JSON.stringify(resolved)}\n${stderr()}`);
@@ -416,14 +404,14 @@ test('Desktop human input and question answers reach the single MCP-owned real H
       } }, localConnection) as { accepted: boolean; queued: boolean; operationId: string };
       assert.equal(humanInput.accepted, true);
       assert.equal(humanInput.queued, false);
-      const humanStatus = await client.callTool({ name: 'ligule_run_status', arguments: { operationId: humanInput.operationId } }) as unknown as ToolReply;
+      const humanStatus = await callTool(client, 'ligule_run_status', { operationId: humanInput.operationId });
       assert.equal(humanStatus.structuredContent.source, 'human');
       assert.equal(humanStatus.structuredContent.events.some((event) => event.kind === 'run.started' && event.source === 'human'), true);
-      const humanRun = await client.callTool({ name: 'ligule_run_await', arguments: { operationId: humanInput.operationId, timeoutMs: 10_000 } }) as unknown as ToolReply;
+      const humanRun = await callTool(client, 'ligule_run_await', { operationId: humanInput.operationId, timeoutMs: 10_000 });
       assert.equal(humanRun.structuredContent.state, 'done', `${JSON.stringify(humanRun)}\n${stderr()}`);
       assert.equal(model.requests.length, 3);
 
-      const transcript = await client.callTool({ name: 'ligule_session_read', arguments: { sessionId, limit: 50 } }) as unknown as ToolReply;
+      const transcript = await callTool(client, 'ligule_session_read', { sessionId, limit: 50 });
       const records = transcript.structuredContent.records.map((item) => JSON.parse(item.json) as SessionRecordLine);
       const users = records.filter((item) => item.kind === 'user');
       assert.ok(users.some((item) => item.origin === 'controller' && item.text === 'Ask the local user which route to take.'));
@@ -431,18 +419,18 @@ test('Desktop human input and question answers reach the single MCP-owned real H
       assert.ok(humanRecord);
       const humanRunId = humanRecord.run?.runId;
       assert.equal(typeof humanRunId, 'string');
-      const humanResult = await client.callTool({ name: 'ligule_run_get', arguments: {
+      const humanResult = await callTool(client, 'ligule_run_get', {
         sessionId, runId: humanRunId, offset: 0,
-      } }) as unknown as ToolReply;
+      });
       assert.equal(humanResult.isError, undefined, `${JSON.stringify(humanResult)}\n${stderr()}`);
       assert.equal(humanResult.structuredContent.receipt.runId, humanRunId);
       assert.equal(JSON.parse(humanResult.structuredContent.result.json).state, 'completed');
 
-      const closed = await client.callTool({ name: 'ligule_session_close', arguments: { sessionId } }) as unknown as ToolReply;
+      const closed = await callTool(client, 'ligule_session_close', { sessionId });
       assert.equal(closed.isError, undefined, `${JSON.stringify(closed)}\n${stderr()}`);
-      const receiptAfterClose = await client.callTool({ name: 'ligule_run_get', arguments: {
+      const receiptAfterClose = await callTool(client, 'ligule_run_get', {
         sessionId, runId: humanRunId, offset: 0,
-      } }) as unknown as ToolReply;
+      });
       assert.equal(receiptAfterClose.isError, undefined, `${JSON.stringify(receiptAfterClose)}\n${stderr()}`);
       assert.equal(receiptAfterClose.structuredContent.receipt.runId, humanRunId);
       assert.equal(JSON.parse(receiptAfterClose.structuredContent.result.json).state, 'completed');

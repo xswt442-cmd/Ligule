@@ -8,8 +8,8 @@ import { createHost } from '../core/dist/host/host.js';
 import { createConfig } from '../core/dist/kernel/config.js';
 import { createChatCompletionsProvider } from '../core/dist/model/chat-completions.js';
 import type { Host } from '../core/dist/host/host.js';
-import type { HostProvider } from '../core/dist/host/provider.js';
 import { withTuiHost, waitFor } from '../core/tests/helpers/tui-host.ts';
+import { testHostProvider } from '../core/tests/helpers/provider.ts';
 
 test('controller shutdown cancels a real Host run before draining a delayed read response', async () => {
   await withTuiHost(async ({ host, sessionId, projectDirectory, sessionDirectory, providerRequests, client }) => {
@@ -70,7 +70,8 @@ for (const [hostFails, earlyOperation] of [[true, false], [false, false], [true,
       const operationGate = Promise.withResolvers<unknown>();
       const hostFinished = Promise.withResolvers<unknown>();
       let originalHostError: AggregateError | undefined;
-      const provider = createChatCompletionsProvider({ baseUrl: config.model.baseURL, model: config.model.model, apiKeyEnv: config.model.apiKeyEnv }) as unknown as HostProvider;
+      const chat = createChatCompletionsProvider({ baseUrl: config.model.baseURL, model: config.model.model, apiKeyEnv: config.model.apiKeyEnv });
+      const provider = testHostProvider({ name: chat.name, model: chat.model, capabilities: chat.capabilities, stream: chat.stream });
       const host = createHost({ config, provider, plugins: [{ name: 'release-check', setup: () => () => {
         if (hostFails) throw disposeFailure;
       } }] });
@@ -137,7 +138,8 @@ test('shutdown refuses session construction after a concurrent project load fini
     await mkdir(otherRoot);
     const loading = Promise.withResolvers<unknown>();
     const loaded = Promise.withResolvers<unknown>();
-    const provider = createChatCompletionsProvider({ baseUrl: 'http://127.0.0.1:1', model: 'unused', apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY' }) as unknown as HostProvider;
+    const chat = createChatCompletionsProvider({ baseUrl: 'http://127.0.0.1:1', model: 'unused', apiKeyEnv: 'LIGULE_TUI_TEST_API_KEY' });
+    const provider = testHostProvider({ name: chat.name, model: chat.model, capabilities: chat.capabilities, stream: chat.stream });
     const host = createHost({ config, provider,
       loadEnvironment: async () => {
         loading.resolve(undefined);

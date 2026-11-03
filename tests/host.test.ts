@@ -13,7 +13,6 @@ import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CA
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import type { Connection } from '../core/dist/host/connection.js';
 import type { HostOptions } from '../core/dist/host/host.js';
-import type { HostProvider } from '../core/dist/host/provider.js';
 import type { Kernel } from '../core/dist/kernel/kernel.js';
 import type { ModelRequest } from '../core/dist/kernel/loop.js';
 import { detectPermissionCapabilities } from '../core/dist/capability/permission-capabilities.js';
@@ -25,6 +24,7 @@ import { historyPathOf, rememberHistory } from '../core/dist/kernel/input-histor
 import { prefsPathOf, savePrefs } from '../core/dist/kernel/desktop-prefs.js';
 import { listProjectFiles } from '../core/dist/host/paths.js';
 import { listenFetchable } from './helpers/port.ts';
+import { testHostProvider } from '../core/tests/helpers/provider.ts';
 
 // 协议回复没有生成类型；测试按自己读取的字段声明所需形状，再用窄转换标注。
 type Named = { sessionId: string };
@@ -774,7 +774,7 @@ test('an approval for a command names the shell backend the host chose', async (
   });
   let turns = 0;
   // 提供方返回已归一化的 `text` 和 `tool-call` 事件，而不是端点原始数据帧。
-  const provider = {
+  const provider = testHostProvider({
     capabilities: MESSAGES_CAPABILITIES,
     model: 'test-model',
     async *stream() {
@@ -785,7 +785,7 @@ test('an approval for a command names the shell backend the host chose', async (
       }
       yield { type: 'text', text: 'done' };
     },
-  } as unknown as HostProvider;
+  });
   const pair = createMemoryConnectionPair();
   const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy as HostOptions['policy'], permission });
   const approvals: Approval[] = [];
@@ -821,13 +821,13 @@ test('a branch of an open session reads back through the same action', async () 
       policy: { mode: 'auto' },
     },
   });
-  const provider = {
+  const provider = testHostProvider({
     capabilities: MESSAGES_CAPABILITIES,
     model: 'test-model',
     async *stream() {
       yield { type: 'text', text: 'done' };
     },
-  } as unknown as HostProvider;
+  });
   const pair = createMemoryConnectionPair();
   const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy as HostOptions['policy'] });
   const connection = createConnection(pair.client);
@@ -902,7 +902,7 @@ async function withInProcessHost<T>(
   });
   // 该 Promise 会暂停提供方响应，用于模拟仍在运行的轮次。
   let gate: Promise<unknown> | undefined;
-  const provider = {
+  const provider = testHostProvider({
     capabilities: MESSAGES_CAPABILITIES,
     model: 'test-model',
     async *stream(request: ModelRequest) {
@@ -914,7 +914,7 @@ async function withInProcessHost<T>(
       }
       yield { type: 'text', text: 'a chunk of an answer that is worth summarising '.repeat(30) };
     },
-  } as unknown as HostProvider;
+  });
   const pair = createMemoryConnectionPair();
   const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy as HostOptions['policy'], ...extra });
   const connection = createConnection(pair.client);
@@ -1161,7 +1161,7 @@ parameters = { type = "object", properties = {} }
   process.env.HOME = data;
   const toolLists: string[][] = [];
   let callIndex = 0;
-  const provider = {
+  const provider = testHostProvider({
     model: 'test-model',
     capabilities: MESSAGES_CAPABILITIES,
     async *stream(request: ModelRequest) {
@@ -1173,7 +1173,7 @@ parameters = { type = "object", properties = {} }
       }
       yield { type: 'text', text: callIndex === 2 ? 'child completed' : 'parent completed' };
     },
-  } as unknown as HostProvider;
+  });
   try {
     await withInProcessHost(async (connection) => {
       const { sessionId } = await connection.request('session.create', { initial: { mode: 'full' } }) as Named;
@@ -1551,7 +1551,7 @@ test('a saved generation choice lands now on an idle session and at the round ed
   const store = createConfigStore({ projectRoot: root, userHome: home });
   const served: string[] = [];
   let gate: Promise<unknown> | undefined;
-  const deriveProvider = (config: Readonly<Record<string, unknown>>) => ({
+  const deriveProvider = (config: Readonly<Record<string, unknown>>) => testHostProvider({
     model: (config.model as { model: string }).model,
     capabilities: MESSAGES_CAPABILITIES,
     async *stream() {
@@ -1559,7 +1559,7 @@ test('a saved generation choice lands now on an idle session and at the round ed
       served.push((config.model as { model: string }).model);
       yield { type: 'text', text: '一份回答' };
     },
-  } as unknown as HostProvider);
+  });
   try {
     await withInProcessHost(async (connection) => {
       const { sessionId } = await connection.request('session.create', {}) as Named;
@@ -1660,17 +1660,17 @@ test('model selection checks the live session after waiting in its configuration
     },
     policy: { mode: 'auto' },
   } });
-  const provider = {
+  const provider = testHostProvider({
     model: 'local-a', capabilities: MESSAGES_CAPABILITIES,
     async *stream() { yield { type: 'text', text: 'unused' }; },
-  } as unknown as HostProvider;
+  });
   const host = createHost({
     config,
     provider,
     policy: config.policy as HostOptions['policy'],
     configStore,
     deriveProvider: (next: Readonly<Record<string, unknown>>) =>
-      ({ ...provider, model: (next.model as { model: string }).model } as unknown as HostProvider),
+      testHostProvider({ ...provider, model: (next.model as { model: string }).model }),
   });
   const connection = {
     notify() {},
@@ -1705,7 +1705,7 @@ test('one host keeps two projects apart, and a host without a loader says so', a
   const second = join(root, 'second');
   await mkdir(first, { recursive: true });
   await mkdir(second, { recursive: true });
-  const quiet = { capabilities: MESSAGES_CAPABILITIES, model: 'test-model', async *stream() { yield { type: 'text', text: 'ok' }; } } as unknown as HostProvider;
+  const quiet = testHostProvider({ capabilities: MESSAGES_CAPABILITIES, model: 'test-model', async *stream() { yield { type: 'text', text: 'ok' }; } });
   const environmentOf = (projectRoot: string) => ({
     config: createConfig({ user: { boundary: projectRoot, model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' } } }),
     provider: quiet,
@@ -2173,7 +2173,7 @@ test('the host keeps the input history both surfaces share: newest first, one co
   const previous = process.env.LIGULE_HOME;
   process.env.LIGULE_HOME = join(root, 'data');
   const config = createConfig({ user: { boundary: root, model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' } } });
-  const quiet = { capabilities: MESSAGES_CAPABILITIES, model: 'test-model', async *stream() { yield { type: 'text', text: 'ok' }; } } as unknown as HostProvider;
+  const quiet = testHostProvider({ capabilities: MESSAGES_CAPABILITIES, model: 'test-model', async *stream() { yield { type: 'text', text: 'ok' }; } });
   const pair = createMemoryConnectionPair();
   const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider: quiet, policy: { mode: 'auto' } });
   const client = createConnection(pair.client);

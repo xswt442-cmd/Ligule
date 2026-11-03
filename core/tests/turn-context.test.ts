@@ -6,9 +6,9 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CAPABILITIES, serveHost } from '../dist/index.js';
 import type { HostOptions } from '../dist/host/host.js';
-import type { HostProvider } from '../dist/host/provider.js';
 import type { ModelRequest, ProviderEvent } from '../dist/kernel/loop.js';
 import type { SessionEvent } from '../dist/session/format.js';
+import { testHostProvider } from './helpers/provider.ts';
 
 test('one round freezes the parameters in effect at its start into one record event', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'ligule-turn-context-'));
@@ -21,7 +21,7 @@ test('one round freezes the parameters in effect at its start into one record ev
   });
   const requests: ModelRequest[] = [];
   let turns = 0;
-  const provider = {
+  const provider = testHostProvider({
     capabilities: MESSAGES_CAPABILITIES,
     model: 'test-model',
     async *stream(request: ModelRequest): AsyncGenerator<ProviderEvent> {
@@ -34,7 +34,7 @@ test('one round freezes the parameters in effect at its start into one record ev
       }
       yield { type: 'text', text: '本轮结束' };
     },
-  } as unknown as HostProvider;
+  });
   const pair = createMemoryConnectionPair();
   const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy as HostOptions['policy'] });
   const connection = createConnection(pair.client);
@@ -80,14 +80,14 @@ test('the snapshot names the tier the round actually ran on after a session over
     },
   });
   const seen: ModelRequest[] = [];
-  const provider = {
+  const provider = testHostProvider({
     capabilities: MESSAGES_CAPABILITIES,
     model: 'test-model',
     async *stream(request: ModelRequest): AsyncGenerator<ProviderEvent> {
       seen.push(request);
       yield { type: 'text', text: '一句话' };
     },
-  } as unknown as HostProvider;
+  });
   const pair = createMemoryConnectionPair();
   const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy as HostOptions['policy'] });
   const connection = createConnection(pair.client);

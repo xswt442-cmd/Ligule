@@ -18,6 +18,7 @@ import { once } from 'node:events';
 import type { TestContext } from 'node:test';
 import type { HostOptions } from '../dist/host/host.js';
 import type { HostProvider } from '../dist/host/provider.js';
+import { testHostProvider } from './helpers/provider.ts';
 import type { ModelProvider, ModelRequest } from '../dist/kernel/loop.js';
 
 type TelemetryRecord = { timestamp?: string; component?: string; severity?: string; type: string; callId?: string; runId?: string; sessionId?: string; outcome?: string; executionId?: string; parentExecutionId?: string; parentRunId?: string; parentCallId?: string; inputTokens?: number; outputTokens?: number; durationMs?: number; provider?: string; model?: string; code?: string; errorCode?: string };
@@ -109,7 +110,7 @@ test('Host enables loopback OTLP only from the user configuration layer', async 
     if (receiver.listening) await new Promise<void>((resolve, reject) => receiver.close(error => error ? reject(error) : resolve()));
   });
   const endpoint = `http://127.0.0.1:${(receiver.address() as AddressInfo).port}/v1/traces`;
-  const provider = { async *stream() { yield { type: 'text', text: 'done' }; yield { type: 'finish', reason: 'stop' }; } } as unknown as HostProvider;
+  const provider = testHostProvider({ async *stream() { yield { type: 'text', text: 'done' }; yield { type: 'finish', reason: 'stop' }; } });
   await mkdir(testRoot, { recursive: true });
   const userDataRoot = await mkdtemp(join(testRoot, 'otlp-user-data-'));
   const previousDataRoot = process.env.LIGULE_HOME;
@@ -137,7 +138,7 @@ test('Host enables loopback OTLP only from the user configuration layer', async 
 });
 
 test('Host telemetry uses execution IDs plus Session and parent-call links, and excludes sensitive content', async (t) => {
-  const provider = {
+  const provider = testHostProvider({
     name: 'vendor/local-test-provider',
     model: 'vendor/local-test-model',
     async *stream({ tools, messages }: ModelRequest) {
@@ -159,7 +160,7 @@ test('Host telemetry uses execution IDs plus Session and parent-call links, and 
         yield { type: 'finish', reason: 'stop' };
       }
     },
-  } as unknown as HostProvider;
+  });
   const permission = createPermissionContext('workspace-write', 'policy', {
     filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
   });
@@ -215,14 +216,14 @@ test('Host telemetry uses execution IDs plus Session and parent-call links, and 
 });
 
 test('Host defaults telemetry off', async (t) => {
-  const provider = { async *stream() { yield { type: 'text', text: 'done' }; yield { type: 'finish', reason: 'stop' }; } } as unknown as HostProvider;
+  const provider = testHostProvider({ async *stream() { yield { type: 'text', text: 'done' }; yield { type: 'finish', reason: 'stop' }; } });
   const context = await setupHost(t, { provider });
   await context.host.handle({ method: 'run.start', params: { sessionId: context.sessionId, input: 'ordinary input' } }, context.client);
   assert.deepEqual(await readdir(context.telemetryDirectory), []);
 });
 
 test('Host reports an unknown telemetry temporary file without disclosing its path or contents', async (t) => {
-  const provider = { async *stream() { yield { type: 'text', text: 'done' }; yield { type: 'finish', reason: 'stop' }; } } as unknown as HostProvider;
+  const provider = testHostProvider({ async *stream() { yield { type: 'text', text: 'done' }; yield { type: 'finish', reason: 'stop' }; } });
   const diagnostics: { message: string; fields: Record<string, unknown> }[] = [];
   const context = await setupHost(t, {
     provider,
@@ -247,7 +248,7 @@ test('Host reports an unknown telemetry temporary file without disclosing its pa
 });
 
 test('Host release stays bounded when the telemetry file flush never settles', async (t) => {
-  const provider = { async *stream() { yield { type: 'text', text: 'done' }; yield { type: 'finish', reason: 'stop' }; } } as unknown as HostProvider;
+  const provider = testHostProvider({ async *stream() { yield { type: 'text', text: 'done' }; yield { type: 'finish', reason: 'stop' }; } });
   const context = await setupHost(t, { provider, telemetry: true });
   await context.host.handle({ method: 'run.start', params: { sessionId: context.sessionId, input: 'create telemetry record' } }, context.client);
   const probe = await open(join(context.telemetryDirectory, 'probe'), 'w');

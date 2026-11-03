@@ -6,9 +6,9 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { listMcpTrust, mcpServerTrust, setMcpServerTrust } from '../dist/host/mcp-trust.js';
 import { createHost } from '../dist/host/host.js';
-import type { HostProvider } from '../dist/host/provider.js';
 import { createConfig } from '../dist/kernel/config.js';
 import { MESSAGES_CAPABILITIES } from '../dist/index.js';
+import { testHostProvider } from './helpers/provider.ts';
 
 type McpTrustView = {
   version: string;
@@ -119,11 +119,11 @@ test('the Host trusts only the current server identity and starts it only after 
     '',
   ].join('\n'));
   await writeProjectConfig(marker);
-  const provider = {
+  const provider = testHostProvider({
     capabilities: MESSAGES_CAPABILITIES,
     model: 'trust-test',
     async *stream() { yield { type: 'text', text: 'ready' }; },
-  } as unknown as HostProvider;
+  });
   const config = createConfig({ user: {
     boundary: projectRoot, workspaceRoot: projectRoot,
     mcp: { servers: { probe: serverSettings } },
@@ -233,11 +233,11 @@ test('mcp.trust.tools times out a stalled tools/list request and closes its temp
   ].join('\n'));
   const previousHome = process.env.LIGULE_HOME;
   process.env.LIGULE_HOME = home;
-  const provider = {
+  const provider = testHostProvider({
     capabilities: MESSAGES_CAPABILITIES,
     model: 'trust-timeout-test',
     async *stream() { yield { type: 'text', text: 'ready' }; },
-  } as unknown as HostProvider;
+  });
   const config = createConfig({ user: {
     boundary: projectRoot,
     workspaceRoot: projectRoot,

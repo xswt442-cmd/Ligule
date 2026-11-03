@@ -10,8 +10,8 @@ import {
 } from '../dist/index.js';
 import { listMcpTrust, mcpTrustPathOf, setMcpServerTrust } from '../dist/host/mcp-trust.js';
 import type { HostOptions } from '../dist/host/host.js';
-import type { HostProvider } from '../dist/host/provider.js';
 import type { ModelRequest } from '../dist/kernel/loop.js';
+import { testHostProvider } from './helpers/provider.ts';
 
 type CodedError = { code?: string };
 type SessionEventView = { kind: string; tool?: string; result: { content: { schemaDigest: string } } };
@@ -212,7 +212,7 @@ test('revoking MCP trust ends its stdio server while an operation is running', {
     const identity = mcpServerConfigs({ mcp: { servers: { slow: serverSettings } } }, process.env, project)[0].identityDigest;
     await setMcpServerTrust(trustPath, { scope: 'project', projectRoot: project, server: 'slow', identityDigest: identity, trusted: true }, trustVersion);
     let phase = 0;
-    const provider = {
+    const provider = testHostProvider({
       name: 'local-operation-provider',
       model: 'host-cancel-test',
       capabilities: MESSAGES_CAPABILITIES,
@@ -229,7 +229,7 @@ test('revoking MCP trust ends its stdio server while an operation is running', {
           yield { type: 'tool-call', id: 'call', name: 'mcp.call', args: operation.args };
         }
       },
-    } as unknown as HostProvider;
+    });
     const pair = createMemoryConnectionPair();
     const host = serveHost({
       ...pair.host,

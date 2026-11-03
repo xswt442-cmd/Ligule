@@ -8,7 +8,6 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { parse } from 'smol-toml';
 import { createHost } from '../dist/host/host.js';
 import type { EnvironmentSeed, Host } from '../dist/host/host.js';
-import type { HostProvider } from '../dist/host/provider.js';
 import type { ModelRequest } from '../dist/kernel/loop.js';
 import { createConfigStore } from '../dist/kernel/config-store.js';
 import { loadConfigLayers } from '../dist/kernel/config-file.js';
@@ -16,6 +15,7 @@ import { createConfig } from '../dist/kernel/config.js';
 import { MESSAGES_CAPABILITIES } from '../dist/index.js';
 import { createPermissionContext } from '../dist/kernel/permission.js';
 import type { PermissionContext } from '../dist/kernel/permission.js';
+import { testHostProvider } from './helpers/provider.ts';
 
 type ToolCallFixture = { name: string; args: Record<string, unknown> };
 
@@ -74,7 +74,7 @@ async function withPolicyHost(run: (context: PolicyHostContext) => Promise<void>
   process.env.LIGULE_HOME = home;
 
   let modelCall = 0;
-  const provider = {
+  const provider = testHostProvider({
     capabilities: MESSAGES_CAPABILITIES,
     model: 'policy-memory-test',
     async *stream(request: ModelRequest) {
@@ -86,7 +86,7 @@ async function withPolicyHost(run: (context: PolicyHostContext) => Promise<void>
         yield { type: 'tool-call', id: `tool-${modelCall}`, ...nextCall };
       } else yield { type: 'text', text: 'Read complete.' };
     },
-  } as unknown as HostProvider;
+  });
 
   const environment = async (projectRoot: string) => {
     await mkdir(join(projectRoot, '.ligule', 'sessions'), { recursive: true });

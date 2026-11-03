@@ -19,8 +19,8 @@ import type { SkillRegistry } from '../dist/kernel/skills.js';
 type SkillFailure = { code: string; detail: string };
 import type { SessionLog } from '../dist/session/session.js';
 import type { ModelRequest } from '../dist/kernel/loop.js';
-import type { HostProvider } from '../dist/host/provider.js';
 import type { PolicyMode } from '../dist/kernel/policy.js';
+import { testHostProvider } from './helpers/provider.ts';
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
 const modeTestPermission = createPermissionContext('workspace-write', 'policy', {
@@ -300,14 +300,14 @@ test('a mode narrows the capability tools and cannot reach the disclosure entry'
         },
       });
       const requests: ModelRequest[] = [];
-      const provider = {
+      const provider = testHostProvider({
         capabilities: MESSAGES_CAPABILITIES,
         model: 'test-model',
         async *stream(request: ModelRequest) {
           requests.push(request);
           yield { type: 'text', text: 'ok' };
         },
-      } as unknown as HostProvider;
+      });
       const pair = createMemoryConnectionPair();
       const host = serveHost({
         input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy as { mode?: PolicyMode }, permission: modeTestPermission,

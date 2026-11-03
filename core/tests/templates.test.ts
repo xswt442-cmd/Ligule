@@ -14,7 +14,7 @@ import type { TemplateRegistry } from '../dist/kernel/templates.js';
 import type { ModelRequest, ProviderEvent } from '../dist/kernel/loop.js';
 import type { SessionEvent } from '../dist/session/format.js';
 import type { HostOptions } from '../dist/host/host.js';
-import type { HostProvider } from '../dist/host/provider.js';
+import { testHostProvider } from './helpers/provider.ts';
 
 type TemplateFixture = {
   root: string;
@@ -164,7 +164,7 @@ test('the Host expands before the loop and the record keeps both that line and t
       },
     });
     const requests: ModelRequest[] = [];
-    const provider = {
+    const provider = testHostProvider({
       capabilities: MESSAGES_CAPABILITIES,
       model: 'test-model',
       async *stream(request: ModelRequest): AsyncGenerator<ProviderEvent> {
@@ -172,7 +172,7 @@ test('the Host expands before the loop and the record keeps both that line and t
         // 循环消费提供方返回的标准事件；此处只生成文本事件。
         yield { type: 'text', text: 'ok' };
       },
-    } as unknown as HostProvider;
+    });
     const pair = createMemoryConnectionPair();
     const host = serveHost({
       input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy as HostOptions['policy'], templateRegistry: registry,

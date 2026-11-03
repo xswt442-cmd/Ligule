@@ -16,7 +16,7 @@ import { policyArgsHash } from '../dist/kernel/policy.js';
 import type { McpRegistry } from '../dist/capability/mcp.js';
 import type { ToolDefinition } from '../dist/kernel/kernel.js';
 import type { HostOptions } from '../dist/host/host.js';
-import type { HostProvider } from '../dist/host/provider.js';
+import { testHostProvider } from './helpers/provider.ts';
 
 type CodedError = { code?: string; detail?: string };
 type RegistryView = Pick<McpRegistry, 'servers' | 'toolsOf' | 'definition' | 'call'>;
@@ -555,7 +555,7 @@ test('the host wires the two tools from the config, and not when there is no ser
       mcp: { servers: { fs: { command: process.execPath, args: [serverEntry, root] } } },
     },
   });
-  const provider = { capabilities: MESSAGES_CAPABILITIES, model: 'm', async *stream() { yield { type: 'text', text: 'ok' }; } } as unknown as HostProvider;
+  const provider = testHostProvider({ capabilities: MESSAGES_CAPABILITIES, model: 'm', async *stream() { yield { type: 'text', text: 'ok' }; } });
   const pair = createMemoryConnectionPair();
   const host = serveHost({
     input: pair.host.input, output: pair.host.output, config: withServer, provider, policy: withServer.policy as HostOptions['policy'],

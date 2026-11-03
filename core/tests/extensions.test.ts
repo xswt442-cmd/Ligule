@@ -12,9 +12,9 @@ import {
 import type { ToolDefinition } from '../dist/kernel/kernel.js';
 import type { Connection } from '../dist/host/connection.js';
 import type { Host } from '../dist/host/host.js';
-import type { HostProvider } from '../dist/host/provider.js';
 import type { ModelRequest } from '../dist/kernel/loop.js';
 import type { PolicyMode } from '../dist/kernel/policy.js';
+import { testHostProvider } from './helpers/provider.ts';
 
 type ExtensionFragment = { name: string; text: string; source: string };
 type ExtensionLoadOptions = Parameters<typeof loadExtensions>[1] & { config?: Record<string, never> };
@@ -253,14 +253,14 @@ async function withSession<TResult>(
   await writeFile(join(directories.user, 'picked.toml'), `tools = "*"\nprompt = ${JSON.stringify(modePrompt)}\n`);
   const config = createConfig({ user: { boundary: root, model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'm' }, policy: { mode: 'ask' } } });
   const requests: ModelRequest[] = [];
-  const provider = {
+  const provider = testHostProvider({
     capabilities: MESSAGES_CAPABILITIES,
     model: 'm',
     async *stream(request: ModelRequest) {
       requests.push(request);
       yield { type: 'text', text: 'ok' };
     },
-  } as unknown as HostProvider;
+  });
   const pair = createMemoryConnectionPair();
   const host = serveHost({
     input: pair.host.input,

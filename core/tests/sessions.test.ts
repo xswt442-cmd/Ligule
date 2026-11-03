@@ -12,12 +12,12 @@ import {
 } from '../dist/index.js';
 import type { Connection } from '../dist/host/connection.js';
 import type { Host, HostOptions } from '../dist/host/host.js';
-import type { HostProvider } from '../dist/host/provider.js';
 import type { ModeFile } from '../dist/kernel/modes.js';
 import { workspaceIdentity } from '../dist/kernel/workspace.js';
 import { workspaceDataDirectory, splitUncIdentity } from '../dist/session/list.js';
 import type { SessionDirectoryConfig, SessionSummary } from '../dist/session/list.js';
 import type { SessionEvent } from '../dist/session/format.js';
+import { testHostProvider } from './helpers/provider.ts';
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
 
@@ -310,13 +310,13 @@ test('a resume takes the mode the session last ran under, and a changed list is 
   );
 });
 
-const provider = {
+const provider = testHostProvider({
   capabilities: MESSAGES_CAPABILITIES,
   model: 'test-model',
   async *stream() {
     yield { type: 'text', text: 'ok' };
   },
-} as unknown as HostProvider;
+});
 
 // 会话列表与恢复都由 Host 提供，客户端无需读取记录目录或计算模式清单。
 async function withHost(root: string, run: (connection: Connection, host: Host) => Promise<void>) {

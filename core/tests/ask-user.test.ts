@@ -6,9 +6,9 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createConnection, createConfig, createMemoryConnectionPair, MESSAGES_CAPABILITIES, serveHost } from '../dist/index.js';
 import type { Connection } from '../dist/host/connection.js';
-import type { HostProvider } from '../dist/host/provider.js';
 import type { ModelRequest } from '../dist/kernel/loop.js';
 import type { PolicyMode } from '../dist/kernel/policy.js';
+import { testHostProvider } from './helpers/provider.ts';
 
 const QUESTIONS = JSON.stringify([
   { question: '这一份记录要按哪种方式整理？', header: '整理', options: [{ label: '就地补', description: '只动那几条缺的' }, { label: '整份重写' }] },
@@ -44,7 +44,7 @@ async function withAskingHost<TResult>(
   const config = createConfig({ user: { boundary: directory, model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'test-model' }, policy } });
   const requests: ModelRequest[] = [];
   let turns = 0;
-  const provider = {
+  const provider = testHostProvider({
     capabilities: MESSAGES_CAPABILITIES,
     model: 'test-model',
     async *stream(request: ModelRequest) {
@@ -56,7 +56,7 @@ async function withAskingHost<TResult>(
       }
       yield { type: 'text', text: `第 ${turns} 次` };
     },
-  } as unknown as HostProvider;
+  });
   const pair = createMemoryConnectionPair();
   const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy as { mode?: PolicyMode }, ...(modeName === undefined ? {} : { modeName }), ...(interactive ? { interactive: true } : {}) });
   const connection = createConnection(pair.client);

@@ -13,10 +13,10 @@ import { listWorkspaceSessions, MESSAGES_CAPABILITIES, createConfig, createConne
 import { listSessions } from '../dist/session/list.js';
 import type { Connection } from '../dist/host/connection.js';
 import type { Host, HostOptions } from '../dist/host/host.js';
-import type { HostProvider } from '../dist/host/provider.js';
 import type { SessionEvent } from '../dist/session/format.js';
 import { parseRegistry, readRegistry, registerWorkspace, setDefaultWorkspace, unregisterWorkspace, workspaceIdentity } from '../dist/kernel/workspace.js';
 import type { WorkspaceRegistry } from '../dist/kernel/workspace.js';
+import { testHostProvider } from './helpers/provider.ts';
 
 function hasCode(error: unknown, code: string): boolean {
   return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
@@ -160,7 +160,7 @@ type HostFixture = {
 /** 一具宿主连同它的数据根与项目目录：临时建、用完删，三遍检查共用同一套装配。 */
 async function withHost(
   run: (state: HostFixture) => Promise<void>,
-  provider = { capabilities: MESSAGES_CAPABILITIES, model: 'test-model', async *stream() { yield { type: 'text', text: 'ok' }; } } as unknown as HostProvider,
+  provider = testHostProvider({ capabilities: MESSAGES_CAPABILITIES, model: 'test-model', async *stream() { yield { type: 'text', text: 'ok' }; } }),
 ) {
   const home = await mkdtemp(join(tmpdir(), 'ligule-ws-home-'));
   const project = await mkdtemp(join(tmpdir(), 'ligule-ws-proj-'));
@@ -320,7 +320,7 @@ test('Host removes workspace registration without changing project or session fi
 test('工作区仍有运行中的会话时 Host 拒绝删除登记', async () => {
   let enteredStream!: (value?: unknown) => void;
   const entered = new Promise((resolve) => { enteredStream = resolve; });
-  const provider = {
+  const provider = testHostProvider({
     capabilities: MESSAGES_CAPABILITIES,
     model: 'test-model',
     async *stream(_request: unknown, { signal }: { signal: AbortSignal }) {
@@ -328,7 +328,7 @@ test('工作区仍有运行中的会话时 Host 拒绝删除登记', async () =>
       await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
       yield { type: 'text', text: 'stopped' };
     },
-  } as unknown as HostProvider;
+  });
   await withHost(async ({ connection, project }) => {
     const { sessionId } = await connection.request('session.create', {}) as { sessionId: string };
     const starting = connection.request('run.start', { sessionId, input: '保持运行' });

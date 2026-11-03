@@ -13,9 +13,9 @@ import { createHost } from '../core/dist/host/host.js';
 import { createControl } from '../core/dist/host/control.js';
 import { createChatCompletionsProvider } from '../core/dist/model/chat-completions.js';
 import { withTuiHost } from '../core/tests/helpers/tui-host.ts';
+import { testHostProvider } from '../core/tests/helpers/provider.ts';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { HostProvider } from '../core/dist/host/provider.js';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const workspaceRoot = resolve(process.env.LIGULE_MCP_E2E_WORKSPACE_ROOT ?? repoRoot);
@@ -241,7 +241,8 @@ test('close refuses a running or queued session without cancelling or discarding
 
 test('a plugin cleanup failure keeps the real Host session locked until close is retried', async () => {
   await withTuiHost(async ({ config, projectDirectory, sessionDirectory }) => {
-    const provider = createChatCompletionsProvider({ baseUrl: config.model.baseURL, model: config.model.model, apiKeyEnv: config.model.apiKeyEnv }) as unknown as HostProvider;
+    const chat = createChatCompletionsProvider({ baseUrl: config.model.baseURL, model: config.model.model, apiKeyEnv: config.model.apiKeyEnv });
+    const provider = testHostProvider({ name: chat.name, model: chat.model, capabilities: chat.capabilities, stream: chat.stream });
     const failure = new Error('plugin disposal failed');
     const host = createHost({ config, provider, plugins: [{ name: 'cleanup-failure', setup: () => () => { throw failure; } }] });
     const observer = createHost({ config, provider });

@@ -17,8 +17,8 @@ import { resolveModeSelection } from '../dist/kernel/modes.js';
 import type { ModeDirectories } from '../dist/kernel/modes.js';
 import type { ModelRequest } from '../dist/kernel/loop.js';
 import type { SessionEvent } from '../dist/session/format.js';
-import type { HostProvider } from '../dist/host/provider.js';
 import type { PolicyMode } from '../dist/kernel/policy.js';
+import { testHostProvider } from './helpers/provider.ts';
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
 const MINIMAL = ['create', 'delete', 'edit', 'exec', 'find', 'read', 'search', 'write'];
@@ -248,14 +248,14 @@ test('a session built by the Host asks the provider with only the mode-selected 
     },
   });
   const requests: ModelRequest[] = [];
-  const provider = {
+  const provider = testHostProvider({
     capabilities: MESSAGES_CAPABILITIES,
     model: 'test-model',
     async *stream(request: ModelRequest) {
       requests.push(request);
       yield { type: 'text', text: 'ok' };
     },
-  } as unknown as HostProvider;
+  });
   const pair = createMemoryConnectionPair();
   const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy as { mode?: PolicyMode }, modeName: 'readonly', modePaths: directories,
     skillRegistry: { skills: [], diagnostics: [] } });
@@ -286,7 +286,7 @@ test('a switch asked for during a round takes effect only once that round ends',
     });
     let release!: () => void;
     const requests: ModelRequest[] = [];
-    const provider = {
+    const provider = testHostProvider({
       capabilities: MESSAGES_CAPABILITIES,
       model: 'test-model',
       async *stream(request: ModelRequest) {
@@ -299,7 +299,7 @@ test('a switch asked for during a round takes effect only once that round ends',
         }
         yield { type: 'text', text: 'ok' };
       },
-    } as unknown as HostProvider;
+    });
     const pair = createMemoryConnectionPair();
     const host = serveHost({
       input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy as { mode?: PolicyMode },
@@ -376,7 +376,7 @@ test('session close cannot retire a session while execute is settling a pending 
     let summaryStarted!: () => void;
     const started = new Promise<void>((resolve) => { summaryStarted = resolve; });
     const summaryResponse = new Promise<void>((resolve) => { releaseSummary = resolve; });
-    const provider = {
+    const provider = testHostProvider({
       capabilities: MESSAGES_CAPABILITIES,
       model: 'test-model',
       async *stream(request: ModelRequest) {
@@ -388,7 +388,7 @@ test('session close cannot retire a session while execute is settling a pending 
           yield { type: 'text', text: 'ok' };
         }
       },
-    } as unknown as HostProvider;
+    });
     let host!: Host;
     let closeAttempt!: Promise<{ value?: unknown; error?: { code?: string } }>;
     let releaseHost!: Promise<void>;
@@ -451,14 +451,14 @@ test('a rejected mode switch preserves the current tools through the next round 
       },
     });
     const requests: ModelRequest[] = [];
-    const provider = {
+    const provider = testHostProvider({
       capabilities: MESSAGES_CAPABILITIES,
       model: 'test-model',
       async *stream(request: ModelRequest) {
         requests.push(request);
         yield { type: 'text', text: 'ok' };
       },
-    } as unknown as HostProvider;
+    });
     const pair = createMemoryConnectionPair();
     const host = serveHost({
       input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy as { mode?: PolicyMode },
