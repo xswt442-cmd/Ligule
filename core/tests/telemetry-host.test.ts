@@ -13,11 +13,29 @@ import { createPermissionContext } from '../dist/kernel/permission.js';
 import { DEFAULT_PERMISSION_CONTEXT } from '../dist/kernel/permission.js';
 import { createTelemetry } from '../dist/kernel/telemetry.js';
 import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { once } from 'node:events';
+import type { TestContext } from 'node:test';
+import type { HostOptions } from '../dist/host/host.js';
+import type { HostProvider } from '../dist/host/provider.js';
+import type { ModelProvider, ModelRequest } from '../dist/kernel/loop.js';
+
+type TelemetryRecord = { timestamp?: string; component?: string; severity?: string; type: string; callId?: string; runId?: string; sessionId?: string; outcome?: string; executionId?: string; parentExecutionId?: string; parentRunId?: string; parentCallId?: string; inputTokens?: number; outputTokens?: number; durationMs?: number; provider?: string; model?: string; code?: string; errorCode?: string };
+type RequestRecord = { path: string | undefined; body: Buffer };
+type SessionEventView = { kind?: string; tool?: string; result: { content: { sessionId: string } } };
+type SetupOptions = {
+  telemetry?: boolean;
+  provider: HostProvider;
+  permission?: HostOptions['permission'];
+  permissionControl?: boolean;
+  policyMode?: 'ask' | 'auto';
+  configLayers?: HostOptions['configLayers'];
+  logger?: HostOptions['logger'];
+};
 
 const testRoot = join(process.cwd(), 'testplace', 'telemetry-host');
 
-async function filesUnder(directory) {
+async function filesUnder(directory: string): Promise<string[]> {
   const result = [];
   for (const name of (await readdir(directory)).filter(name => /^segment-[0-9]{8}\.jsonl$/u.test(name))) {
     result.push(await readFile(join(directory, name), 'utf8'));
@@ -25,18 +43,18 @@ async function filesUnder(directory) {
   return result;
 }
 
-async function waitForTelemetry(directory, predicate) {
+async function waitForTelemetry(directory: string, predicate: (records: TelemetryRecord[]) => boolean): Promise<TelemetryRecord[]> {
   const deadline = Date.now() + 5000;
-  let records = [];
+  let records: TelemetryRecord[] = [];
   do {
-    records = (await filesUnder(directory)).flatMap(text => text.trim().split('\n').map(JSON.parse));
+    records = (await filesUnder(directory)).flatMap(text => text.trim().split('\n').map(line => JSON.parse(line) as TelemetryRecord));
     if (predicate(records)) return records;
     await delay(10);
   } while (Date.now() < deadline);
   assert.fail(`expected telemetry events were not persisted: ${JSON.stringify(records.map(({ type, callId, outcome, errorCode }) => ({ type, callId, outcome, errorCode })))}`);
 }
 
-async function setupHost(t, { telemetry, provider, permission, permissionControl = false, policyMode = 'ask', configLayers, logger } = {}) {
+async function setupHost(t: TestContext, { telemetry, provider, permission, permissionControl = false, policyMode = 'ask', configLayers, logger }: SetupOptions) {
   await mkdir(testRoot, { recursive: true });
   const root = await mkdtemp(join(testRoot, 'case-'));
   t.after(async () => rm(root, { recursive: true, force: true }));
@@ -54,16 +72,16 @@ async function setupHost(t, { telemetry, provider, permission, permissionControl
   } });
   const client = {
     notify() {},
-    async request(method, params) {
+    async request(method: string, params: unknown) {
       if (method === 'approval.request') {
-        approvals.push(params);
+        approvals.push(params as { tool?: string });
         return { decision: 'allow' };
       }
       return undefined;
     },
   };
-  const approvals = [];
-  const host = createHost({ config, provider, policy: config.policy, interactive: true,
+  const approvals: { tool?: string }[] = [];
+  const host = createHost({ config, provider, policy: config.policy as HostOptions['policy'], interactive: true,
     permissionControl,
     ...(configLayers === undefined ? {} : { configLayers }),
     ...(permission === undefined ? {} : { permission }),
@@ -71,12 +89,12 @@ async function setupHost(t, { telemetry, provider, permission, permissionControl
     ...(telemetry === true ? { telemetry: { enabled: true, directory: telemetryDirectory } } : {}),
   });
   t.after(async () => host.release());
-  const { sessionId } = await host.handle({ method: 'session.create', params: {} }, client);
+  const { sessionId } = await host.handle({ method: 'session.create', params: {} }, client) as { sessionId: string };
   return { host, client, project, sessions, sessionId, telemetryDirectory, approvals };
 }
 
 test('Host enables loopback OTLP only from the user configuration layer', async (t) => {
-  const requests = [];
+  const requests: RequestRecord[] = [];
   const receiver = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
@@ -88,10 +106,10 @@ test('Host enables loopback OTLP only from the user configuration layer', async 
   await once(receiver, 'listening');
   t.after(async () => {
     receiver.closeAllConnections();
-    if (receiver.listening) await new Promise((resolve, reject) => receiver.close(error => error ? reject(error) : resolve()));
+    if (receiver.listening) await new Promise<void>((resolve, reject) => receiver.close(error => error ? reject(error) : resolve()));
   });
-  const endpoint = `http://127.0.0.1:${receiver.address().port}/v1/traces`;
-  const provider = { async *stream() { yield { type: 'text', text: 'done' }; yield { type: 'finish', reason: 'stop' }; } };
+  const endpoint = `http://127.0.0.1:${(receiver.address() as AddressInfo).port}/v1/traces`;
+  const provider = { async *stream() { yield { type: 'text', text: 'done' }; yield { type: 'finish', reason: 'stop' }; } } as unknown as HostProvider;
   await mkdir(testRoot, { recursive: true });
   const userDataRoot = await mkdtemp(join(testRoot, 'otlp-user-data-'));
   const previousDataRoot = process.env.LIGULE_HOME;
@@ -106,7 +124,7 @@ test('Host enables loopback OTLP only from the user configuration layer', async 
   await userConfigured.host.handle({ method: 'run.start', params: { sessionId: userConfigured.sessionId, input: 'trace user config' } }, userConfigured.client);
   await userConfigured.host.release();
   assert.ok(requests.some(request => request.path === '/v1/traces' && request.body.byteLength > 0));
-  const localRecords = (await filesUnder(join(userDataRoot, 'telemetry'))).flatMap(text => text.trim().split('\n').map(JSON.parse));
+  const localRecords = (await filesUnder(join(userDataRoot, 'telemetry'))).flatMap(text => text.trim().split('\n').map(line => JSON.parse(line) as TelemetryRecord));
   assert.ok(localRecords.length > 0);
   assert.ok(localRecords.every(event => typeof event.timestamp === 'string' && typeof event.component === 'string'
     && typeof event.severity === 'string' && typeof event.type === 'string'));
@@ -122,7 +140,7 @@ test('Host telemetry uses execution IDs plus Session and parent-call links, and 
   const provider = {
     name: 'vendor/local-test-provider',
     model: 'vendor/local-test-model',
-    async *stream({ tools, messages }) {
+    async *stream({ tools, messages }: ModelRequest) {
       const hasChildTool = tools.some(tool => tool.name === 'subagent');
       const hasToolResult = messages.some(message => message.role === 'tool');
       if (hasChildTool && !hasToolResult) {
@@ -141,26 +159,26 @@ test('Host telemetry uses execution IDs plus Session and parent-call links, and 
         yield { type: 'finish', reason: 'stop' };
       }
     },
-  };
+  } as unknown as HostProvider;
   const permission = createPermissionContext('workspace-write', 'policy', {
     filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
   });
   const hostContext = await setupHost(t, { provider, permission, permissionControl: true, telemetry: true });
   const accepted = await hostContext.host.handle({ method: 'run.start', params: {
     sessionId: hostContext.sessionId, input: 'PARENT_PROMPT_SECRET',
-  } }, hostContext.client);
+  } }, hostContext.client) as { runId: string };
   assert.equal(typeof accepted.runId, 'string');
   await hostContext.host.handle({ method: 'run.wait', params: {
     sessionId: hostContext.sessionId, runId: accepted.runId, origin: 'human',
   } }, hostContext.client);
   assert.ok(hostContext.approvals.some(item => item.tool === 'create'));
 
-  const parent = await hostContext.host.handle({ method: 'session.read', params: { sessionId: hostContext.sessionId } }, hostContext.client);
-  const delegated = parent.events.find(event => event.kind === 'tool' && event.tool === 'subagent');
+  const parent = await hostContext.host.handle({ method: 'session.read', params: { sessionId: hostContext.sessionId } }, hostContext.client) as { events: SessionEventView[] };
+  const delegated = parent.events.find(event => event.kind === 'tool' && event.tool === 'subagent') as SessionEventView;
   assert.ok(delegated);
   const childSessionId = delegated.result.content.sessionId;
   assert.equal(typeof childSessionId, 'string');
-  const childLines = (await readFile(join(hostContext.sessions, `${childSessionId}.jsonl`), 'utf8')).trim().split('\n').map(JSON.parse);
+  const childLines = (await readFile(join(hostContext.sessions, `${childSessionId}.jsonl`), 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { kind?: string; status?: string; runId?: string });
   assert.ok(childLines.some(event => event.kind === 'turn' && event.status === 'completed'));
   assert.ok(childLines.filter(event => event.kind === 'turn').every(event => event.runId === undefined));
   const records = await waitForTelemetry(hostContext.telemetryDirectory, events =>
@@ -172,7 +190,7 @@ test('Host telemetry uses execution IDs plus Session and parent-call links, and 
   const childStart = records.find(event => event.type === 'run.started' && event.sessionId === childSessionId);
   assert.ok(parentStart);
   assert.ok(childStart, 'child run telemetry event missing');
-  assert.match(parentStart.runId, /^[0-9a-f-]{36}$/u);
+  assert.match(parentStart.runId as string, /^[0-9a-f-]{36}$/u);
   assert.equal(childStart.runId, undefined);
   assert.equal(childStart.parentExecutionId, parentStart.executionId);
   assert.equal(childStart.parentRunId, parentStart.runId);
@@ -192,26 +210,26 @@ test('Host telemetry uses execution IDs plus Session and parent-call links, and 
   assert.equal(model.model, undefined);
   assert.equal(model.inputTokens, 3);
   assert.equal(model.outputTokens, 1);
-  assert.ok(model.durationMs >= 0);
+  assert.ok((model.durationMs as number) >= 0);
   assert.doesNotMatch(JSON.stringify(records), /PARENT_PROMPT_SECRET|CHILD_CONTENT_SECRET|child-secret-path|MODEL_OUTPUT_SECRET/u);
 });
 
 test('Host defaults telemetry off', async (t) => {
-  const provider = { async *stream() { yield { type: 'text', text: 'done' }; yield { type: 'finish', reason: 'stop' }; } };
+  const provider = { async *stream() { yield { type: 'text', text: 'done' }; yield { type: 'finish', reason: 'stop' }; } } as unknown as HostProvider;
   const context = await setupHost(t, { provider });
   await context.host.handle({ method: 'run.start', params: { sessionId: context.sessionId, input: 'ordinary input' } }, context.client);
   assert.deepEqual(await readdir(context.telemetryDirectory), []);
 });
 
 test('Host reports an unknown telemetry temporary file without disclosing its path or contents', async (t) => {
-  const provider = { async *stream() { yield { type: 'text', text: 'done' }; yield { type: 'finish', reason: 'stop' }; } };
-  const diagnostics = [];
+  const provider = { async *stream() { yield { type: 'text', text: 'done' }; yield { type: 'finish', reason: 'stop' }; } } as unknown as HostProvider;
+  const diagnostics: { message: string; fields: Record<string, unknown> }[] = [];
   const context = await setupHost(t, {
     provider,
     telemetry: true,
     logger: {
       debug() {},
-      log(message, fields) { diagnostics.push({ message, fields }); },
+      log(message: string, fields: Record<string, unknown>) { diagnostics.push({ message, fields }); },
     },
   });
   const temporaryName = `telemetry.manifest.${randomUUID()}.tmp`;
@@ -229,7 +247,7 @@ test('Host reports an unknown telemetry temporary file without disclosing its pa
 });
 
 test('Host release stays bounded when the telemetry file flush never settles', async (t) => {
-  const provider = { async *stream() { yield { type: 'text', text: 'done' }; yield { type: 'finish', reason: 'stop' }; } };
+  const provider = { async *stream() { yield { type: 'text', text: 'done' }; yield { type: 'finish', reason: 'stop' }; } } as unknown as HostProvider;
   const context = await setupHost(t, { provider, telemetry: true });
   await context.host.handle({ method: 'run.start', params: { sessionId: context.sessionId, input: 'create telemetry record' } }, context.client);
   const probe = await open(join(context.telemetryDirectory, 'probe'), 'w');
@@ -255,7 +273,7 @@ test('Loop classifies permission and tool restrictions as refused outcomes', asy
   for (const [name, code, permission, restrict] of [
     ['write_file', 'permission_read_only', createPermissionContext('read-only', 'disabled', DEFAULT_PERMISSION_CONTEXT.capabilities), false],
     ['read_file', 'tool_denied', undefined, true],
-  ]) {
+  ] as [string, string, HostOptions['permission'], boolean][]) {
     const kernel = createKernel({ config, ...(permission === undefined ? {} : { permission }), policy: createDecisionChain({ mode: 'auto' }) });
     kernel.register({ name, description: name, access: name === 'write_file' ? 'write' : 'read',
       parameters: { type: 'object', properties: {} }, run: () => 'unused' });
@@ -270,13 +288,13 @@ test('Loop classifies permission and tool restrictions as refused outcomes', asy
         yield { type: 'text', text: 'finished' };
         yield { type: 'finish', reason: 'stop' };
       }
-    } };
+    } } as unknown as ModelProvider;
     const loop = createLoop({ kernel, provider, telemetry, sessionId: `session-${name}` });
     await loop.run('input');
   }
   await telemetry.flush();
   await telemetry.shutdown();
-  const records = (await filesUnder(directory)).flatMap(text => text.trim().split('\n').map(JSON.parse));
+  const records = (await filesUnder(directory)).flatMap(text => text.trim().split('\n').map(line => JSON.parse(line) as TelemetryRecord));
   for (const callId of ['write_file-call', 'read_file-call']) {
     assert.ok(records.some(event => event.type === 'tool.finished' && event.callId === callId && event.outcome === 'refused'), JSON.stringify(records));
   }

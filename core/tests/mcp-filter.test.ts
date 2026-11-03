@@ -5,6 +5,10 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createMcpRegistry, createMcpTools, mcpServerConfigs } from '../dist/index.js';
+import type { NormalizedMcpServerConfig } from '../dist/capability/mcp.js';
+
+type FixturePaths = { directory: string; version: string; calls: string; unsafeEffect: string; filenameEffect: string };
+type SchemaView = { properties: Record<string, Record<string, unknown>>; additionalProperties?: unknown };
 
 const fixturePath = fileURLToPath(new URL('./fixtures/mcp-filter-server.mjs', import.meta.url));
 const testplace = join(process.cwd(), 'testplace');
@@ -35,7 +39,7 @@ test('a paused server cannot be started by discovery queued before access was re
   });
 });
 
-async function withFixture(run) {
+async function withFixture(run: (paths: FixturePaths, configs: NormalizedMcpServerConfig[]) => Promise<void>) {
   await mkdir(testplace, { recursive: true });
   const directory = await mkdtemp(join(testplace, 'mcp-filter-'));
   const paths = {
@@ -56,10 +60,10 @@ async function withFixture(run) {
   }
 }
 
-function browserToolPolicy(server, tool, schema) {
+function browserToolPolicy(server: string, tool: string, schema: Record<string, unknown>): Record<string, unknown> | undefined {
   if (server !== 'browser' || tool === 'unsafe_action') return undefined;
   if (tool !== 'safe') return undefined;
-  const properties = schema.properties;
+  const properties = schema.properties as Record<string, Record<string, unknown>>;
   return {
     ...schema,
     properties: { text: properties.text },
@@ -68,7 +72,7 @@ function browserToolPolicy(server, tool, schema) {
   };
 }
 
-function digestOf(definition) {
+function digestOf(definition: { name: string; description: string; inputSchema: unknown; annotations: unknown }) {
   return createHash('sha256').update(JSON.stringify({
     name: definition.name,
     description: definition.description,
@@ -77,22 +81,22 @@ function digestOf(definition) {
   })).digest('hex').slice(0, 12);
 }
 
-async function absent(path) {
+async function absent(path: string) {
   await assert.rejects(() => access(path), { code: 'ENOENT' });
 }
 
 test('registry filters every relisted definition and validates direct calls against its filtered schema', async () => {
   await withFixture(async (paths, configs) => {
     const registry = createMcpRegistry(configs, { toolPolicy: browserToolPolicy });
-    const tools = { seen: new Set() };
+    const tools = { seen: new Set<string>() };
     const { inspectTool, callTool } = createMcpTools(registry, tools);
     try {
       const firstList = await registry.toolsOf('browser');
       assert.deepEqual(firstList.map((tool) => tool.name), ['safe']);
-      assert.equal(firstList[0].inputSchema.properties.filename, undefined);
-      assert.equal(firstList[0].inputSchema.additionalProperties, false);
+      assert.equal((firstList[0].inputSchema as SchemaView).properties.filename, undefined);
+      assert.equal((firstList[0].inputSchema as SchemaView).additionalProperties, false);
 
-      const listing = await inspectTool.run({ server: 'browser' });
+      const listing = await inspectTool.run({ server: 'browser' }) as { tools: { name: string }[] };
       assert.deepEqual(listing.tools.map((tool) => tool.name), ['safe']);
       const firstInspection = await inspectTool.run({ server: 'browser', tool: 'safe' });
       const inspected = JSON.parse(firstInspection.text);
@@ -125,8 +129,8 @@ test('registry filters every relisted definition and validates direct calls agai
       await writeFile(paths.version, 'changed');
       const secondList = await registry.toolsOf('browser');
       assert.deepEqual(secondList.map((tool) => tool.name), ['safe']);
-      assert.equal(secondList[0].inputSchema.properties.filename, undefined);
-      assert.equal(secondList[0].inputSchema.additionalProperties, false);
+      assert.equal((secondList[0].inputSchema as SchemaView).properties.filename, undefined);
+      assert.equal((secondList[0].inputSchema as SchemaView).additionalProperties, false);
       const secondInspection = await inspectTool.run({ server: 'browser', tool: 'safe' });
       const updated = JSON.parse(secondInspection.text);
       assert.notEqual(secondInspection.schemaDigest, firstInspection.schemaDigest);
@@ -176,11 +180,11 @@ test('registry keeps existing tool visibility when no policy is supplied', async
     try {
       const tools = await registry.toolsOf('browser');
       assert.deepEqual(tools.map((tool) => tool.name), ['safe', 'unsafe_action']);
-      assert.equal(tools.find((tool) => tool.name === 'safe').inputSchema.properties.filename.type, 'string');
-      const safe = await registry.call('browser', 'safe', { text: 'legacy', filename: paths.filenameEffect });
+      assert.equal((tools.find((tool) => tool.name === 'safe') as unknown as { inputSchema: SchemaView }).inputSchema.properties.filename.type, 'string');
+      const safe = await registry.call('browser', 'safe', { text: 'legacy', filename: paths.filenameEffect }) as { content: { text: string }[] };
       assert.equal(safe.content[0].text, 'safe: legacy');
       assert.equal(await readFile(paths.filenameEffect, 'utf8'), 'filename side effect');
-      const result = await registry.call('browser', 'unsafe_action', {});
+      const result = await registry.call('browser', 'unsafe_action', {}) as { content: { text: string }[] };
       assert.equal(result.content[0].text, 'unsafe action ran');
       assert.equal(await readFile(paths.unsafeEffect, 'utf8'), 'unsafe tool ran');
     } finally {

@@ -5,12 +5,24 @@ import { join } from 'node:path';
 import {
   createConfig, createDecisionChain, createKernel, createPermissionContext, createSessionLog, execTool, readTool, refusalOf,
 } from '../dist/index.js';
+import type { KernelOptions } from '../dist/kernel/kernel.js';
+import type { SessionLog } from '../dist/session/session.js';
+
+type ToolEvent = {
+  kind?: string;
+  tool?: string;
+  result: { kind?: string; code?: string; reason?: string; content: string; spilled?: string };
+};
+
+function hasCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
+}
 
 const fullAccess = createPermissionContext('full-access', 'unrestricted', {
   filesystemRead: 'full', filesystemWrite: 'full', network: 'full', process: 'full',
 });
 
-async function withDirectory(run) {
+async function withDirectory<TResult>(run: (directory: string) => TResult | Promise<TResult>): Promise<TResult> {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'session-'));
   try {
     return await run(root);
@@ -20,18 +32,18 @@ async function withDirectory(run) {
 }
 
 // 首行保存会话元信息，不属于事件；以下测试检查后续事件记录。
-async function eventLines(path) {
+async function eventLines(path: string): Promise<{ kind?: string }[]> {
   const bytes = await readFile(path, 'utf8');
-  return bytes.split('\n').filter((line) => line !== '').map(JSON.parse).filter((event) => event.kind !== 'session');
+  return bytes.split('\n').filter((line) => line !== '').map((line) => JSON.parse(line) as { kind?: string }).filter((event) => event.kind !== 'session');
 }
 
-async function eventBytes(path) {
+async function eventBytes(path: string): Promise<Buffer> {
   const bytes = await readFile(path);
   const cut = bytes.indexOf(0x0a);
   return bytes.subarray(cut + 1);
 }
 
-function kernelWith(session, extra = {}) {
+function kernelWith(session: SessionLog, extra: { config?: Record<string, unknown>; kernel?: Omit<KernelOptions, 'config' | 'session'> } = {}) {
   return createKernel({
     config: createConfig({ user: { boundary: process.cwd(), limits: { resultBytes: 200 }, ...extra.config } }),
     session,
@@ -66,7 +78,7 @@ test('session policy snapshots are retained in the log but excluded from the mod
       kind: 'sessionPolicy', ignorable: true, override: 'ask', consecutive: 1, total: 1, forcedToAsk: true,
     });
     assert.deepEqual(await session.modelView(), before);
-    assert.equal((await session.read()).at(-1).kind, 'sessionPolicy');
+    assert.equal((await session.read()).at(-1)!.kind, 'sessionPolicy');
     await session.close();
   });
 });
@@ -128,7 +140,7 @@ test('a log that cannot be written reports a code and leaves nothing behind', as
     const session = createSessionLog({ directory: blocked, id: 'run' });
     await assert.rejects(
       () => session.append({ kind: 'tool', tool: 'read', args: {}, result: { content: 'x' } }),
-      (error) => error.code === 'session_lock_failed',
+      (error) => hasCode(error, 'session_lock_failed'),
     );
     assert.equal(await readFile(blocked, 'utf8'), 'not a directory');
   });
@@ -148,9 +160,9 @@ test('an oversized result in a session directory that does not exist yet still s
       run: async () => ({ text: 'z'.repeat(400) }),
     });
     await kernel.call('chatty', {});
-    const [event] = await session.read();
+    const [event] = await session.read() as unknown as ToolEvent[];
     assert.match(event.result.content, /omitted/);
-    assert.deepEqual(JSON.parse(await readFile(join(directory, event.result.spilled), 'utf8')), { text: 'z'.repeat(400) });
+    assert.deepEqual(JSON.parse(await readFile(join(directory, event.result.spilled!), 'utf8')), { text: 'z'.repeat(400) });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -166,10 +178,10 @@ test('a refusal and a failure each carry their own code into the log', async () 
       },
     });
     kernel.register(execTool);
-    await assert.rejects(() => kernel.call('exec', { command: 'rm -rf /tmp/nowhere' }), (error) => error.code === 'policy_denied');
-    await assert.rejects(() => kernel.call('exec', { command: '   ' }), (error) => error.code === 'exec_command_required');
+    await assert.rejects(() => kernel.call('exec', { command: 'rm -rf /tmp/nowhere' }), (error) => hasCode(error, 'policy_denied'));
+    await assert.rejects(() => kernel.call('exec', { command: '   ' }), (error) => hasCode(error, 'exec_command_required'));
 
-    const events = await session.read();
+    const events = await session.read() as unknown as ToolEvent[];
     assert.deepEqual(events.filter((event) => event.kind === 'tool').map((event) => [event.tool, event.result.kind, event.result.code]), [
       ['exec', 'refusal', 'policy_denied'],
       ['exec', 'failure', 'exec_command_required'],
@@ -190,11 +202,11 @@ test('an oversized result keeps a retrievable reference instead of the whole tex
       run: async () => ({ text: 'y'.repeat(500) }),
     });
     await kernel.call('chatty', {});
-    const [event] = await session.read();
+    const [event] = await session.read() as unknown as ToolEvent[];
     assert.match(event.result.content, /\[omitted: full output is \d+ bytes, kept in result-\d+-[0-9a-f]{8}\.json]/);
     assert.doesNotMatch(event.result.content, /read via compact/, 'do not advertise a tool that is not registered');
     assert.ok(Buffer.byteLength(event.result.content, 'utf8') <= 200);
-    const spilled = await readFile(join(directory, event.result.spilled), 'utf8');
+    const spilled = await readFile(join(directory, event.result.spilled!), 'utf8');
     assert.equal(spilled, JSON.stringify({ text: 'y'.repeat(500) }));
   });
 });

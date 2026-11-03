@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
+import type { IncomingHttpHeaders, ServerResponse } from 'node:http';
 import { setImmediate } from 'node:timers';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -9,12 +10,28 @@ import {
   capabilitiesOf, createConfig, createKernel, createLoop, createMessagesProvider, createChatCompletionsProvider, createSessionLog,
   DEFAULT_RETRY, MESSAGES_CAPABILITIES, readTool,
 } from '../dist/index.js';
+import type { ModelRequest, ProviderEvent } from '../dist/kernel/loop.js';
 import { fetchablePort, listenFetchable } from './helpers/port.ts';
 
 const API_KEY_ENV = 'LIGULE_TEST_API_KEY';
 const FAST_RETRY = { ...DEFAULT_RETRY, baseDelayMs: 1 };
 
-function sseBody(events) {
+type ProviderOptions = NonNullable<Parameters<typeof createMessagesProvider>[0]>;
+
+type ProviderFailure = { code?: string; detail?: string; cause?: unknown };
+
+type WireBody = Record<string, unknown>;
+
+type ObservedRequest = { url: string | undefined; headers: IncomingHttpHeaders; body: WireBody };
+
+type SseEvent = {
+  type: string;
+  content_block?: { type?: string; [key: string]: unknown };
+  delta?: { stop_reason?: string; [key: string]: unknown };
+  [key: string]: unknown;
+};
+
+function sseBody(events: readonly SseEvent[]): string {
   const shaped = events.map((event) => ({ ...event }));
   const stopIndex = shaped.findIndex((event) => event.type === 'message_stop');
   if (stopIndex >= 0) {
@@ -29,18 +46,19 @@ function sseBody(events) {
 const EMPTY_TURN = [{ type: 'message_start', message: { usage: {} } }, { type: 'message_stop' }];
 
 // 一次真实的 HTTP 往返：本地起一个服务按 SSE 写出去，客户端走的是它平时走的那条解析路径。
-async function withEndpoint(respond, run) {
-  const requests = [];
+async function withEndpoint<TResult>(
+  respond: (attempt: number, response: ServerResponse, request: ObservedRequest) => void | Promise<void>,
+  run: (baseUrl: string, requests: ObservedRequest[]) => TResult | Promise<TResult>,
+): Promise<TResult> {
+  const requests: ObservedRequest[] = [];
   const server = createServer(async (request, response) => {
-    const chunks = [];
+    const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(chunk);
     const text = Buffer.concat(chunks).toString('utf8');
-    requests.push({
-      url: request.url,
-      headers: request.headers,
-      body: text === '' ? undefined : JSON.parse(text),
-    });
-    await respond(requests.length, response, requests[requests.length - 1]);
+    const body = text === '' ? undefined : JSON.parse(text);
+    const observed = { url: request.url, headers: request.headers, body } as unknown as ObservedRequest;
+    requests.push(observed);
+    await respond(requests.length, response, observed);
   });
   const baseUrl = `http://127.0.0.1:${await listenFetchable(server)}`;
   process.env[API_KEY_ENV] = 'test-key';
@@ -53,21 +71,21 @@ async function withEndpoint(respond, run) {
   }
 }
 
-async function collect(stream) {
-  const events = [];
+async function collect(stream: AsyncIterable<ProviderEvent>): Promise<ProviderEvent[]> {
+  const events: ProviderEvent[] = [];
   for await (const event of stream) events.push(event);
   return events;
 }
 
-function provider(baseUrl, extra = {}) {
+function provider(baseUrl: string, extra: ProviderOptions = {}) {
   return createMessagesProvider({ baseUrl, model: 'test-model', apiKeyEnv: API_KEY_ENV, retry: FAST_RETRY, ...extra });
 }
 
-function chatProvider(baseUrl, extra = {}) {
+function chatProvider(baseUrl: string, extra: ProviderOptions = {}) {
   return createChatCompletionsProvider({ baseUrl: `${baseUrl}/v1`, model: 'test-model', apiKeyEnv: API_KEY_ENV, retry: FAST_RETRY, ...extra });
 }
 
-function chatSse(frames, done = true) {
+function chatSse(frames: readonly unknown[], done = true): string {
   return `${frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join('')}${done ? 'data: [DONE]\n\n' : ''}`;
 }
 
@@ -164,7 +182,10 @@ test('a signature delta on another kind of block is reported as a broken stream'
   }, async (baseUrl) => {
     await assert.rejects(
       collect(provider(baseUrl).stream({ system: '', tools: [], messages: [] })),
-      (error) => error.code === 'provider_stream_invalid' && /signature/.test(error.detail),
+      (error) => {
+        const failure = error as ProviderFailure;
+        return failure.code === 'provider_stream_invalid' && /signature/.test(String(failure.detail));
+      },
     );
   });
 });
@@ -182,7 +203,10 @@ test('a content block type nobody named is still refused', async () => {
   }, async (baseUrl) => {
     await assert.rejects(
       collect(provider(baseUrl).stream({ system: '', tools: [], messages: [] })),
-      (error) => error.code === 'provider_content_unsupported' && error.detail === 'unsupported content block type',
+      (error) => {
+        const failure = error as ProviderFailure;
+        return failure.code === 'provider_content_unsupported' && failure.detail === 'unsupported content block type';
+      },
     );
   });
 });
@@ -233,8 +257,8 @@ test('configuration can lower a declared capability but never raise it', () => {
   });
   assert.equal(capabilitiesOf({ streaming: false }).streaming, false);
   assert.deepEqual(capabilitiesOf(), MESSAGES_CAPABILITIES);
-  assert.throws(() => capabilitiesOf({ thinking: true }), (error) => error.code === 'provider_capability_unknown');
-  assert.throws(() => capabilitiesOf({ maxOutputTokens: '8192' }), (error) => error.code === 'provider_capability_invalid');
+  assert.throws(() => capabilitiesOf({ thinking: true }), (error) => (error as ProviderFailure).code === 'provider_capability_unknown');
+  assert.throws(() => capabilitiesOf({ maxOutputTokens: '8192' }), (error) => (error as ProviderFailure).code === 'provider_capability_invalid');
 });
 
 test('a retryable status is retried up to the boundary and a non-retryable one is not retried', async () => {
@@ -247,7 +271,7 @@ test('a retryable status is retried up to the boundary and a non-retryable one i
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end(sseBody(EMPTY_TURN));
   }, async (baseUrl, requests) => {
-    assert.deepEqual(await collect(provider(baseUrl).stream({})), [{ type: 'finish', reason: 'stop' }]);
+    assert.deepEqual(await collect(provider(baseUrl).stream({} as unknown as ModelRequest)), [{ type: 'finish', reason: 'stop' }]);
     assert.equal(requests.length, 3);
   });
 
@@ -256,8 +280,11 @@ test('a retryable status is retried up to the boundary and a non-retryable one i
     response.end('upstream is busy');
   }, async (baseUrl, requests) => {
     await assert.rejects(
-      () => collect(provider(baseUrl, { retry: { ...FAST_RETRY, maxAttempts: 2 } }).stream({})),
-      (error) => error.code === 'provider_http_error' && error.detail === 'HTTP 503',
+      () => collect(provider(baseUrl, { retry: { ...FAST_RETRY, maxAttempts: 2 } }).stream({} as unknown as ModelRequest)),
+      (error) => {
+        const failure = error as ProviderFailure;
+        return failure.code === 'provider_http_error' && failure.detail === 'HTTP 503';
+      },
     );
     assert.equal(requests.length, 2, '尝试次数不超过定下的边界');
   });
@@ -266,7 +293,10 @@ test('a retryable status is retried up to the boundary and a non-retryable one i
     response.writeHead(400, { 'content-type': 'text/plain' });
     response.end('bad request');
   }, async (baseUrl, requests) => {
-    await assert.rejects(() => collect(provider(baseUrl).stream({})), (error) => error.code === 'provider_http_error');
+    await assert.rejects(
+      () => collect(provider(baseUrl).stream({} as unknown as ModelRequest)),
+      (error) => (error as ProviderFailure).code === 'provider_http_error',
+    );
     assert.equal(requests.length, 1, 'a 400 is never retried');
   });
 });
@@ -285,14 +315,17 @@ test('a tool call whose arguments are not valid JSON reports a stable code', asy
     response.end(sseBody(turn));
   }, async (baseUrl) => {
     await assert.rejects(
-      () => collect(provider(baseUrl).stream({})),
-      (error) => error.code === 'provider_tool_args_invalid' && error.detail !== '{"path":' && error.cause === undefined,
+      () => collect(provider(baseUrl).stream({} as unknown as ModelRequest)),
+      (error) => {
+        const failure = error as ProviderFailure;
+        return failure.code === 'provider_tool_args_invalid' && failure.detail !== '{"path":' && failure.cause === undefined;
+      },
     );
   });
 });
 
 test('Messages completion reason is explicit and output exhaustion is distinct', async () => {
-  const makeTurn = (reason) => [
+  const makeTurn = (reason: string) => [
     { type: 'message_start', message: { usage: {} } },
     { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
     { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } },
@@ -304,13 +337,13 @@ test('Messages completion reason is explicit and output exhaustion is distinct',
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end(sseBody(makeTurn('end_turn')));
   }, async (baseUrl) => {
-    assert.deepEqual((await collect(provider(baseUrl).stream({}))).at(-1), { type: 'finish', reason: 'stop' });
+    assert.deepEqual((await collect(provider(baseUrl).stream({} as unknown as ModelRequest))).at(-1), { type: 'finish', reason: 'stop' });
   });
   await withEndpoint(async (_attempt, response) => {
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end(sseBody(makeTurn('max_tokens')));
   }, async (baseUrl) => {
-    assert.deepEqual((await collect(provider(baseUrl).stream({}))).at(-1), { type: 'finish', reason: 'max_tokens' });
+    assert.deepEqual((await collect(provider(baseUrl).stream({} as unknown as ModelRequest))).at(-1), { type: 'finish', reason: 'max_tokens' });
   });
 });
 
@@ -323,7 +356,7 @@ test('Chat Completions exposes protocol completion and lets length override part
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end(chatSse(normal));
   }, async (baseUrl) => {
-    assert.deepEqual(await collect(chatProvider(baseUrl).stream({})), [
+    assert.deepEqual(await collect(chatProvider(baseUrl).stream({} as unknown as ModelRequest)), [
       { type: 'text', text: 'answer' },
       { type: 'finish', reason: 'stop' },
     ]);
@@ -337,7 +370,7 @@ test('Chat Completions exposes protocol completion and lets length override part
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end(chatSse(exhausted));
   }, async (baseUrl) => {
-    assert.deepEqual(await collect(chatProvider(baseUrl).stream({})), [
+    assert.deepEqual(await collect(chatProvider(baseUrl).stream({} as unknown as ModelRequest)), [
       { type: 'text', text: 'partial' },
       { type: 'finish', reason: 'length' },
     ]);
@@ -349,7 +382,10 @@ test('Chat Completions requires its DONE terminator', async () => {
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end(chatSse([{ choices: [{ index: 0, delta: { content: 'partial' }, finish_reason: 'stop' }] }], false));
   }, async (baseUrl) => {
-    await assert.rejects(() => collect(chatProvider(baseUrl).stream({})), (error) => error.code === 'provider_stream_incomplete');
+    await assert.rejects(
+      () => collect(chatProvider(baseUrl).stream({} as unknown as ModelRequest)),
+      (error) => (error as ProviderFailure).code === 'provider_stream_incomplete',
+    );
   });
 });
 
@@ -361,14 +397,20 @@ test('an unsupported block type and a stream that starts late both report a stab
       { type: 'content_block_start', index: 0, content_block: { type: 'image' } },
     ]));
   }, async (baseUrl) => {
-    await assert.rejects(() => collect(provider(baseUrl).stream({})), (error) => error.code === 'provider_content_unsupported');
+    await assert.rejects(
+      () => collect(provider(baseUrl).stream({} as unknown as ModelRequest)),
+      (error) => (error as ProviderFailure).code === 'provider_content_unsupported',
+    );
   });
 
   await withEndpoint(async (attempt, response) => {
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end(sseBody([{ type: 'content_block_start', index: 0, content_block: { type: 'text' } }]));
   }, async (baseUrl) => {
-    await assert.rejects(() => collect(provider(baseUrl).stream({})), (error) => error.code === 'provider_stream_invalid');
+    await assert.rejects(
+      () => collect(provider(baseUrl).stream({} as unknown as ModelRequest)),
+      (error) => (error as ProviderFailure).code === 'provider_stream_invalid',
+    );
   });
 });
 
@@ -380,8 +422,8 @@ test('a stream that ends inside a frame is reported instead of dropped', async (
     response.end('data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"c","name":"read"}}\n');
   }, async (baseUrl) => {
     await assert.rejects(
-      () => collect(provider(baseUrl).stream({})),
-      (error) => error.code === 'provider_stream_incomplete',
+      () => collect(provider(baseUrl).stream({} as unknown as ModelRequest)),
+      (error) => (error as ProviderFailure).code === 'provider_stream_incomplete',
     );
   });
 });
@@ -391,11 +433,12 @@ test('an empty environment reference reports missing when its native store is av
   const previous = process.env[reference];
   delete process.env[reference];
   try {
-    const events = collect(createMessagesProvider({ baseUrl: 'http://127.0.0.1:1', model: 'm', apiKeyEnv: reference }).stream({}));
+    const events = collect(createMessagesProvider({ baseUrl: 'http://127.0.0.1:1', model: 'm', apiKeyEnv: reference }).stream({} as unknown as ModelRequest));
     await assert.rejects(() => events, (error) => {
-      if (error.code === 'provider_credential_missing') return error.detail === reference;
+      const failure = error as ProviderFailure;
+      if (failure.code === 'provider_credential_missing') return failure.detail === reference;
       return process.env.LIGULE_CREDENTIAL_NATIVE_REQUIRED !== '1'
-        && error.code === 'credential_store_unavailable';
+        && failure.code === 'credential_store_unavailable';
     });
   } finally {
     if (previous === undefined) delete process.env[reference];
@@ -408,10 +451,13 @@ test('a projection with a call nobody answered is refused before the request goe
   try {
     const events = collect(createMessagesProvider({ baseUrl: 'http://127.0.0.1:1', model: 'm', apiKeyEnv: API_KEY_ENV }).stream({
       messages: [{ role: 'assistant', text: '', toolCalls: [{ id: 'call_7', name: 'read', args: {} }] }],
-    }));
+    } as unknown as ModelRequest));
     await assert.rejects(
       () => events,
-      (error) => error.code === 'provider_unanswered_call' && error.detail === 'read (call_7)',
+      (error) => {
+        const failure = error as ProviderFailure;
+        return failure.code === 'provider_unanswered_call' && failure.detail === 'read (call_7)';
+      },
     );
   } finally {
     delete process.env[API_KEY_ENV];
@@ -419,19 +465,19 @@ test('a projection with a call nobody answered is refused before the request goe
 });
 
 test('a service address that is not an HTTP(S) root, and a missing model, are refused at construction', () => {
-  assert.throws(() => createMessagesProvider({ model: 'm' }), (error) => error.code === 'provider_base_url_required');
+  assert.throws(() => createMessagesProvider({ model: 'm' }), (error) => (error as ProviderFailure).code === 'provider_base_url_required');
   for (const baseUrl of [
     'ftp://example.com', 'https://user:pass@example.com', 'https://example.com/?a=1', 'https://example.com/#frag', 'not a url',
   ]) {
     assert.throws(
       () => createMessagesProvider({ baseUrl, model: 'm' }),
-      (error) => error.code === 'provider_base_url_invalid',
+      (error) => (error as ProviderFailure).code === 'provider_base_url_invalid',
       baseUrl,
     );
   }
   assert.throws(
     () => createMessagesProvider({ baseUrl: 'https://example.com' }),
-    (error) => error.code === 'provider_model_required',
+    (error) => (error as ProviderFailure).code === 'provider_model_required',
   );
 });
 

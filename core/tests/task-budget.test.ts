@@ -5,16 +5,17 @@ import { KernelError } from '../dist/kernel/error.js';
 import { createTaskBudget } from '../dist/kernel/task-budget.js';
 import { createLoop } from '../dist/kernel/loop.js';
 import { createKernel } from '../dist/kernel/kernel.js';
+import type { ModelRequest } from '../dist/kernel/loop.js';
 
-const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 test('a Loop forwards its task deadline to the provider without a separate caller signal', async () => {
   const budget = createTaskBudget({ maxModelCalls: 1, timeoutMs: 80, requestTimeoutMs: 50 });
   const keepAlive = setTimeout(() => {}, 1_000);
-  const provider = { async *stream(_request, { signal }) {
+  const provider = { async *stream(_request: ModelRequest, { signal }: { readonly signal?: AbortSignal }) {
     await new Promise((resolve, reject) => {
-      if (signal.aborted) reject(signal.reason);
-      else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      if (signal!.aborted) reject(signal!.reason);
+      else signal!.addEventListener('abort', () => reject(signal!.reason), { once: true });
     });
   } };
   try {
@@ -55,7 +56,7 @@ test('one work item stays suspended until all of its overlapping interactions en
 
 test('interaction and manual suspension releases remain balanced after work ends', async () => {
   const budget = createTaskBudget({ maxModelCalls: 2, timeoutMs: 80, requestTimeoutMs: 50, interactionWaitTimeoutMs: 400 });
-  let endInteraction;
+  let endInteraction!: () => void;
   try {
     await budget.runWork(async () => {
       const resumeManualSuspension = budget.suspendCurrentWork();
@@ -115,7 +116,7 @@ test('validates limits and allows exactly the configured number of calls', () =>
     budget.consumeModelCall();
     assert.equal(budget.snapshot().modelCalls, 1);
     assert.equal(budget.signal.aborted, false);
-    assert.throws(() => budget.consumeModelCall(), (error) => error.code === 'task_model_budget_exhausted');
+    assert.throws(() => budget.consumeModelCall(), (error) => (error as { code?: string }).code === 'task_model_budget_exhausted');
     assert.equal(budget.signal.reason.code, 'task_model_budget_exhausted');
   } finally { budget.dispose(); }
 });
@@ -127,7 +128,7 @@ test('concurrent consumers cannot exceed the shared limit and exhaustion stops a
     const results = await Promise.all(Array.from({ length: 32 }, async () => {
       await Promise.resolve();
       try { budget.consumeModelCall(); return 'consumed'; }
-      catch (error) { return error.code; }
+      catch (error) { return (error as { code: string }).code; }
     }));
     assert.equal(results.filter((result) => result === 'consumed').length, 1);
     assert.equal(budget.snapshot().modelCalls, 1);
@@ -172,7 +173,7 @@ test('parent cancellation reaches task and active provider requests', () => {
   parent.abort(new Error('parent stopped'));
   assert.equal(budget.signal.aborted, true);
   assert.equal(request.signal.aborted, true);
-  assert.throws(() => budget.consumeModelCall(), (error) => error.code === 'task_cancelled');
+  assert.throws(() => budget.consumeModelCall(), (error) => (error as { code?: string }).code === 'task_cancelled');
   request.dispose();
   budget.dispose();
 });
@@ -180,10 +181,10 @@ test('parent cancellation reaches task and active provider requests', () => {
 test('parent cancellation remains terminal while overlapping interaction releases finish', async () => {
   const parent = new AbortController();
   const budget = createTaskBudget({ maxModelCalls: 2, timeoutMs: 500, requestTimeoutMs: 100 }, parent.signal);
-  let releaseWork;
-  const heldWork = new Promise((resolve) => { releaseWork = resolve; });
-  let endFirst;
-  let endSecond;
+  let releaseWork!: () => void;
+  const heldWork = new Promise<void>((resolve) => { releaseWork = resolve; });
+  let endFirst!: () => void;
+  let endSecond!: () => void;
   const work = budget.runWork(async () => {
     endFirst = budget.startInteraction();
     endSecond = budget.startInteraction();
@@ -209,6 +210,6 @@ test('disposing clears successful task and request timers without aborting signa
   await sleep(110);
   assert.equal(budget.signal.aborted, false);
   assert.equal(request.signal.aborted, false);
-  assert.throws(() => budget.consumeModelCall(), (error) => error.code === 'task_budget_disposed');
-  assert.throws(() => budget.request(), (error) => error.code === 'task_budget_disposed');
+  assert.throws(() => budget.consumeModelCall(), (error) => (error as { code?: string }).code === 'task_budget_disposed');
+  assert.throws(() => budget.request(), (error) => (error as { code?: string }).code === 'task_budget_disposed');
 });

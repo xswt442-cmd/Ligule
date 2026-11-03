@@ -1,23 +1,37 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import type { ServerResponse } from 'node:http';
+import type { Socket } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createMessagesProvider, DEFAULT_RETRY } from '../dist/index.js';
+import type { RetryPolicy } from '../dist/model/http.js';
+import type { ModelRequest, ProviderEvent } from '../dist/kernel/loop.js';
 import { listenFetchable } from './helpers/port.ts';
 
 const API_KEY_ENV = 'LIGULE_HTTP_FAULT_TEST_KEY';
 const FAST_RETRY = { ...DEFAULT_RETRY, baseDelayMs: 1 };
 
-function provider(baseUrl, retry = FAST_RETRY) {
+type ProviderFailure = { code?: string; detail: string; diagnostics?: unknown };
+
+type ObservedRequest = {
+  method: string | undefined;
+  url: string | undefined;
+  responseClosed: Promise<unknown>;
+  responseFinished: boolean;
+};
+
+function provider(baseUrl: string, retry: RetryPolicy = FAST_RETRY) {
   return createMessagesProvider({ baseUrl, model: 'http-fault-test', apiKeyEnv: API_KEY_ENV, retry });
 }
 
-function diagnostic(error, expected) {
-  assert.deepEqual(error.diagnostics, expected);
-  assert.equal(JSON.stringify(error.diagnostics).includes('synthetic-http-fault-key'), false);
+function diagnostic(error: unknown, expected: unknown) {
+  const failure = error as ProviderFailure;
+  assert.deepEqual(failure.diagnostics, expected);
+  assert.equal(JSON.stringify(failure.diagnostics).includes('synthetic-http-fault-key'), false);
 }
 
-function categoryForStatus(status) {
+function categoryForStatus(status: number) {
   if (status === 401 || status === 403) return 'authentication';
   if (status === 429) return 'rate_limit';
   if (status >= 500) return 'server';
@@ -25,14 +39,17 @@ function categoryForStatus(status) {
   return 'http';
 }
 
-async function collect(stream) {
-  const events = [];
+async function collect(stream: AsyncIterable<ProviderEvent>): Promise<ProviderEvent[]> {
+  const events: ProviderEvent[] = [];
   for await (const event of stream) events.push(event);
   return events;
 }
 
-async function withEndpoint(respond, run) {
-  const requests = [];
+async function withEndpoint(
+  respond: (attempt: number, response: ServerResponse) => void | Promise<void>,
+  run: (baseUrl: string, requests: ObservedRequest[]) => void | Promise<void>,
+): Promise<void> {
+  const requests: ObservedRequest[] = [];
   const server = createServer(async (request, response) => {
     for await (const _chunk of request) { /* consume the real request body */ }
     const record = {
@@ -56,7 +73,7 @@ async function withEndpoint(respond, run) {
   }
 }
 
-function okEmpty(response) {
+function okEmpty(response: ServerResponse) {
   response.writeHead(200, { 'content-type': 'text/event-stream' });
   response.end('event: message_start\ndata: {"type":"message_start","message":{"usage":{}}}\n\nevent: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n');
 }
@@ -69,7 +86,7 @@ test('real HTTP 429 and 500/503 responses retry only until success or configured
         response.end('controlled local upstream failure');
       } else okEmpty(response);
     }, async (baseUrl, requests) => {
-      assert.deepEqual(await collect(provider(baseUrl).stream({})), [{ type: 'finish', reason: 'stop' }]);
+      assert.deepEqual(await collect(provider(baseUrl).stream({} as unknown as ModelRequest)), [{ type: 'finish', reason: 'stop' }]);
       assert.equal(requests.length, 3, `${status} then success has three actual requests`);
     });
 
@@ -78,10 +95,11 @@ test('real HTTP 429 and 500/503 responses retry only until success or configured
       response.end('controlled local upstream failure');
     }, async (baseUrl, requests) => {
       await assert.rejects(
-        () => collect(provider(baseUrl, { ...FAST_RETRY, maxAttempts: 2 }).stream({})),
+        () => collect(provider(baseUrl, { ...FAST_RETRY, maxAttempts: 2 }).stream({} as unknown as ModelRequest)),
         (error) => {
-          assert.equal(error.code, 'provider_http_error');
-          assert.equal(error.detail.startsWith(`HTTP ${status}`), true);
+          const failure = error as ProviderFailure;
+          assert.equal(failure.code, 'provider_http_error');
+          assert.equal(failure.detail.startsWith(`HTTP ${status}`), true);
           diagnostic(error, {
             category: categoryForStatus(status), status, attempts: 2,
             responseReceived: true, streamReceived: false, recoverable: true,
@@ -101,10 +119,11 @@ test('permanent 400, 401, and 403 responses fail without another HTTP request', 
       response.end('permanent local rejection');
     }, async (baseUrl, requests) => {
       await assert.rejects(
-        () => collect(provider(baseUrl).stream({})),
+        () => collect(provider(baseUrl).stream({} as unknown as ModelRequest)),
         (error) => {
-          assert.equal(error.code, 'provider_http_error');
-          assert.equal(error.detail.startsWith(`HTTP ${status}`), true);
+          const failure = error as ProviderFailure;
+          assert.equal(failure.code, 'provider_http_error');
+          assert.equal(failure.detail.startsWith(`HTTP ${status}`), true);
           diagnostic(error, {
             category: categoryForStatus(status), status, attempts: 1,
             responseReceived: true, streamReceived: status === 400, recoverable: false,
@@ -121,16 +140,17 @@ test('disabled 429, 5xx, and transport retry categories fail after one real requ
   for (const [status, retry] of [
     [429, { ...FAST_RETRY, retry429: false }],
     [503, { ...FAST_RETRY, retry5xx: false }],
-  ]) {
+  ] as const) {
     await withEndpoint((_attempt, response) => {
       response.writeHead(status);
       response.end('retry category disabled');
     }, async (baseUrl, requests) => {
       await assert.rejects(
-        () => collect(provider(baseUrl, retry).stream({})),
+        () => collect(provider(baseUrl, retry).stream({} as unknown as ModelRequest)),
         (error) => {
-          assert.equal(error.code, 'provider_http_error');
-          assert.equal(error.detail.startsWith(`HTTP ${status}`), true);
+          const failure = error as ProviderFailure;
+          assert.equal(failure.code, 'provider_http_error');
+          assert.equal(failure.detail.startsWith(`HTTP ${status}`), true);
           diagnostic(error, {
             category: categoryForStatus(status), status, attempts: 1,
             responseReceived: true, streamReceived: false, recoverable: false,
@@ -143,12 +163,13 @@ test('disabled 429, 5xx, and transport retry categories fail after one real requ
   }
 
   await withEndpoint((_attempt, response) => {
-    response.socket.destroy();
+    (response.socket as Socket).destroy();
   }, async (baseUrl, requests) => {
     await assert.rejects(
-      () => collect(provider(baseUrl, { ...FAST_RETRY, retryTransport: false }).stream({})),
+      () => collect(provider(baseUrl, { ...FAST_RETRY, retryTransport: false }).stream({} as unknown as ModelRequest)),
       (error) => {
-        assert.equal(error.code, 'provider_transport_failed');
+        const failure = error as ProviderFailure;
+        assert.equal(failure.code, 'provider_transport_failed');
         diagnostic(error, {
           category: 'transport', attempts: 1,
           responseReceived: false, streamReceived: false, recoverable: false,
@@ -168,9 +189,10 @@ test('connection refusal and socket close before response headers use bounded tr
   process.env[API_KEY_ENV] = 'synthetic-http-fault-key';
   try {
     await assert.rejects(
-      () => collect(provider(refusedUrl, { ...FAST_RETRY, maxAttempts: 2 }).stream({})),
+      () => collect(provider(refusedUrl, { ...FAST_RETRY, maxAttempts: 2 }).stream({} as unknown as ModelRequest)),
       (error) => {
-        assert.equal(error.code, 'provider_transport_failed');
+        const failure = error as ProviderFailure;
+        assert.equal(failure.code, 'provider_transport_failed');
         diagnostic(error, {
           category: 'transport', attempts: 2,
           responseReceived: false, streamReceived: false, recoverable: true,
@@ -183,12 +205,13 @@ test('connection refusal and socket close before response headers use bounded tr
   }
 
   await withEndpoint((_attempt, response) => {
-    response.socket.destroy();
+    (response.socket as Socket).destroy();
   }, async (baseUrl, requests) => {
     await assert.rejects(
-      () => collect(provider(baseUrl, { ...FAST_RETRY, maxAttempts: 2 }).stream({})),
+      () => collect(provider(baseUrl, { ...FAST_RETRY, maxAttempts: 2 }).stream({} as unknown as ModelRequest)),
       (error) => {
-        assert.equal(error.code, 'provider_transport_failed');
+        const failure = error as ProviderFailure;
+        assert.equal(failure.code, 'provider_transport_failed');
         diagnostic(error, {
           category: 'transport', attempts: 2,
           responseReceived: false, streamReceived: false, recoverable: true,
@@ -203,12 +226,13 @@ test('connection refusal and socket close before response headers use bounded tr
     if (attempt === 1) {
       response.writeHead(503);
       response.end();
-    } else response.socket.destroy();
+    } else (response.socket as Socket).destroy();
   }, async (baseUrl, requests) => {
     await assert.rejects(
-      () => collect(provider(baseUrl, { ...FAST_RETRY, maxAttempts: 2 }).stream({})),
+      () => collect(provider(baseUrl, { ...FAST_RETRY, maxAttempts: 2 }).stream({} as unknown as ModelRequest)),
       (error) => {
-        assert.equal(error.code, 'provider_transport_failed');
+        const failure = error as ProviderFailure;
+        assert.equal(failure.code, 'provider_transport_failed');
         diagnostic(error, {
           category: 'transport', attempts: 2,
           responseReceived: true, streamReceived: false, recoverable: true,
@@ -223,11 +247,12 @@ test('connection refusal and socket close before response headers use bounded tr
 test('abort before response headers is reported as cancellation rather than transport failure', async () => {
   await withEndpoint(() => {}, async (baseUrl, requests) => {
     const controller = new AbortController();
-    const pending = collect(provider(baseUrl).stream({}, { signal: controller.signal }));
+    const pending = collect(provider(baseUrl).stream({} as unknown as ModelRequest, { signal: controller.signal }));
     while (requests.length === 0) await delay(1);
     controller.abort();
     await assert.rejects(pending, (error) => {
-      assert.equal(error.code, 'provider_cancelled');
+      const failure = error as ProviderFailure;
+      assert.equal(failure.code, 'provider_cancelled');
       diagnostic(error, {
         category: 'cancelled', attempts: 1,
         responseReceived: false, streamReceived: false, recoverable: false,
@@ -242,9 +267,10 @@ test('an AbortSignal timeout is reported as a transport timeout, not user cancel
   await withEndpoint(() => {}, async (baseUrl, requests) => {
     // Let the loopback request reach the local server before timing out under test load.
     await assert.rejects(
-      () => collect(provider(baseUrl).stream({}, { signal: AbortSignal.timeout(250) })),
+      () => collect(provider(baseUrl).stream({} as unknown as ModelRequest, { signal: AbortSignal.timeout(250) })),
       (error) => {
-        assert.equal(error.code, 'provider_timeout');
+        const failure = error as ProviderFailure;
+        assert.equal(failure.code, 'provider_timeout');
         diagnostic(error, {
           category: 'transport', attempts: 1,
           responseReceived: false, streamReceived: false, recoverable: false,
@@ -263,13 +289,14 @@ test('once SSE has delivered content, a socket interruption never replays the HT
     response.write('event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n');
     response.write('event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}\n\n');
     response.flushHeaders();
-    setTimeout(() => response.socket.destroy(), 20);
+    setTimeout(() => (response.socket as Socket).destroy(), 20);
   }, async (baseUrl, requests) => {
-    const seen = [];
+    const seen: ProviderEvent[] = [];
     await assert.rejects(async () => {
-      for await (const event of provider(baseUrl).stream({})) seen.push(event);
+      for await (const event of provider(baseUrl).stream({} as unknown as ModelRequest)) seen.push(event);
     }, (error) => {
-      assert.equal(error.code, 'provider_stream_interrupted');
+      const failure = error as ProviderFailure;
+      assert.equal(failure.code, 'provider_stream_interrupted');
       diagnostic(error, {
         category: 'stream', status: 200, attempts: 1,
         responseReceived: true, streamReceived: true, recoverable: false,
@@ -287,8 +314,8 @@ test('an SSE partial frame at EOF fails and does not trigger a new request', asy
     response.end('event: message_start\ndata: {"type":"message_start","message":{"usage":{}}}\n\nevent: content_block_start\ndata: {"type":"content_block_start"');
   }, async (baseUrl, requests) => {
     await assert.rejects(
-      () => collect(provider(baseUrl).stream({})),
-      (error) => error.code === 'provider_stream_incomplete',
+      () => collect(provider(baseUrl).stream({} as unknown as ModelRequest)),
+      (error) => (error as ProviderFailure).code === 'provider_stream_incomplete',
     );
     assert.equal(requests.length, 1);
   });
@@ -300,8 +327,8 @@ test('a clean HTTP EOF without the provider stop event is not a successful turn'
     response.end('event: message_start\ndata: {"type":"message_start","message":{"usage":{}}}\n\n');
   }, async (baseUrl, requests) => {
     await assert.rejects(
-      () => collect(provider(baseUrl).stream({})),
-      (error) => error.code === 'provider_stream_incomplete',
+      () => collect(provider(baseUrl).stream({} as unknown as ModelRequest)),
+      (error) => (error as ProviderFailure).code === 'provider_stream_incomplete',
     );
     assert.equal(requests.length, 1, 'a malformed successful-status stream is not retried');
   });
@@ -313,9 +340,10 @@ test('an HTTP success without a response body is classified as an invalid respon
     response.end();
   }, async (baseUrl, requests) => {
     await assert.rejects(
-      () => collect(provider(baseUrl).stream({})),
+      () => collect(provider(baseUrl).stream({} as unknown as ModelRequest)),
       (error) => {
-        assert.equal(error.code, 'provider_stream_missing');
+        const failure = error as ProviderFailure;
+        assert.equal(failure.code, 'provider_stream_missing');
         diagnostic(error, {
           category: 'invalid_response', status: 204, attempts: 1,
           responseReceived: true, streamReceived: false, recoverable: false,
@@ -334,13 +362,14 @@ test('abort during retry backoff returns promptly without an extra request', asy
   }, async (baseUrl, requests) => {
     const controller = new AbortController();
     const started = performance.now();
-    const pending = collect(provider(baseUrl, { ...FAST_RETRY, baseDelayMs: 10_000 }).stream({}, { signal: controller.signal }));
+    const pending = collect(provider(baseUrl, { ...FAST_RETRY, baseDelayMs: 10_000 }).stream({} as unknown as ModelRequest, { signal: controller.signal }));
     while (requests.length === 0) await delay(1);
     await requests[0].responseClosed;
     assert.equal(requests[0].responseFinished, false, 'the client canceled the HTTP response body');
     controller.abort();
     await assert.rejects(pending, (error) => {
-      assert.equal(error.code, 'provider_cancelled');
+      const failure = error as ProviderFailure;
+      assert.equal(failure.code, 'provider_cancelled');
       diagnostic(error, {
         category: 'cancelled', status: 503, attempts: 1,
         responseReceived: true, streamReceived: false, recoverable: false,
@@ -363,11 +392,12 @@ test('abort during an active SSE read closes the HTTP response without another r
     response.flushHeaders();
   }, async (baseUrl, requests) => {
     const controller = new AbortController();
-    const iterator = provider(baseUrl).stream({}, { signal: controller.signal });
+    const iterator = provider(baseUrl).stream({} as unknown as ModelRequest, { signal: controller.signal });
     assert.deepEqual(await iterator.next(), { done: false, value: { type: 'text', text: 'started' } });
     controller.abort();
     await assert.rejects(() => iterator.next(), (error) => {
-      assert.equal(error.code, 'provider_cancelled');
+      const failure = error as ProviderFailure;
+      assert.equal(failure.code, 'provider_cancelled');
       diagnostic(error, {
         category: 'cancelled', status: 200, attempts: 1,
         responseReceived: true, streamReceived: true, recoverable: false,

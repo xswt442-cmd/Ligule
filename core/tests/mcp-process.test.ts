@@ -9,31 +9,31 @@ import { createMcpRegistry, mcpServerConfigs } from '../dist/capability/mcp.js';
 const serverEntry = fileURLToPath(new URL('./fixtures/mcp-owned-process.mjs', import.meta.url));
 const posixProcessGroupsAvailable = process.platform !== 'win32' && typeof process.execve === 'function';
 
-function processExists(pid) {
+function processExists(pid: number) {
   try {
     process.kill(pid, 0);
     return true;
   } catch (error) {
-    if (error.code === 'ESRCH') return false;
-    if (error.code === 'EPERM') return true;
+    if ((error as { code?: string }).code === 'ESRCH') return false;
+    if ((error as { code?: string }).code === 'EPERM') return true;
     throw error;
   }
 }
 
-async function waitForFile(path, within = 5_000) {
+async function waitForFile(path: string, within = 5_000) {
   const deadline = Date.now() + within;
   while (Date.now() < deadline) {
     try {
       const pid = Number(await readFile(path, 'utf8'));
       if (Number.isSafeInteger(pid) && pid > 0) return pid;
     }
-    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    catch (error) { if ((error as { code?: string }).code !== 'ENOENT') throw error; }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   assert.fail(`fixture did not write ${path}`);
 }
 
-async function waitForExit(pid) {
+async function waitForExit(pid: number) {
   const deadline = Date.now() + 10_000;
   while (processExists(pid) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(processExists(pid), false, `process ${pid} remained alive after MCP cleanup`);
@@ -43,7 +43,7 @@ test('Windows MCP revoke and registry close terminate owned stdio server trees',
   const scratch = join(process.cwd(), 'testplace');
   await mkdir(scratch, { recursive: true });
   const root = await mkdtemp(join(scratch, 'mcp-owned-process-'));
-  const servers = {};
+  const servers: Record<string, { command: string; args: string[]; cwd: string }> = {};
   const markers = new Map();
   for (const name of ['revoke', 'close']) {
     const rootPidPath = join(root, `${name}-root.pid`);
@@ -84,7 +84,7 @@ test('Windows MCP connection failure cleans the captured server process tree', {
     command: process.execPath, args: [serverEntry, rootPidPath, childPidPath, 'true'], cwd: root,
   } } } }, {}, root));
   try {
-    await assert.rejects(() => registry.toolsOf('broken'), (error) => error.code === 'mcp_connect_failed');
+    await assert.rejects(() => registry.toolsOf('broken'), (error) => (error as { code?: string }).code === 'mcp_connect_failed');
     const rootPid = await waitForFile(rootPidPath);
     const childPid = await waitForFile(childPidPath);
     await Promise.all([waitForExit(rootPid), waitForExit(childPid)]);
@@ -104,17 +104,17 @@ test('POSIX MCP cancellation closes its owned server and child process group', {
     command: process.execPath, args: [serverEntry, rootPidPath, childPidPath, 'false', 'hang-list'], cwd: root,
   } } } }, {}, root));
   const controller = new AbortController();
-  let rootPid;
-  let childPid;
-  let openingFailure;
+  let rootPid: number;
+  let childPid: number;
+  let openingFailure: { code?: string; detail?: string } | undefined;
   try {
     const opening = registry.toolsOf('cancel', controller.signal);
-    void opening.catch(error => { openingFailure = error; });
+    void opening.catch(error => { openingFailure = error as { code?: string; detail?: string }; });
     try {
       rootPid = await waitForFile(rootPidPath, 20_000);
       childPid = await waitForFile(childPidPath, 20_000);
     } catch (error) {
-      throw new Error(`${error.message}; opening failed=${openingFailure?.code ?? 'no'} ${openingFailure?.detail ?? ''}`, { cause: error });
+      throw new Error(`${(error as Error).message}; opening failed=${openingFailure?.code ?? 'no'} ${openingFailure?.detail ?? ''}`, { cause: error });
     }
     assert.equal(processExists(rootPid), true);
     assert.equal(processExists(childPid), true);
@@ -186,7 +186,7 @@ test('POSIX MCP does not signal a process group after the whole group exits natu
     command: process.execPath, args: [serverEntry, rootPidPath, childPidPath, 'false', 'exit-after-list,no-child'], cwd: root,
   } } } }, {}, root));
   const originalKill = process.kill;
-  const groupSignals = [];
+  const groupSignals: { pid: number; signal: string | number }[] = [];
   process.kill = function (pid, signal) {
     if (typeof pid === 'number' && pid < 0 && signal !== undefined && signal !== 0) groupSignals.push({ pid, signal });
     return originalKill.call(process, pid, signal);
@@ -221,7 +221,7 @@ test('POSIX MCP reports failed group termination, retries it, and leaves unrelat
     unrelated.once('error', reject);
     unrelated.once('spawn', resolve);
   });
-  const unrelatedPid = unrelated.pid;
+  const unrelatedPid = unrelated.pid as number;
   assert.notEqual(unrelatedPid, undefined);
   const originalKill = process.kill;
   let denyGroupSignals = false;

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { once } from 'node:events';
 import { join, resolve } from 'node:path';
@@ -9,9 +10,15 @@ import test from 'node:test';
 import { createSessionLog, listSessions } from '../dist/index.js';
 import { SESSION_LOCK_STALE_MS, sessionWriterActive } from '../dist/session/lock.js';
 
+type WriterProcess = ChildProcessWithoutNullStreams & { exited: Promise<unknown> };
+
 const writerPath = fileURLToPath(new URL('./fixtures/session-writer.mjs', import.meta.url));
 
-async function withSessionDirectory(run) {
+function hasCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
+}
+
+async function withSessionDirectory(run: (directory: string) => void | Promise<void>): Promise<void> {
   const testplace = resolve('testplace');
   await mkdir(testplace, { recursive: true });
   const directory = await mkdtemp(join(testplace, 'session-lock-'));
@@ -24,23 +31,23 @@ async function withSessionDirectory(run) {
   }
 }
 
-function startWriter(operation, directory, id, text) {
-  const child = spawn(process.execPath, [writerPath, operation, directory, id, text], { stdio: ['pipe', 'pipe', 'pipe'] });
+function startWriter(operation: string, directory: string, id: string, text: string): WriterProcess {
+  const child = spawn(process.execPath, [writerPath, operation, directory, id, text], { stdio: ['pipe', 'pipe', 'pipe'] }) as WriterProcess;
   child.exited = once(child, 'exit');
   return child;
 }
 
-async function readReport(child) {
+async function readReport(child: WriterProcess): Promise<Record<string, unknown>> {
   let buffer = '';
   for await (const chunk of child.stdout) {
     buffer += chunk.toString();
     const newline = buffer.indexOf('\n');
-    if (newline >= 0) return JSON.parse(buffer.slice(0, newline));
+    if (newline >= 0) return JSON.parse(buffer.slice(0, newline)) as Record<string, unknown>;
   }
   throw new Error(`session_writer_report_missing: ${child.stderr.read()?.toString() ?? ''}`);
 }
 
-async function stopChild(child, signal) {
+async function stopChild(child: WriterProcess, signal: NodeJS.Signals) {
   if (child.exitCode !== null || child.signalCode !== null) return;
   child.kill(signal);
   await child.exited;
@@ -60,11 +67,11 @@ test('session writers exclude each other while reads and listings continue, then
     assert.equal(report.code, 'session_locked');
 
     assert.deepEqual((await writer.read()).map((event) => event.seq), [0]);
-    assert.equal((await listSessions(directory)).find((session) => session.id === 'shared').events, 1);
+    assert.equal((await listSessions(directory)).find((session) => session.id === 'shared')!.events, 1);
     await writer.close();
     await writer.close();
     assert.equal(await sessionWriterActive(writer.path), false);
-    await assert.rejects(writer.append({ kind: 'user', text: 'after close' }), (error) => error.code === 'session_closed');
+    await assert.rejects(writer.append({ kind: 'user', text: 'after close' }), (error) => hasCode(error, 'session_closed'));
 
     const next = createSessionLog({ directory, id: 'shared', meta: { projectRoot: directory } });
     await next.acquire();
@@ -76,7 +83,7 @@ test('session writers exclude each other while reads and listings continue, then
 
 test('a killed writer stays locked until the real stale lease expires', { timeout: SESSION_LOCK_STALE_MS + 20000 }, async () => {
   await withSessionDirectory(async (directory) => {
-    let child;
+    let child: WriterProcess | undefined;
     try {
       child = startWriter('hold', directory, 'crashed', 'written before kill');
       const report = await readReport(child);
@@ -84,7 +91,7 @@ test('a killed writer stays locked until the real stale lease expires', { timeou
       await stopChild(child, 'SIGKILL');
 
       const immediate = createSessionLog({ directory, id: 'crashed' });
-      await assert.rejects(immediate.acquire(), (error) => error.code === 'session_locked');
+      await assert.rejects(immediate.acquire(), (error) => hasCode(error, 'session_locked'));
       await immediate.close();
 
       await delay(SESSION_LOCK_STALE_MS + 1200);

@@ -1,26 +1,32 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import type { Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { once } from 'node:events';
 import { createTelemetry } from '../dist/kernel/telemetry.js';
+import type { TelemetryEvent } from '../dist/kernel/telemetry.js';
 
-async function listen(server) {
+type RequestRecord = { path: string | undefined; headers: Record<string, string | string[] | undefined>; body: Buffer };
+type RunLink = { parentExecutionId?: string; parentRunId?: string; parentCallId?: string };
+
+async function listen(server: Server) {
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
-  return server.address().port;
+  return (server.address() as AddressInfo).port;
 }
 
-async function close(server) {
+async function close(server: Server) {
   server.closeAllConnections();
-  if (server.listening) await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  if (server.listening) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
 }
 
-function runStarted(executionId, runId, sessionId, userSeq, parent) {
+function runStarted(executionId: string, runId: string, sessionId: string, userSeq: number, parent: RunLink = {}): TelemetryEvent {
   return { type: 'run.started', executionId, runId, sessionId, userSeq, ...parent };
 }
 
 test('OTLP trace export uses a local HTTP protobuf endpoint and exports only bounded event attributes', async (t) => {
-  const requests = [];
+  const requests: RequestRecord[] = [];
   const receiver = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
@@ -68,15 +74,15 @@ test('OTLP trace export uses a local HTTP protobuf endpoint and exports only bou
   telemetry.emit({ type: 'run.finished', executionId: 'parent-execution', runId: 'parent-run', sessionId: 'parent-session', userSeq: 7,
     status: 'completed', durationMs: 30, modelCalls: 1, toolCalls: 1 });
   telemetry.emit({ ...runStarted('sensitive-execution', 'sensitive-run', 'sensitive-session', 8),
-    prompt: 'PRIVATE_PROMPT_CONTENT', reasoning: 'PRIVATE_REASONING_CONTENT', fileContent: 'PRIVATE_FILE_CONTENT' });
+    prompt: 'PRIVATE_PROMPT_CONTENT', reasoning: 'PRIVATE_REASONING_CONTENT', fileContent: 'PRIVATE_FILE_CONTENT' } as unknown as TelemetryEvent);
   telemetry.emit({ type: 'tool.started', executionId: 'parent-execution', runId: 'parent-run', sessionId: 'parent-session', userSeq: 7,
-    callId: 'secret-call', tool: 'read', args: 'PRIVATE_TOOL_ARGS' });
+    callId: 'secret-call', tool: 'read', args: 'PRIVATE_TOOL_ARGS' } as unknown as TelemetryEvent);
   await telemetry.flush();
   await telemetry.shutdown();
 
   assert.equal(requests.length, 1);
   assert.equal(requests[0].path, '/v1/traces');
-  assert.match(requests[0].headers['content-type'], /application\/x-protobuf/u);
+  assert.match(requests[0].headers['content-type'] as string, /application\/x-protobuf/u);
   assert.equal(requests[0].headers.authorization, undefined);
   assert.ok(requests[0].body.byteLength > 0);
   const wireText = requests[0].body.toString('latin1');

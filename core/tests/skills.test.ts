@@ -13,6 +13,14 @@ import {
   discoverSkills, formatSkillCatalog, loadAssembly, minimalPlugin, modeDirectories, mcpServerConfigs, searchSkills,
   serveHost, skillDirectories,
 } from '../dist/index.js';
+import type { SkillRegistry } from '../dist/kernel/skills.js';
+
+// 失败结果带着内核错误码与说明。
+type SkillFailure = { code: string; detail: string };
+import type { SessionLog } from '../dist/session/session.js';
+import type { ModelRequest } from '../dist/kernel/loop.js';
+import type { HostProvider } from '../dist/host/provider.js';
+import type { PolicyMode } from '../dist/kernel/policy.js';
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
 const modeTestPermission = createPermissionContext('workspace-write', 'policy', {
@@ -26,7 +34,13 @@ const SOURCES = [
   join('home', '.agents', 'skills'),
 ];
 
-async function withSkills(run) {
+type SkillFixture = {
+  readonly root: string;
+  readonly directories: string[];
+  readonly place: (index: number, name: string, text: string) => Promise<string>;
+};
+
+async function withSkills(run: (fixture: SkillFixture) => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), 'ligule-skills-'));
   try {
     return await run({
@@ -44,10 +58,16 @@ async function withSkills(run) {
   }
 }
 
-const header = ({ name, description = 'does one thing', requires, extra = '' }) => `---\nname: ${name}\n`
+const header = ({ name, description = 'does one thing', requires, extra = '' }: { name: string; description?: string; requires?: string; extra?: string }) => `---\nname: ${name}\n`
   + `description: ${description}\n${requires === undefined ? '' : `metadata:\n  ligule-requires: "${requires}"\n`}${extra}---\n`;
 
-function kernelWithSkills(registry, options = {}) {
+type SkillKernelOptions = {
+  readonly limits?: Record<string, number>;
+  readonly session?: SessionLog;
+  readonly mcpServers?: () => string[];
+};
+
+function kernelWithSkills(registry: SkillRegistry, options: SkillKernelOptions = {}) {
   const kernel = createKernel({
     config: createConfig({ user: { boundary: process.cwd(), limits: options.limits } }),
     session: options.session,
@@ -64,7 +84,7 @@ test('the four directories are scanned in a fixed order and a repeated name keep
     await place(3, 'other', `${header({ name: 'other' })}Other body`);
     const registry = await discoverSkills(directories);
     assert.deepEqual(registry.skills.map((skill) => skill.name), ['notes', 'other']);
-    assert.equal(registry.skills.find((skill) => skill.name === 'notes').description, 'from the project layer');
+    assert.equal(registry.skills.find((skill) => skill.name === 'notes')!.description, 'from the project layer');
     // 同名两份是被目录先后决定的，不是扫描顺序；被压掉的那两份要说得出在哪。
     assert.equal(registry.diagnostics.length, 2);
     assert.deepEqual(registry.diagnostics.map((item) => item.code), ['skill_name_conflict', 'skill_name_conflict']);
@@ -147,14 +167,14 @@ test('activate hands over the instructions without the header and names the supp
     await mkdir(join(root, 'references'), { recursive: true });
     await writeFile(join(root, 'references', 'guide.md'), 'the long part');
     const kernel = kernelWithSkills(await discoverSkills(directories));
-    const value = await kernel.call('skill', { action: 'activate', name: 'pdf-tools' });
+    const value = await kernel.call('skill', { action: 'activate', name: 'pdf-tools' }) as { text: string };
     assert.match(value.text, /digest [0-9a-f]{12}/);
     assert.match(value.text, /references\/guide\.md/);
     assert.match(value.text, /Open the file, then summarise/);
     assert.doesNotMatch(value.text, /description: read a report/);
     // 同一内容重复激活时摘要不变；修改 `SKILL.md` 后摘要才会更新。
-    const again = await kernel.call('skill', { action: 'activate', name: 'pdf-tools' });
-    assert.equal(value.text.match(/digest ([0-9a-f]{12})/)[1], again.text.match(/digest ([0-9a-f]{12})/)[1]);
+    const again = await kernel.call('skill', { action: 'activate', name: 'pdf-tools' }) as { text: string };
+    assert.equal(value.text.match(/digest ([0-9a-f]{12})/)![1], again.text.match(/digest ([0-9a-f]{12})/)![1]);
   });
 });
 
@@ -164,13 +184,13 @@ test('a declared capability that is not there stops activation and changes nothi
     await place(1, 'needs-read', `${header({ name: 'needs-read', requires: 'read' })}body\n`);
     const kernel = kernelWithSkills(await discoverSkills(directories));
     const before = kernel.list();
-    const error = await kernel.call('skill', { action: 'activate', name: 'needs-browser' }).catch((failure) => failure);
+    const error = await kernel.call('skill', { action: 'activate', name: 'needs-browser' }).catch((failure) => failure) as SkillFailure;
     assert.equal(error.code, 'skill_missing_capability');
     assert.match(error.detail, /browser/);
     assert.match(error.detail, /mcp:github/);
     // 技能声明不会注册新工具或改变模式，工具登记表保持不变。
     assert.deepEqual(kernel.list(), before);
-    assert.match((await kernel.call('skill', { action: 'activate', name: 'needs-read' })).text, /body/);
+    assert.match((await kernel.call('skill', { action: 'activate', name: 'needs-read' }) as { text: string }).text, /body/);
   });
 });
 
@@ -180,13 +200,13 @@ test('a skill can require a configured MCP server without connecting it or grant
     const registry = await discoverSkills(directories);
     const mcpConfigs = mcpServerConfigs({ mcp: { servers: { fs: { command: process.execPath } } } });
     const unavailable = kernelWithSkills(registry);
-    const unavailableError = await unavailable.call('skill', { action: 'activate', name: 'needs-filesystem-mcp' }).catch((error) => error);
+    const unavailableError = await unavailable.call('skill', { action: 'activate', name: 'needs-filesystem-mcp' }).catch((error) => error) as SkillFailure;
     assert.equal(unavailableError.code, 'skill_missing_capability');
     assert.match(unavailableError.detail, /mcp:fs/);
 
     const available = kernelWithSkills(registry, { mcpServers: () => mcpConfigs.map((server) => server.name) });
     const before = available.list();
-    const activated = await available.call('skill', { action: 'activate', name: 'needs-filesystem-mcp' });
+    const activated = await available.call('skill', { action: 'activate', name: 'needs-filesystem-mcp' }) as { text: string };
     assert.match(activated.text, /Use the configured filesystem server when needed/);
     assert.deepEqual(available.list(), before, 'a requirement check never registers the server or tool');
     assert.deepEqual(mcpConfigs.map((server) => server.name), ['fs']);
@@ -200,25 +220,25 @@ test('read stays inside that one skill directory and pages by bytes', async () =
     await writeFile(join(root, 'references', 'guide.md'), 'a'.repeat(60));
     const registry = await discoverSkills(directories);
     const kernel = kernelWithSkills(registry, { limits: { skillFileBytes: 20 } });
-    const first = await kernel.call('skill', { action: 'read', name: 'withfiles', path: 'references/guide.md' });
+    const first = await kernel.call('skill', { action: 'read', name: 'withfiles', path: 'references/guide.md' }) as { text: string };
     assert.match(first.text, /^a{20}/);
     assert.match(first.text, /offsetBytes=20/);
     const middle = await kernel.call('skill', {
       action: 'read', name: 'withfiles', path: 'references/guide.md', offsetBytes: 20,
-    });
+    }) as { text: string };
     assert.match(middle.text, /offsetBytes=40/);
     const last = await kernel.call('skill', {
       action: 'read', name: 'withfiles', path: 'references/guide.md', offsetBytes: 40,
-    });
+    }) as { text: string };
     assert.doesNotMatch(last.text, /truncated/);
     // `SKILL.md` 位于技能根目录内，应受技能目录边界约束。
-    assert.match((await kernel.call('skill', { action: 'read', name: 'withfiles', path: 'SKILL.md' })).text, /name: withfiles/);
+    assert.match((await kernel.call('skill', { action: 'read', name: 'withfiles', path: 'SKILL.md' }) as { text: string }).text, /name: withfiles/);
     for (const path of ['../outside.md', '../../outside.md', '/etc/hosts']) {
-      const error = await kernel.call('skill', { action: 'read', name: 'withfiles', path }).catch((failure) => failure);
+      const error = await kernel.call('skill', { action: 'read', name: 'withfiles', path }).catch((failure) => failure) as SkillFailure;
       // 越出技能根目录时返回技能专用的边界错误。
       assert.equal(error.code, 'skill_path_escapes_root', path);
     }
-    const missing = await kernel.call('skill', { action: 'read', name: 'withfiles', path: 'nope.md' }).catch((f) => f);
+    const missing = await kernel.call('skill', { action: 'read', name: 'withfiles', path: 'nope.md' }).catch((f) => f) as SkillFailure;
     assert.equal(missing.code, 'skill_file_not_found');
   });
 });
@@ -227,7 +247,7 @@ test('a body over the cap is refused whole, not cut', async () => {
   await withSkills(async ({ directories, place }) => {
     await place(0, 'long', `${header({ name: 'long' })}${'x'.repeat(200)}\n`);
     const kernel = kernelWithSkills(await discoverSkills(directories), { limits: { skillBodyBytes: 100 } });
-    const error = await kernel.call('skill', { action: 'activate', name: 'long' }).catch((failure) => failure);
+    const error = await kernel.call('skill', { action: 'activate', name: 'long' }).catch((failure) => failure) as SkillFailure;
     assert.equal(error.code, 'skill_too_large');
     assert.match(error.detail, /action "read"/);
     assert.equal(DEFAULT_LIMITS.skillBodyBytes, 24_000);
@@ -238,11 +258,11 @@ test('an unknown name and a bad action each get their own code', async () => {
   await withSkills(async ({ directories, place }) => {
     await place(0, 'present', `${header({ name: 'present' })}body\n`);
     const kernel = kernelWithSkills(await discoverSkills(directories));
-    assert.equal((await kernel.call('skill', { action: 'activate', name: 'absent' }).catch((f) => f)).code, 'skill_unknown');
-    assert.equal((await kernel.call('skill', { action: 'launch', name: 'x' }).catch((f) => f)).code, 'skill_action_invalid');
-    assert.equal((await kernel.call('skill', { action: 'search' }).catch((f) => f)).code, 'skill_query_required');
-    assert.equal((await kernel.call('skill', { action: 'activate' }).catch((f) => f)).code, 'skill_name_required');
-    assert.equal((await kernel.call('skill', { action: 'read', name: 'present' }).catch((f) => f)).code, 'skill_path_required');
+    assert.equal(((await kernel.call('skill', { action: 'activate', name: 'absent' }).catch((f) => f)) as SkillFailure).code, 'skill_unknown');
+    assert.equal(((await kernel.call('skill', { action: 'launch', name: 'x' }).catch((f) => f)) as SkillFailure).code, 'skill_action_invalid');
+    assert.equal(((await kernel.call('skill', { action: 'search' }).catch((f) => f)) as SkillFailure).code, 'skill_query_required');
+    assert.equal(((await kernel.call('skill', { action: 'activate' }).catch((f) => f)) as SkillFailure).code, 'skill_name_required');
+    assert.equal(((await kernel.call('skill', { action: 'read', name: 'present' }).catch((f) => f)) as SkillFailure).code, 'skill_path_required');
   });
 });
 
@@ -256,9 +276,9 @@ test('one disclosure is an ordinary tool call in the session record', async () =
     const events = await session.read();
     // 技能内容披露使用普通工具调用事件；失败结果也会写入记录。
     assert.deepEqual(events.map((event) => [event.kind, event.tool]), [['tool', 'skill'], ['tool', 'skill']]);
-    assert.equal(events[0].result.failed, false);
-    assert.equal(events[1].result.failed, true);
-    assert.equal(events[1].result.code, 'skill_unknown');
+    assert.equal((events[0].result as { failed?: boolean }).failed, false);
+    assert.equal((events[1].result as { failed?: boolean }).failed, true);
+    assert.equal((events[1].result as { code?: string }).code, 'skill_unknown');
   });
 });
 
@@ -271,7 +291,7 @@ test('a mode narrows the capability tools and cannot reach the disclosure entry'
     await mkdir(join(userHome, '.ligule', 'modes'), { recursive: true });
     await writeFile(join(userHome, '.ligule', 'modes', 'readonly.toml'), 'tools = ["read"]\nprompt = []\n');
     const modePaths = modeDirectories(projectRoot, shippedModes, userHome);
-    const capture = async (modeName) => {
+    const capture = async (modeName: string | undefined) => {
       const config = createConfig({
         user: {
           boundary: projectRoot,
@@ -279,23 +299,23 @@ test('a mode narrows the capability tools and cannot reach the disclosure entry'
           policy: { mode: 'ask' },
         },
       });
-      const requests = [];
+      const requests: ModelRequest[] = [];
       const provider = {
         capabilities: MESSAGES_CAPABILITIES,
         model: 'test-model',
-        async *stream(request) {
+        async *stream(request: ModelRequest) {
           requests.push(request);
           yield { type: 'text', text: 'ok' };
         },
-      };
+      } as unknown as HostProvider;
       const pair = createMemoryConnectionPair();
       const host = serveHost({
-        input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy, permission: modeTestPermission,
+        input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy as { mode?: PolicyMode }, permission: modeTestPermission,
         modeName, modePaths, skillRegistry: registry,
       });
       const connection = createConnection(pair.client);
       try {
-        const { sessionId } = await connection.request('session.create', {});
+        const { sessionId } = await connection.request('session.create', {}) as { sessionId: string };
         await connection.request('run.start', { sessionId, input: 'say ok' });
       } finally {
         pair.client.output.end();

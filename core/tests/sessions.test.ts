@@ -10,17 +10,27 @@ import {
   findUnresolvedCalls, listSessions, listWorkspaceSessions, loadCheckpointFile, loadMode, MESSAGES_CAPABILITIES, modeDirectories, parseSessionBytes,
   searchSessions, serveHost, sessionDirectory, writeCheckpointFile,
 } from '../dist/index.js';
+import type { Connection } from '../dist/host/connection.js';
+import type { Host, HostOptions } from '../dist/host/host.js';
+import type { HostProvider } from '../dist/host/provider.js';
+import type { ModeFile } from '../dist/kernel/modes.js';
 import { workspaceIdentity } from '../dist/kernel/workspace.js';
 import { workspaceDataDirectory, splitUncIdentity } from '../dist/session/list.js';
+import type { SessionDirectoryConfig, SessionSummary } from '../dist/session/list.js';
+import type { SessionEvent } from '../dist/session/format.js';
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
 
+function hasCode(error: unknown, code: string): error is { code: string; detail: string } {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
+}
+
 // 摘要由 `loadMode` 算出来，这里只取一份真实值用于比对。
-async function digestOf(name) {
+async function digestOf(name: string) {
   return (await loadMode(name, { shipped: shippedModes, user: join('a', 'b'), project: join('c', 'd') })).digest;
 }
 
-async function withSessions(run) {
+async function withSessions<TResult>(run: (root: string, directory: string) => TResult | Promise<TResult>): Promise<TResult> {
   const testplace = resolve('testplace');
   await mkdir(testplace, { recursive: true });
   const root = await mkdtemp(join(testplace, 'ligule-sessions-'));
@@ -128,7 +138,7 @@ test('a label folds into the listing and stays out of what the model is shown', 
     await log.append({ kind: 'label', ignorable: true, name: '读数那一轮' });
     await log.append({ kind: 'label', ignorable: true, archived: true });
     assert.deepEqual((await listSessions(directory)).map((item) => [item.id, item.name, item.archived]), [['named', '读数那一轮', true]], '列表读的是那两条折出来的当前值');
-    assert.deepEqual((await log.modelView()).map((row) => row.text), ['go'], '模型那一份里没有这一条事实');
+    assert.deepEqual((await log.modelView() as { text?: string }[]).map((row) => row.text), ['go'], '模型那一份里没有这一条事实');
   });
 });
 
@@ -184,7 +194,7 @@ test('a search scoped to one record also reads the results it spilled', async ()
     assert.deepEqual((await searchSessions(directory, { query: 'big.md', sessionId: 'deep' })).map((hit) => hit.seq), [1], '记录里对得上的那一段先交，一条事件只交一处');
     await assert.rejects(
       () => searchSessions(directory, { query: '任何文字', sessionId: 'nobody' }),
-      (error) => error.code === 'session_not_found',
+      (error) => hasCode(error, 'session_not_found'),
       '指名的一份不在记录目录里就说清',
     );
   });
@@ -204,17 +214,17 @@ test('a branch copies a prefix of the record and leaves the parent alone', async
     const copied = parseSessionBytes(await readFile(file));
     assert.deepEqual(copied.events.map((event) => [event.seq, event.kind]), [[0, 'mode'], [1, 'user'], [2, 'turn'], [3, 'user'], [4, 'assistant']],
       '整份复制带到此刻记录落到哪儿为止，序号接着父那一份连续');
-    const header = JSON.parse((await readFile(file, 'utf8')).split('\n')[0]);
+    const header = JSON.parse((await readFile(file, 'utf8')).split('\n')[0]) as Record<string, unknown>;
     assert.deepEqual([header.kind, header.branchOf, header.branchAt], ['session', 'parent', 4], '首行说得出这是谁的分支、停在哪儿');
     assert.equal(header.sessionId, whole.sessionId, '新的一份是自己的编号');
-    assert.deepEqual(copied.header.mode, { name: 'full', layer: 'shipped' }, '继承那一份最后生效的模式清单');
+    assert.deepEqual(copied.header!.mode, { name: 'full', layer: 'shipped' }, '继承那一份最后生效的模式清单');
     assert.deepEqual(findUnresolvedCalls(copied.events).map((call) => call.callId), ['c1'],
       '没配上的那一次派发原样复制过来，补它的是打开这一份的那一条路，不在父侧动盘（D72）');
 
     const early = await branchSession(directory, 'parent', { at: 2, projectRoot: root });
     assert.equal(early.events, 3, '选一个完整轮次就复制到那一条标记为止');
     await assert.rejects(branchSession(directory, 'parent', { at: 3, projectRoot: root }),
-      (error) => error.code === 'session_branch_point_unavailable', '那一条不是轮次标记就不猜一个分支点出来');
+      (error) => hasCode(error, 'session_branch_point_unavailable'), '那一条不是轮次标记就不猜一个分支点出来');
 
     await parent.append({ kind: 'user', text: '父后来又说了一句' });
     assert.equal(parseSessionBytes(await readFile(file)).events.length, 5, '复制过的那一份不跟着父长');
@@ -223,7 +233,7 @@ test('a branch copies a prefix of the record and leaves the parent alone', async
     await writeFile(join(directory, 'legacy.jsonl'), `${JSON.stringify({ seq: 0, kind: 'user', text: 'older' })}\n`, 'utf8');
     const legacy = await branchSession(directory, 'legacy', { projectRoot: root });
     assert.equal(parseSessionBytes(await readFile(join(directory, `${legacy.sessionId}.jsonl`))).events.length, 1);
-    await assert.rejects(branchSession(directory, 'nobody', { projectRoot: root }), (error) => error.code === 'session_not_found');
+    await assert.rejects(branchSession(directory, 'nobody', { projectRoot: root }), (error) => hasCode(error, 'session_not_found'));
   });
 });
 
@@ -267,7 +277,7 @@ test('a branch carries the compaction blocks that fit inside the copied prefix',
     const carried = await loadCheckpointFile({ directory, id: whole.sessionId, events: await branchLog.read() });
     assert.equal(carried.reason, '', '父侧的块按分支事件校验通过');
     assert.deepEqual(carried.blocks, [block]);
-    assert.equal((await branchLog.modelView())[0].text, '第一块的摘要', '分支投影里摘要仍然代表被压过的那一段');
+    assert.equal((await branchLog.modelView() as { text?: string }[])[0].text, '第一块的摘要', '分支投影里摘要仍然代表被压过的那一段');
     assert.equal((await loadCheckpointFile({ directory, id: 'parent', events })).blocks.length, 1, '父侧的块文件没有动');
 
     // 块覆盖到分支点之后：整块不携带，分支从全量事件投影。
@@ -277,12 +287,12 @@ test('a branch carries the compaction blocks that fit inside the copied prefix',
     const earlyLog = createSessionLog({ directory, id: early.sessionId });
     const dropped = await loadCheckpointFile({ directory, id: early.sessionId, events: await earlyLog.read() });
     assert.equal(dropped.reason, 'checkpoint_absent', '没有携带任何块');
-    assert.deepEqual((await earlyLog.modelView()).map((row) => row.text), ['第一轮', '答了'], 'turn 标记不进投影，被跨过的块也不代表任何事件');
+    assert.deepEqual((await earlyLog.modelView() as { text?: string }[]).map((row) => row.text), ['第一轮', '答了'], 'turn 标记不进投影，被跨过的块也不代表任何事件');
   });
 });
 
 test('a resume takes the mode the session last ran under, and a changed list is a refusal', async () => {
-  const full = { name: 'full', layer: 'shipped', path: 'modes/full.toml', tools: '*', prompt: '*', digest: await digestOf('full') };
+  const full: ModeFile = { name: 'full', layer: 'shipped', path: 'modes/full.toml', tools: '*', prompt: '*', digest: await digestOf('full') };
 
   assert.equal(chooseResumeMode({ explicit: 'minimal', recorded: { name: 'full', digest: 'stale' }, loaded: full, fallback: 'minimal' }), 'minimal',
     '--mode 写了就照它，比对不做');
@@ -293,7 +303,7 @@ test('a resume takes the mode the session last ran under, and a changed list is 
   assert.equal(chooseResumeMode({ recorded: { name: 'full' }, loaded: full, fallback: 'minimal' }), 'full');
   assert.throws(
     () => chooseResumeMode({ recorded: { name: 'full', digest: 'old123' }, loaded: full, fallback: 'minimal' }),
-    (error) => error.code === 'resume_mode_changed'
+    (error) => hasCode(error, 'resume_mode_changed')
       && new RegExp(`was old123 in that session and is ${full.digest} on disk`).test(error.detail)
       && /name a mode explicitly to resume/.test(error.detail),
     '名字对得上而内容变了要报出来，不静默换成磁盘上那一份',
@@ -306,10 +316,10 @@ const provider = {
   async *stream() {
     yield { type: 'text', text: 'ok' };
   },
-};
+} as unknown as HostProvider;
 
 // 会话列表与恢复都由 Host 提供，客户端无需读取记录目录或计算模式清单。
-async function withHost(root, run) {
+async function withHost(root: string, run: (connection: Connection, host: Host) => Promise<void>) {
   const config = createConfig({
     user: {
       boundary: root,
@@ -320,7 +330,7 @@ async function withHost(root, run) {
   const pair = createMemoryConnectionPair();
   // 装配那一份带着 full：打开记录时换成哪一份，是宿主按那一份记录定的，不是这里给的这一个名字。
   const host = serveHost({
-    input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy,
+    input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy as HostOptions['policy'],
     modeName: 'full', modePaths: modeDirectories(root, shippedModes, join(root, 'home')),
   });
   const connection = createConnection(pair.client);
@@ -345,43 +355,43 @@ test('the host hands out the listing and resumes under the mode that record last
     await moved.append({ kind: 'user', text: 'go' });
 
     await withHost(root, async (connection) => {
-      const listed = await connection.request('sessions.list', {});
+      const listed = await connection.request('sessions.list', {}) as { sessions: SessionSummary[] };
       assert.deepEqual(listed.sessions.map((item) => item.id).sort(), ['moved', 'ran'], '两份都在，界面不用自己扫那一份目录');
       assert.equal(listed.sessions.every((item) => item.mode?.name === 'minimal'), true, '列表里带着各自最后生效的那一份模式清单');
-      assert.equal((await connection.request('sessions.list', { projectRoot: root })).sessions.length, 2, '按项目根过滤留下这个根下的那两份');
-      assert.deepEqual((await connection.request('sessions.list', { projectRoot: 'nowhere' })).sessions, []);
-      assert.equal((await connection.request('sessions.list', { limit: 1 })).sessions.length, 1);
-      await assert.rejects(connection.request('sessions.list', { limit: 0 }), (error) => error.code === 'protocol_args_invalid',
+      assert.equal(((await connection.request('sessions.list', { projectRoot: root })) as { sessions: SessionSummary[] }).sessions.length, 2, '按项目根过滤留下这个根下的那两份');
+      assert.deepEqual(((await connection.request('sessions.list', { projectRoot: 'nowhere' })) as { sessions: SessionSummary[] }).sessions, []);
+      assert.equal(((await connection.request('sessions.list', { limit: 1 })) as { sessions: SessionSummary[] }).sessions.length, 1);
+      await assert.rejects(connection.request('sessions.list', { limit: 0 }), (error) => hasCode(error, 'protocol_args_invalid'),
         '条数写 0 是自己跟自己矛盾，不接');
 
       // 即使 Host 当前使用 `full`，恢复时仍应采用记录中最后生效的 `minimal` 模式。
       await connection.request('session.open', { sessionId: 'ran' });
-      assert.equal((await connection.request('status.get', { sessionId: 'ran' })).mode, 'minimal');
+      assert.equal(((await connection.request('status.get', { sessionId: 'ran' })) as { mode: string }).mode, 'minimal');
       // 摘要变了要在这里报出来，让客户端指名一份再来——不静默换成磁盘上现在那一份，也不静默退回缺省。
       await assert.rejects(connection.request('session.open', { sessionId: 'moved' }),
-        (error) => error.code === 'resume_mode_changed' && /name a mode explicitly to resume/.test(error.detail));
+        (error) => hasCode(error, 'resume_mode_changed') && /name a mode explicitly to resume/.test(error.detail));
     });
 
     // 客户端指名了一份就照那一份，记录里那条不再比对。
     await withHost(root, async (connection) => {
       await connection.request('session.open', { sessionId: 'ran', mode: 'full' });
-      assert.equal((await connection.request('status.get', { sessionId: 'ran' })).mode, 'full');
+      assert.equal(((await connection.request('status.get', { sessionId: 'ran' })) as { mode: string }).mode, 'full');
     });
   });
 });
 
 test('the listing reports a crash tail without changing it or blocking another session', async () => {
   await withTuiHost(async ({ client, sessionId, sessionDirectory }) => {
-    const other = (await client.request('session.create', {})).sessionId;
+    const other = ((await client.request('session.create', {})) as { sessionId: string }).sessionId;
     await client.request('run.start', { sessionId, input: 'first session' });
     await client.request('run.start', { sessionId: other, input: 'other session' });
     const path = join(sessionDirectory, `${sessionId}.jsonl`);
     await appendFile(path, '{"kind":"user"');
     const before = await readFile(path);
 
-    const listed = await client.request('sessions.list', {});
+    const listed = await client.request('sessions.list', {}) as { sessions: SessionSummary[] };
     assert.deepEqual(new Set(listed.sessions.map((item) => item.id)), new Set([sessionId, other]));
-    assert.equal(listed.sessions.find((item) => item.id === sessionId).truncatedBytes, Buffer.byteLength('{"kind":"user"'));
+    assert.equal(listed.sessions.find((item) => item.id === sessionId)!.truncatedBytes, Buffer.byteLength('{"kind":"user"'));
     assert.deepEqual(await readFile(path), before);
   });
 });
@@ -389,18 +399,18 @@ test('the listing reports a crash tail without changing it or blocking another s
 test('one Host preserves A, B, then A session state', async () => {
   await withTuiHost(async ({ client, sessionId: sessionA }) => {
     await client.request('mode.set', { sessionId: sessionA, name: 'full' });
-    assert.equal((await client.request('status.get', { sessionId: sessionA })).mode, 'full');
-    const sessionB = (await client.request('session.create', {})).sessionId;
+    assert.equal(((await client.request('status.get', { sessionId: sessionA })) as { mode: string }).mode, 'full');
+    const sessionB = ((await client.request('session.create', {})) as { sessionId: string }).sessionId;
     await client.request('run.start', { sessionId: sessionA, input: 'A first' });
-    const beforeSwitch = await client.request('status.get', { sessionId: sessionA });
+    const beforeSwitch = await client.request('status.get', { sessionId: sessionA }) as { eventCount: number };
     await client.request('run.start', { sessionId: sessionB, input: 'B only' });
     await client.request('mode.set', { sessionId: sessionB, name: 'full' });
     await client.request('session.open', { sessionId: sessionA, mode: 'minimal' });
-    const afterSwitch = await client.request('status.get', { sessionId: sessionA });
+    const afterSwitch = await client.request('status.get', { sessionId: sessionA }) as { eventCount: number; mode: string };
     assert.equal(afterSwitch.eventCount, beforeSwitch.eventCount + 1, '显式选定模式只给这份会话增加一条 mode 事件');
     assert.equal(afterSwitch.mode, 'minimal');
     await client.request('run.start', { sessionId: sessionA, input: 'A again' });
-    const { events } = await client.request('session.read', { sessionId: sessionA });
+    const { events } = await client.request('session.read', { sessionId: sessionA }) as { events: SessionEvent[] };
     assert.deepEqual(events.filter((event) => event.kind === 'user').map((event) => event.text), ['A first', 'A again']);
   });
 });
@@ -420,12 +430,12 @@ test('the listing index caches parsed summaries and rebuilds on change', async (
     // 再次列表命中缓存；记录追加后按大小失效并重建。
     await first.append({ kind: 'user', text: '第二句' });
     const refreshed = await listSessions(directory, { index: true });
-    assert.equal(refreshed.find((item) => item.id === 'indexed-a').events, 3, '追加后的事件数如实反映');
+    assert.equal(refreshed.find((item) => item.id === 'indexed-a')!.events, 3, '追加后的事件数如实反映');
 
     // 索引损坏不挡列表：整体丢弃重建。
     await writeFile(join(directory, 'index.json'), '{', 'utf8');
     const rebuilt = await listSessions(directory, { index: true });
-    assert.equal(rebuilt.find((item) => item.id === 'indexed-a').events, 3);
+    assert.equal(rebuilt.find((item) => item.id === 'indexed-a')!.events, 3);
 
     // 记录删除后条目随之消失。
     await rm(join(directory, 'indexed-a.jsonl'));
@@ -437,7 +447,7 @@ test('the listing index caches parsed summaries and rebuilds on change', async (
 // UNC 工作区目录名决定旧记录能否被发现：沿用替换前正则的切分口径，防止标签悄悄变化。
 test('UNC workspace directories keep the established label shape', { skip: process.platform !== 'win32' }, () => {
   const backslash = String.fromCharCode(92);
-  const labels = [
+  const labels: [string, string][] = [
     [`${backslash}${backslash}server${backslash}share`, 'unc--server-share'],
     [`${backslash}${backslash}server/share`, 'unc--server-share'],
     [`${backslash}${backslash}server${backslash}share${backslash}dir`, 'unc--server-share-dir'],
@@ -447,7 +457,7 @@ test('UNC workspace directories keep the established label shape', { skip: proce
     [`${backslash}${backslash}a/b\n`, 'root-a-b-'],
   ];
   for (const [identity, label] of labels) {
-    const leaf = basename(workspaceDataDirectory({ userHome: join('C:', 'home'), workspaceRoot: identity }));
+    const leaf = basename(workspaceDataDirectory({ userHome: join('C:', 'home'), workspaceRoot: identity } as unknown as SessionDirectoryConfig));
     // 叶子目录是 `<label>--<16 位摘要>`。
     assert.equal(leaf.slice(0, leaf.length - 18), label, identity);
   }
@@ -456,7 +466,7 @@ test('UNC workspace directories keep the established label shape', { skip: proce
 // 单独的切分函数保留旧正则的回溯结果：host 是最长的无反斜杠前缀。
 test('UNC identities split exactly like the replaced pattern', () => {
   const backslash = String.fromCharCode(92);
-  const splits = [
+  const splits: [string, { host: string; rest: string }][] = [
     [`${backslash}${backslash}a//b`, { host: 'a/', rest: 'b' }],
     [`${backslash}${backslash}a${backslash}b`, { host: 'a', rest: 'b' }],
     [`${backslash}${backslash}a/b `, { host: 'a', rest: 'b ' }],

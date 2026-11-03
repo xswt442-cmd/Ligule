@@ -4,9 +4,43 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createSessionLog } from '../dist/index.js';
 import { sessionTurnToAtif } from '../dist/session/atif.js';
+import type { AtifTrajectory } from '../dist/session/atif.js';
 import { createRunAcceptance } from '../dist/session/run.js';
+import type { RunAcceptance } from '../dist/session/run.js';
 
-async function makeSession({ unknown = false, overflowCompaction = false } = {}) {
+type LiguleExtra = {
+  outcome?: string;
+  failed?: boolean;
+  error_code?: string;
+  output_truncated?: boolean;
+  spill_content_missing?: boolean;
+  cache_miss_tokens?: number;
+  cache_consistent?: boolean | null;
+  source_fields?: { field: string; tokens: number }[];
+};
+
+type LiguleMetrics = {
+  prompt_tokens?: number;
+  cached_tokens?: number;
+  extra: { ligule: LiguleExtra };
+};
+
+type UsageCache = {
+  source: string;
+  hitInputTokens: number | null;
+  missInputTokens: number | null;
+  creationInputTokens: number | null;
+  providerInputIncludesCache: boolean;
+  consistent: boolean | null;
+  sourceFields: { field: string; tokens: number }[];
+};
+
+const liguleOf = (extra: Record<string, unknown> | undefined): LiguleExtra => extra?.ligule as LiguleExtra;
+
+const metricsOf = (trajectory: AtifTrajectory): LiguleMetrics =>
+  trajectory.steps.find((step) => step.source === 'agent' && step.tool_calls)!.metrics as LiguleMetrics;
+
+async function makeSession({ unknown = false, overflowCompaction = false }: { unknown?: boolean; overflowCompaction?: boolean } = {}) {
   const testplace = resolve('testplace');
   await mkdir(testplace, { recursive: true });
   const directory = await mkdtemp(join(testplace, 'ligule-atif-'));
@@ -33,7 +67,7 @@ async function makeSession({ unknown = false, overflowCompaction = false } = {})
   return { directory, session, acceptance, user };
 }
 
-const source = (acceptance, user) => ({
+const source = (acceptance: RunAcceptance, user: { seq: number }) => ({
   sessionId: 'atif-session',
   userSeq: user.seq,
   runId: acceptance.runId,
@@ -52,17 +86,17 @@ test('exports one real Session turn as ATIF v1.8 with private content redacted',
     assert.equal(trajectory.schema_version, 'ATIF-v1.8');
     assert.equal(trajectory.session_id, fixture.acceptance.runId);
     assert.equal(trajectory.steps[0].message, '[redacted]');
-    const agent = trajectory.steps.find((step) => step.source === 'agent' && step.tool_calls);
+    const agent = trajectory.steps.find((step) => step.source === 'agent' && step.tool_calls)!;
     assert.equal(agent.message, '[redacted]');
     assert.equal(agent.llm_call_count, 1);
     assert.deepEqual(agent.metrics, { prompt_tokens: 12 }, 'unknown completion usage is omitted, not zero');
-    assert.deepEqual(agent.tool_calls.map((call) => [call.tool_call_id, call.arguments]), [
+    assert.deepEqual(agent.tool_calls!.map((call) => [call.tool_call_id, call.arguments]), [
       ['call-1', {}], ['call-2', {}],
     ]);
-    assert.deepEqual(agent.observation.results.map((result) => result.source_call_id), ['call-1', 'call-2']);
-    assert.equal(agent.observation.results[0].extra.ligule.outcome, 'completed');
-    assert.equal(agent.observation.results[1].extra.ligule.outcome, 'failed');
-    assert.equal(agent.observation.results[1].extra.ligule.error_code, 'permission_denied');
+    assert.deepEqual(agent.observation!.results.map((result) => result.source_call_id), ['call-1', 'call-2']);
+    assert.equal(liguleOf(agent.observation!.results[0].extra).outcome, 'completed');
+    assert.equal(liguleOf(agent.observation!.results[1].extra).outcome, 'failed');
+    assert.equal(liguleOf(agent.observation!.results[1].extra).error_code, 'permission_denied');
     assert.equal(JSON.stringify(trajectory).includes('private'), false);
     assert.equal(JSON.stringify(trajectory).includes('C:\\secret'), false);
   } finally {
@@ -77,7 +111,7 @@ test('ATIF counts persisted agent responses once and keeps overflow compaction s
     const agentSteps = trajectory.steps.filter((step) => step.source === 'agent');
     assert.deepEqual(agentSteps.map((step) => step.llm_call_count), [1, 1]);
     assert.equal(trajectory.steps.filter((step) => step.source === 'system'
-      && step.extra?.context_management?.type === 'compaction').length, 1);
+      && (step.extra?.context_management as { type?: string } | undefined)?.type === 'compaction').length, 1);
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
   }
@@ -89,11 +123,11 @@ test('explicit local sensitive-content option includes message, arguments, and t
     const trajectory = sessionTurnToAtif(await fixture.session.read(), source(fixture.acceptance, fixture.user), {
       includeSensitiveContent: true,
     });
-    const agent = trajectory.steps.find((step) => step.source === 'agent' && step.tool_calls);
+    const agent = trajectory.steps.find((step) => step.source === 'agent' && step.tool_calls)!;
     assert.equal(trajectory.steps[0].message, 'inspect the private file');
     assert.equal(agent.message, 'I will read it');
-    assert.equal(agent.tool_calls[0].arguments.path, 'C:\\secret\\note.txt');
-    assert.equal(agent.observation.results[0].content, 'private file contents');
+    assert.equal(agent.tool_calls![0].arguments.path, 'C:\\secret\\note.txt');
+    assert.equal(agent.observation!.results[0].content, 'private file contents');
     assert.equal('reasoning_content' in agent, false);
   } finally {
     await rm(fixture.directory, { recursive: true, force: true });
@@ -105,9 +139,9 @@ test('unknown tool outcome remains unknown and an unresolved call is rejected', 
   try {
     const events = await fixture.session.read();
     const trajectory = sessionTurnToAtif(events, source(fixture.acceptance, fixture.user));
-    const agent = trajectory.steps.find((step) => step.source === 'agent' && step.tool_calls);
-    assert.equal(agent.observation.results[0].extra.ligule.outcome, 'unknown');
-    assert.equal(agent.observation.results[0].extra.ligule.failed, true);
+    const agent = trajectory.steps.find((step) => step.source === 'agent' && step.tool_calls)!;
+    assert.equal(liguleOf(agent.observation!.results[0].extra).outcome, 'unknown');
+    assert.equal(liguleOf(agent.observation!.results[0].extra).failed, true);
 
     const unresolved = events.filter((event) => !(event.kind === 'tool' && event.callId === 'call-1'));
     assert.throws(() => sessionTurnToAtif(unresolved, source(fixture.acceptance, fixture.user)), /atif_tool_result_missing/u);
@@ -133,13 +167,13 @@ test('marks spilled output as incomplete instead of presenting the preview as fu
   const fixture = await makeSession();
   try {
     const events = await fixture.session.read();
-    const tool = events.find((event) => event.kind === 'tool' && event.callId === 'call-1');
-    tool.result.content = 'start\n[omitted: full output is 100 bytes, kept in result-3-deadbeef.json]\nend';
+    const tool = events.find((event) => event.kind === 'tool' && event.callId === 'call-1')!;
+    (tool.result as { content: string }).content = 'start\n[omitted: full output is 100 bytes, kept in result-3-deadbeef.json]\nend';
     const trajectory = sessionTurnToAtif(events, source(fixture.acceptance, fixture.user), { includeSensitiveContent: true });
-    const result = trajectory.steps.find((step) => step.source === 'agent' && step.tool_calls).observation.results[0];
-    assert.equal(result.extra.ligule.output_truncated, true);
-    assert.equal(result.extra.ligule.spill_content_missing, true);
-    assert.ok(trajectory.extra.ligule.missing_features.includes('spill_content'));
+    const result = trajectory.steps.find((step) => step.source === 'agent' && step.tool_calls)!.observation!.results[0];
+    assert.equal(liguleOf(result.extra).output_truncated, true);
+    assert.equal(liguleOf(result.extra).spill_content_missing, true);
+    assert.ok((trajectory.extra.ligule as { missing_features: string[] }).missing_features.includes('spill_content'));
   } finally { await rm(fixture.directory, { recursive: true, force: true }); }
 });
 
@@ -147,7 +181,7 @@ test('ATIF preserves known cache usage and does not report a conflicting hit cou
   const fixture = await makeSession();
   try {
     const events = await fixture.session.read();
-    const usage = events.find((event) => event.kind === 'usage');
+    const usage = events.find((event) => event.kind === 'usage') as unknown as { cache: UsageCache };
     usage.cache = { source: 'chat-completions', hitInputTokens: 5, missInputTokens: 7,
       creationInputTokens: null, providerInputIncludesCache: true, consistent: true,
       sourceFields: [{ field: 'prompt_cache_hit_tokens', tokens: 5 }, { field: 'prompt_cache_miss_tokens', tokens: 7 }] };
@@ -155,18 +189,18 @@ test('ATIF preserves known cache usage and does not report a conflicting hit cou
     if (process.env.LIGULE_ATIF_OUTPUT_PATH) {
       await writeFile(process.env.LIGULE_ATIF_OUTPUT_PATH, `${JSON.stringify(trajectory, null, 2)}\n`, 'utf8');
     }
-    const metrics = trajectory.steps.find((step) => step.source === 'agent' && step.tool_calls).metrics;
+    const metrics = metricsOf(trajectory);
     assert.equal(metrics.cached_tokens, 5);
     assert.equal(metrics.extra.ligule.cache_miss_tokens, 7);
-    assert.equal(metrics.extra.ligule.source_fields[0].field, 'prompt_cache_hit_tokens');
+    assert.equal(metrics.extra.ligule.source_fields![0].field, 'prompt_cache_hit_tokens');
     usage.cache.consistent = false;
     const conflicting = sessionTurnToAtif(events, source(fixture.acceptance, fixture.user));
-    const conflictMetrics = conflicting.steps.find((step) => step.source === 'agent' && step.tool_calls).metrics;
+    const conflictMetrics = metricsOf(conflicting);
     assert.equal(conflictMetrics.cached_tokens, undefined);
     assert.equal(conflictMetrics.extra.ligule.cache_consistent, false);
     usage.cache.consistent = null;
     usage.cache.hitInputTokens = 13;
     const excessive = sessionTurnToAtif(events, source(fixture.acceptance, fixture.user));
-    assert.equal(excessive.steps.find((step) => step.source === 'agent' && step.tool_calls).metrics.cached_tokens, undefined);
+    assert.equal(metricsOf(excessive).cached_tokens, undefined);
   } finally { await rm(fixture.directory, { recursive: true, force: true }); }
 });

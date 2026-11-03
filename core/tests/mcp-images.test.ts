@@ -10,13 +10,30 @@ import {
   createMediaStore, createSessionLog, loadAssembly, mcpServerConfigs,
 } from '../dist/index.js';
 import { createPermissionContext } from '../dist/kernel/permission.js';
+import type { ImageReference } from '../dist/media.js';
+import type { MediaStore } from '../dist/capability/media.js';
+import type { SessionLog } from '../dist/session/session.js';
+import type { SessionDirectoryConfig } from '../dist/session/list.js';
+import type { Kernel } from '../dist/kernel/kernel.js';
+
+type McpCallResult = { kind?: string; text: string; images: readonly ImageReference[] };
+type ToolEventResult = { failed: boolean; code?: string; content: string; images?: unknown };
+type ImagesContext = {
+  root: string;
+  input: Buffer;
+  media: MediaStore;
+  session: SessionLog;
+  kernel: Kernel;
+  call: (mode?: string, signal?: AbortSignal) => Promise<McpCallResult>;
+};
+type ImagesOptions = { enabled?: boolean; source?: ImageReference['source']; unknownSource?: boolean };
 
 const serverEntry = fileURLToPath(new URL('./fixtures/mcp-image-server.mjs', import.meta.url));
 const permission = createPermissionContext('full-access', 'unrestricted', {
   filesystemRead: 'unavailable', filesystemWrite: 'unavailable', network: 'unavailable', process: 'full',
 });
 
-async function withMcpImages({ enabled = true, source = 'file', unknownSource = false } = {}, run) {
+async function withMcpImages({ enabled = true, source = 'file', unknownSource = false }: ImagesOptions = {}, run: (context: ImagesContext) => Promise<void>) {
   const scratch = join(process.cwd(), 'testplace');
   await mkdir(scratch, { recursive: true });
   const root = await mkdtemp(join(scratch, 'mcp-images-'));
@@ -32,7 +49,7 @@ async function withMcpImages({ enabled = true, source = 'file', unknownSource = 
   } });
   const registry = createMcpRegistry(mcpServerConfigs(config, process.env, root));
   const session = createSessionLog({ directory: join(root, 'sessions'), id: 'image-session', meta: { projectRoot: root } });
-  const media = createMediaStore(config, 'image-session');
+  const media = createMediaStore(config as unknown as SessionDirectoryConfig, 'image-session');
   const kernel = createKernel({ config, session, permission, policy: createDecisionChain({ mode: 'auto' }) });
   const images = enabled ? {
     media,
@@ -40,10 +57,10 @@ async function withMcpImages({ enabled = true, source = 'file', unknownSource = 
   } : undefined;
   const assembly = loadAssembly(kernel, [createMcpPlugin(registry, {}, images)]);
   try {
-    const inspected = await kernel.call('mcp.inspect', { server: 'images', tool: 'fetch_image' });
-    const call = (mode = 'image', signal) => kernel.call('mcp.call', {
+    const inspected = await kernel.call('mcp.inspect', { server: 'images', tool: 'fetch_image' }) as { schemaDigest: string };
+    const call = (mode = 'image', signal?: AbortSignal) => kernel.call('mcp.call', {
       server: 'images', tool: 'fetch_image', arguments: JSON.stringify({ mode }), schemaDigest: inspected.schemaDigest,
-    }, { signal });
+    }, { signal }) as Promise<McpCallResult>;
     await run({ root, input, media, session, kernel, call });
   } finally {
     assembly.dispose();
@@ -74,8 +91,8 @@ test('real stdio MCP image content is persisted and represented in Session only 
     const events = await session.read();
     const terminal = events.filter((event) => event.kind === 'tool' && event.tool === 'mcp.call');
     assert.equal(terminal.length, 1);
-    assert.equal(terminal[0].result.failed, false);
-    assert.deepEqual(terminal[0].result.images, result.images);
+    assert.equal((terminal[0].result as ToolEventResult).failed, false);
+    assert.deepEqual((terminal[0].result as ToolEventResult).images, result.images);
   });
 });
 
@@ -93,11 +110,11 @@ test('ordinary MCP text results retain their existing result shape', async () =>
 test('image results fail clearly when persistence or a source mapping is unavailable', async () => {
   for (const options of [{ enabled: false }, { unknownSource: true }]) {
     await withMcpImages(options, async ({ call, session }) => {
-      await assert.rejects(() => call(), (error) => error.code === 'mcp_image_unsupported');
+      await assert.rejects(() => call(), (error) => (error as { code?: string }).code === 'mcp_image_unsupported');
       const terminal = (await session.read()).filter((event) => event.kind === 'tool' && event.tool === 'mcp.call');
       assert.equal(terminal.length, 1);
-      assert.equal(terminal[0].result.failed, true);
-      assert.equal(terminal[0].result.code, 'mcp_image_unsupported');
+      assert.equal((terminal[0].result as ToolEventResult).failed, true);
+      assert.equal((terminal[0].result as ToolEventResult).code, 'mcp_image_unsupported');
     });
   }
 });
@@ -109,11 +126,11 @@ test('invalid base64, unsupported MIME, and too many images fail without success
     ['too-many', 'mcp_image_count_exceeded'],
   ]) {
     await withMcpImages({}, async ({ call, session }) => {
-      await assert.rejects(() => call(mode), (error) => error.code === code, mode);
+      await assert.rejects(() => call(mode), (error) => (error as { code?: string }).code === code, mode);
       const terminal = (await session.read()).filter((event) => event.kind === 'tool' && event.tool === 'mcp.call');
       assert.equal(terminal.length, 1);
-      assert.equal(terminal[0].result.failed, true);
-      assert.equal(terminal[0].result.code, code);
+      assert.equal((terminal[0].result as ToolEventResult).failed, true);
+      assert.equal((terminal[0].result as ToolEventResult).code, code);
     });
   }
 });
@@ -121,14 +138,14 @@ test('invalid base64, unsupported MIME, and too many images fail without success
 test('MCP isError becomes one failed tool result with bounded UTF-8 diagnostic text', async () => {
   await withMcpImages({}, async ({ call, session }) => {
     await assert.rejects(() => call('error'), (error) => {
-      assert.equal(error.code, 'mcp_tool_failed');
-      assert.ok(Buffer.byteLength(error.detail, 'utf8') <= 4_000);
+      assert.equal((error as { code?: string }).code, 'mcp_tool_failed');
+      assert.ok(Buffer.byteLength((error as { detail?: string }).detail as string, 'utf8') <= 4_000);
       return true;
     });
     const terminal = (await session.read()).filter((event) => event.kind === 'tool' && event.tool === 'mcp.call');
     assert.equal(terminal.length, 1);
-    assert.equal(terminal[0].result.failed, true);
-    assert.equal(terminal[0].result.code, 'mcp_tool_failed');
-    assert.ok(Buffer.byteLength(terminal[0].result.content, 'utf8') <= 4_000);
+    assert.equal((terminal[0].result as ToolEventResult).failed, true);
+    assert.equal((terminal[0].result as ToolEventResult).code, 'mcp_tool_failed');
+    assert.ok(Buffer.byteLength((terminal[0].result as ToolEventResult).content, 'utf8') <= 4_000);
   });
 });

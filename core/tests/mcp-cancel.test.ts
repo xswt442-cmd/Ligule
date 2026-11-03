@@ -9,13 +9,20 @@ import {
   modeDirectories, mcpServerConfigs, serveHost, createPermissionContext,
 } from '../dist/index.js';
 import { listMcpTrust, mcpTrustPathOf, setMcpServerTrust } from '../dist/host/mcp-trust.js';
+import type { HostOptions } from '../dist/host/host.js';
+import type { HostProvider } from '../dist/host/provider.js';
+import type { ModelRequest } from '../dist/kernel/loop.js';
+
+type CodedError = { code?: string };
+type SessionEventView = { kind: string; tool?: string; result: { content: { schemaDigest: string } } };
+type TrustView = { version: string; servers: { identityDigest: string; trust: { trusted: boolean } }[] };
 
 const fixturePath = fileURLToPath(new URL('./fixtures/mcp-cancellable.mjs', import.meta.url));
 const externalPermission = createPermissionContext('full-access', 'unrestricted', {
   filesystemRead: 'unavailable', filesystemWrite: 'unavailable', network: 'unavailable', process: 'full',
 });
 
-async function withDirectory(run) {
+async function withDirectory(run: (directory: string) => Promise<void>) {
   const testplace = resolve('testplace');
   await mkdir(testplace, { recursive: true });
   const directory = await mkdtemp(join(testplace, 'mcp-cancel-'));
@@ -28,7 +35,7 @@ async function withDirectory(run) {
   }
 }
 
-async function waitForFile(path) {
+async function waitForFile(path: string) {
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     try {
@@ -41,14 +48,14 @@ async function waitForFile(path) {
   throw new Error(`mcp_fixture_marker_missing: ${path}`);
 }
 
-async function waitForProcessExit(pid) {
+async function waitForProcessExit(pid: number) {
   assert.ok(Number.isSafeInteger(pid) && pid > 0, 'the fixture must publish a positive process id');
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     try {
       process.kill(pid, 0);
     } catch (error) {
-      if (error.code === 'ESRCH') return;
+      if ((error as CodedError).code === 'ESRCH') return;
       throw error;
     }
     await delay(25);
@@ -56,7 +63,7 @@ async function waitForProcessExit(pid) {
   throw new Error(`mcp_fixture_process_still_running: ${pid}`);
 }
 
-function registryFor(directory, { initializeDelay = 0, listDelay = 0, disconnectAfterCall = false } = {}) {
+function registryFor(directory: string, { initializeDelay = 0, listDelay = 0, disconnectAfterCall = false }: { initializeDelay?: number; listDelay?: number; disconnectAfterCall?: boolean } = {}) {
   const pidPath = join(directory, 'mcp.pid');
   const listStartedPath = join(directory, 'list.started');
   const callStartedPath = join(directory, 'call.started');
@@ -67,13 +74,13 @@ function registryFor(directory, { initializeDelay = 0, listDelay = 0, disconnect
   return { registry: createMcpRegistry(configs), pidPath, listStartedPath, callStartedPath };
 }
 
-async function rejectedQuickly(promise) {
+async function rejectedQuickly(promise: Promise<unknown>): Promise<unknown> {
   const outcome = await Promise.race([
-    promise.then(() => ({ status: 'resolved' }), (error) => ({ status: 'rejected', error })),
+    promise.then(() => ({ status: 'resolved' }), (error: unknown) => ({ status: 'rejected', error })),
     delay(2000).then(() => ({ status: 'timeout' })),
   ]);
   assert.equal(outcome.status, 'rejected', 'the SDK request rejects promptly after cancellation');
-  return outcome.error;
+  return 'error' in outcome ? outcome.error : undefined;
 }
 
 test('the SDK cancels a real delayed MCP tool call through AbortSignal', async () => {
@@ -103,7 +110,7 @@ test('a timed out call is not replayed and the same connection can serve a later
       await registry.definition('slow', 'wait');
       const error = await rejectedQuickly(registry.call('slow', 'wait', { milliseconds: 30000 }, AbortSignal.timeout(100)));
       assert.ok(error instanceof Error);
-      const recovered = await registry.call('slow', 'wait', { milliseconds: 1 });
+      const recovered = await registry.call('slow', 'wait', { milliseconds: 1 }) as { content: { text: string }[] };
       assert.equal(recovered.content[0].text, 'waited 1 ms');
       assert.equal((await readFile(callStartedPath, 'utf8')).trim().split(/\r?\n/).length, 2, 'the timed out call was dispatched once');
     } finally {
@@ -136,7 +143,7 @@ test('a real stdio disconnect fails without retry, then a new registry explicitl
       const definition = await rebuilt.registry.definition('slow', 'wait');
       newProcessId = Number(await readFile(rebuilt.pidPath, 'utf8'));
       assert.notEqual(newProcessId, oldProcessId, 'explicit registry recreation starts a new server process');
-      const recovered = await rebuilt.registry.call('slow', 'wait', { milliseconds: 1 });
+      const recovered = await rebuilt.registry.call('slow', 'wait', { milliseconds: 1 }) as { content: { text: string }[] };
       assert.equal(recovered.content[0].text, 'waited 1 ms');
       assert.equal((await readFile(rebuilt.callStartedPath, 'utf8')).trim().split(/\r?\n/).length, 2, 'only the explicitly issued call reached the new process');
       assert.equal(definition.name, 'wait');
@@ -209,9 +216,9 @@ test('revoking MCP trust ends its stdio server while an operation is running', {
       name: 'local-operation-provider',
       model: 'host-cancel-test',
       capabilities: MESSAGES_CAPABILITIES,
-      async *stream(request, { signal } = {}) {
+      async *stream(request: ModelRequest, { signal }: { signal?: AbortSignal } = {}) {
         if (signal?.aborted) throw signal.reason;
-        const lastUser = [...request.messages].reverse().find((message) => message.role === 'user');
+        const lastUser = [...request.messages].reverse().find((message) => message.role === 'user') as { text: string };
         const operation = JSON.parse(lastUser.text);
         if (operation.tool === 'mcp.inspect' && phase === 0) {
           phase += 1;
@@ -222,13 +229,13 @@ test('revoking MCP trust ends its stdio server while an operation is running', {
           yield { type: 'tool-call', id: 'call', name: 'mcp.call', args: operation.args };
         }
       },
-    };
+    } as unknown as HostProvider;
     const pair = createMemoryConnectionPair();
     const host = serveHost({
       ...pair.host,
       config,
       provider,
-      policy: config.policy,
+      policy: config.policy as HostOptions['policy'],
       permission: externalPermission,
       interactive: true,
       permissionControl: true,
@@ -241,13 +248,13 @@ test('revoking MCP trust ends its stdio server while an operation is running', {
       throw new Error(`unexpected client request: ${message.method}`);
     });
     try {
-      const { sessionId } = await client.request('session.create', {});
+      const { sessionId } = await client.request('session.create', {}) as { sessionId: string };
       await client.request('run.start', {
         sessionId,
         input: JSON.stringify({ tool: 'mcp.inspect', args: { server: 'slow', tool: 'wait' } }),
       });
-      const { events } = await client.request('session.read', { sessionId });
-      const inspected = events.find((event) => event.kind === 'tool' && event.tool === 'mcp.inspect');
+      const { events } = await client.request('session.read', { sessionId }) as { events: SessionEventView[] };
+      const inspected = events.find((event) => event.kind === 'tool' && event.tool === 'mcp.inspect') as SessionEventView;
       const schemaDigest = inspected.result.content.schemaDigest;
       const callInput = JSON.stringify({
         tool: 'mcp.call',
@@ -265,7 +272,7 @@ test('revoking MCP trust ends its stdio server while an operation is running', {
       );
       await waitForFile(callStartedPath);
       const processId = Number(await readFile(pidPath, 'utf8'));
-      const trust = await client.request('mcp.trust.list', { projectRoot: project });
+      const trust = await client.request('mcp.trust.list', { projectRoot: project }) as TrustView;
       assert.equal(trust.servers[0].trust.trusted, true);
       await client.request('mcp.trust.set', {
         projectRoot: project, server: 'slow', identityDigest: trust.servers[0].identityDigest,

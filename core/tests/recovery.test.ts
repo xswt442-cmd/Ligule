@@ -8,13 +8,40 @@ import {
   buildRepairEvents, createConnection, createConfig, createKernel, createMemoryConnectionPair, createPermissionContext, createSessionLog, createTool,
   findUnresolvedCalls, providerFromConfig, repairUnresolvedCalls, serveHost, sessionDirectory,
 } from '../dist/index.js';
+import type { HostOptions } from '../dist/host/host.js';
+import type { ModelMessage } from '../dist/kernel/loop.js';
+import type { SessionEvent } from '../dist/session/format.js';
 import { prefixDigest } from '../dist/session/checkpoint.js';
 import { branchSession } from '../dist/session/branch.js';
 import { assertAllAnswered } from '../dist/model/http.js';
 await mkdir(join(process.cwd(), 'testplace', 'tmp'), { recursive: true });
 
+type RepairFields = {
+  kind?: string;
+  callId?: string;
+  result: { code?: string; content: string; failed?: boolean };
+  recovery: { assistantSeq: number; safeToRedo: boolean };
+};
+
+type SessionReadEvent = {
+  seq: number;
+  kind?: string;
+  status?: string;
+  code?: string;
+  userSeq?: number;
+  callId?: string;
+  result?: { code?: string };
+  recovery: { safeToRedo: boolean };
+};
+
+type DirectoryConfig = { boundary: string; workspaceRoot?: string; userHome?: string };
+
+function hasCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
+}
+
 const READ_ONLY = new Set(['read']);
-const dispatched = (seq, id, name, args) => ({ seq, kind: 'assistant', text: '', toolCalls: [{ id, name, args }] });
+const dispatched = (seq: number, id: string, name: string, args: Record<string, unknown>) => ({ seq, kind: 'assistant', text: '', toolCalls: [{ id, name, args }] });
 
 test('a reused call ID cannot use an earlier turn result to hide a pending call', async () => {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'tmp', 'reused-call-'));
@@ -35,15 +62,15 @@ test('a reused call ID cannot use an earlier turn result to hide a pending call'
     const secondArgs = { path: 'second.txt', content: 'second' };
     const pending = await session.append(dispatched(5, 'call_1', 'create', secondArgs));
     const awaitedView = await session.modelView();
-    assert.throws(() => assertAllAnswered(awaitedView), { code: 'provider_unanswered_call' });
+    assert.throws(() => assertAllAnswered(awaitedView as ModelMessage[]), { code: 'provider_unanswered_call' });
     assert.deepEqual(findUnresolvedCalls(await session.read()), [{ tool: 'create', callId: 'call_1', args: secondArgs, assistantSeq: pending.seq }]);
-    const repaired = await repairUnresolvedCalls(session, { readOnly: new Set() });
+    const repaired = await repairUnresolvedCalls(session, { readOnly: new Set<string>() }) as (SessionEvent & RepairFields)[];
     assert.equal(repaired.length, 1);
     assert.equal(repaired[0].result.code, 'tool_outcome_unknown');
     assert.equal(repaired[0].recovery.assistantSeq, pending.seq);
     const repairedView = await session.modelView();
-    assert.doesNotThrow(() => assertAllAnswered(repairedView));
-    assert.deepEqual(await repairUnresolvedCalls(session, { readOnly: new Set() }), []);
+    assert.doesNotThrow(() => assertAllAnswered(repairedView as ModelMessage[]));
+    assert.deepEqual(await repairUnresolvedCalls(session, { readOnly: new Set<string>() }), []);
     assert.equal(await readFile(join(root, 'first.txt'), 'utf8'), 'first');
     await assert.rejects(readFile(join(root, 'second.txt')), { code: 'ENOENT' });
   } finally {
@@ -62,7 +89,7 @@ test('an assistant turn whose call never got a result is the only thing left ope
   ];
   assert.deepEqual(findUnresolvedCalls(events), [{ tool: 'read', callId: 'b', args: { path: 'x' }, assistantSeq: 3 }],
     '有结果的那一次不算开放，别的调用 id 的结果也不算对上');
-  const [repaired] = buildRepairEvents(findUnresolvedCalls(events), { readOnly: READ_ONLY });
+  const [repaired] = buildRepairEvents(findUnresolvedCalls(events), { readOnly: READ_ONLY }) as RepairFields[];
   assert.equal(repaired.kind, 'tool');
   assert.equal(repaired.callId, 'b');
   assert.equal(repaired.result.failed, true);
@@ -70,7 +97,7 @@ test('an assistant turn whose call never got a result is the only thing left ope
   assert.deepEqual(repaired.recovery, { assistantSeq: 3, safeToRedo: true });
   // 措辞按这一件工具改不改本机之外的东西分开：只读的说「需要就重跑」，可能改了外部状态的说「先看现状，别盲目重试」。
   assert.match(repaired.result.content, /does not change anything on this machine/);
-  const [mayHaveLanded] = buildRepairEvents([{ tool: 'exec', callId: 'b', args: {}, assistantSeq: 3 }], { readOnly: READ_ONLY });
+  const [mayHaveLanded] = buildRepairEvents([{ tool: 'exec', callId: 'b', args: {}, assistantSeq: 3 }], { readOnly: READ_ONLY }) as RepairFields[];
   assert.match(mayHaveLanded.result.content, /may or may not have happened/);
   assert.match(mayHaveLanded.result.content, /read the current state first/);
 });
@@ -79,7 +106,7 @@ test('reopening a record repairs it once, and reading it changes nothing', async
   const root = await mkdtemp(join(tmpdir(), 'ligule-recovery-'));
   const previousHome = process.env.LIGULE_HOME;
   process.env.LIGULE_HOME = join(root, 'data');
-  const directory = join(process.env.LIGULE_HOME, 'sessions');
+  const directory = join(process.env.LIGULE_HOME!, 'sessions');
   try {
     const log = createSessionLog({ directory, id: 'crashed', meta: { projectRoot: root } });
     const user = await log.append({ kind: 'user', text: 'build it' });
@@ -95,10 +122,10 @@ test('reopening a record repairs it once, and reading it changes nothing', async
       user: { boundary: root, model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'm' }, policy: { mode: 'ask' } },
     });
     const pair = createMemoryConnectionPair();
-    const host = serveHost({ ...pair.host, config, provider: providerFromConfig(config), policy: config.policy });
+    const host = serveHost({ ...pair.host, config, provider: providerFromConfig(config), policy: config.policy as HostOptions['policy'] });
     const client = createConnection(pair.client);
-    const { events } = await client.request('session.open', { sessionId: 'crashed' }).then(() => client.request('session.read', { sessionId: 'crashed' }));
-    await host.close?.();
+    const { events } = (await client.request('session.open', { sessionId: 'crashed' }).then(() => client.request('session.read', { sessionId: 'crashed' }))) as { events: SessionReadEvent[] };
+    await (host as { close?: () => Promise<void> }).close?.();
 
     const repaired = events.find((event) => event.result?.code === 'tool_outcome_unknown');
     assert.ok(repaired, '可写的恢复路径把那次派发补成了一条结果');
@@ -109,7 +136,7 @@ test('reopening a record repairs it once, and reading it changes nothing', async
     assert.deepEqual(turns.map(({ status, code, userSeq }) => ({ status, code, userSeq })), [
       { status: 'interrupted', code: 'host_restarted', userSeq: user.seq },
     ]);
-    const relocated = await readFile(join(sessionDirectory(config), 'crashed.jsonl'), 'utf8');
+    const relocated = await readFile(join(sessionDirectory(config as DirectoryConfig), 'crashed.jsonl'), 'utf8');
     assert.equal(relocated.trim().split('\n').length, 6, '新工作区副本包含首行、原有事件、工具结果与中断终态');
     assert.equal(await readFile(join(directory, 'crashed.jsonl'), 'utf8'), before, '旧共享记录作为迁移来源保持不变');
   } finally {
@@ -126,12 +153,12 @@ test('a second repair pass adds nothing because the calls are answered now', asy
     const user = await session.append({ kind: 'user', text: 'go' });
     await session.append({ kind: 'turnContext', ignorable: true, userSeq: user.seq, model: 'm' });
     await session.append(dispatched(2, 'x', 'exec', { command: 'make' }));
-    assert.equal((await repairUnresolvedCalls(session, { readOnly: new Set() })).length, 1);
-    assert.equal((await repairUnresolvedCalls(createSessionLog({ directory: root, id: 'twice' }), { readOnly: new Set() })).length, 0,
+    assert.equal((await repairUnresolvedCalls(session, { readOnly: new Set<string>() })).length, 1);
+    assert.equal((await repairUnresolvedCalls(createSessionLog({ directory: root, id: 'twice' }), { readOnly: new Set<string>() })).length, 0,
       '再扫一次：那些调用已经有结果了，一条都不补');
-    const lines = (await readFile(join(root, 'twice.jsonl'), 'utf8')).trim().split('\n').map(JSON.parse);
+    const lines = (await readFile(join(root, 'twice.jsonl'), 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as { kind?: string; status?: string });
     assert.deepEqual(lines.map((line) => line.kind), ['session', 'user', 'turnContext', 'assistant', 'tool', 'turn']);
-    assert.equal(lines.at(-1).status, 'interrupted');
+    assert.equal(lines.at(-1)!.status, 'interrupted');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -148,7 +175,7 @@ test('turn recovery uses input evidence, keeps legacy completed turns, and does 
     const interrupted = (await pending.read()).filter((event) => event.kind === 'turn');
     assert.equal(interrupted.length, 1);
     assert.equal(prefixDigest(await pending.read()), digest, '终态不改变检查点哈希输入');
-    await assert.rejects(branchSession(root, 'pending', { at: interrupted[0].seq }), error => error.code === 'session_branch_point_unavailable');
+    await assert.rejects(branchSession(root, 'pending', { at: interrupted[0].seq }), error => hasCode(error, 'session_branch_point_unavailable'));
     assert.deepEqual(
       { status: interrupted[0].status, code: interrupted[0].code, userSeq: interrupted[0].userSeq },
       { status: 'interrupted', code: 'host_restarted', userSeq: user.seq },

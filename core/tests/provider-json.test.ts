@@ -1,31 +1,62 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import type { IncomingHttpHeaders, ServerResponse } from 'node:http';
+import type { Socket } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createChatCompletionsProvider } from '../dist/model/chat-completions.js';
 import { createMessagesProvider } from '../dist/model/messages.js';
 import { createKernel, createLoop } from '../dist/index.js';
+import type { ModelRequest, ProviderEvent } from '../dist/kernel/loop.js';
 import { listenFetchable } from './helpers/port.ts';
 
 const KEY_NAME = 'LIGULE_NONSTREAM_TEST_KEY';
 const RETRY = { maxAttempts: 1, baseDelayMs: 0, retry429: false, retry5xx: false, retryTransport: false };
 
-async function withJsonEndpoint(api, responseBody, run, contentType = 'application/json') {
-  const requests = [];
+type JsonApi = 'chat' | 'messages';
+
+type JsonProvider = ReturnType<typeof createMessagesProvider> | ReturnType<typeof createChatCompletionsProvider>;
+
+type ProviderFailure = { code?: string; detail?: string; cause?: unknown };
+
+type UsageEvent = Extract<ProviderEvent, { type: 'usage' }>;
+
+type CachedUsage = UsageEvent & { readonly cache: NonNullable<UsageEvent['cache']> };
+
+type WireBody = Record<string, unknown>;
+
+type ObservedRequest = { method: string | undefined; url: string | undefined; headers: IncomingHttpHeaders; body: WireBody };
+
+type JsonBody = string | Record<string, unknown>;
+
+type Responder = (
+  request: ObservedRequest | undefined,
+  count: number,
+  response: ServerResponse,
+) => JsonBody | undefined | Promise<JsonBody | undefined>;
+
+async function withJsonEndpoint<TResult>(
+  api: JsonApi,
+  responseBody: JsonBody | Responder,
+  run: (provider: JsonProvider, requests: ObservedRequest[]) => TResult | Promise<TResult>,
+  contentType = 'application/json',
+): Promise<TResult> {
+  const requests: ObservedRequest[] = [];
   const server = createServer(async (request, response) => {
-    const chunks = [];
+    const chunks: Buffer[] = [];
     for await (const chunk of request) chunks.push(chunk);
     const text = Buffer.concat(chunks).toString('utf8');
+    const body = text === '' ? undefined : JSON.parse(text);
     requests.push({
       method: request.method,
       url: request.url,
       headers: request.headers,
-      body: text === '' ? undefined : JSON.parse(text),
-    });
-    const body = typeof responseBody === 'function' ? await responseBody(requests.at(-1), requests.length, response) : responseBody;
-    if (body === undefined) return;
+      body,
+    } as unknown as ObservedRequest);
+    const responseValue = typeof responseBody === 'function' ? await responseBody(requests.at(-1), requests.length, response) : responseBody;
+    if (responseValue === undefined) return;
     response.writeHead(200, { 'content-type': contentType });
-    response.end(typeof body === 'string' ? body : JSON.stringify(body));
+    response.end(typeof responseValue === 'string' ? responseValue : JSON.stringify(responseValue));
   });
   const port = await listenFetchable(server);
   const previous = process.env[KEY_NAME];
@@ -48,8 +79,8 @@ async function withJsonEndpoint(api, responseBody, run, contentType = 'applicati
   }
 }
 
-async function collect(stream) {
-  const events = [];
+async function collect(stream: AsyncIterable<ProviderEvent>): Promise<ProviderEvent[]> {
+  const events: ProviderEvent[] = [];
   for await (const event of stream) events.push(event);
   return events;
 }
@@ -123,7 +154,7 @@ test('Chat Completions preserves DeepSeek cache accounting and flags inconsisten
     choices: [{ index: 0, message: { role: 'assistant', content: 'partial accounting' }, finish_reason: 'stop' }],
     usage: { prompt_tokens: 3, prompt_tokens_details: { cached_tokens: 5 } },
   }, async (provider) => {
-    const usage = (await collect(provider.stream({ system: '', tools: [], messages: [] }))).find((event) => event.type === 'usage');
+    const usage = (await collect(provider.stream({ system: '', tools: [], messages: [] }))).find((event) => event.type === 'usage') as CachedUsage;
     assert.equal(usage.cache.consistent, false, 'a cache subset cannot exceed the reported total even when misses are unknown');
   });
 });
@@ -180,7 +211,7 @@ test('missing totals remain unknown while reported cache details and outputs sur
     type: 'message', role: 'assistant', content: [{ type: 'text', text: 'zero usage' }], stop_reason: 'end_turn',
     usage: { input_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 0 },
   }, async (provider) => {
-    const usage = (await collect(provider.stream({ system: '', tools: [], messages: [] }))).find((event) => event.type === 'usage');
+    const usage = (await collect(provider.stream({ system: '', tools: [], messages: [] }))).find((event) => event.type === 'usage') as UsageEvent;
     assert.equal(usage.input, 0, 'explicit zero component values produce a measured zero total');
     assert.equal(usage.output, 0);
   });
@@ -189,7 +220,7 @@ test('missing totals remain unknown while reported cache details and outputs sur
     type: 'message', role: 'assistant', content: [{ type: 'text', text: 'overflow' }], stop_reason: 'end_turn',
     usage: { input_tokens: Number.MAX_SAFE_INTEGER, cache_read_input_tokens: 1, cache_creation_input_tokens: 0, output_tokens: 0 },
   }, async (provider) => {
-    const usage = (await collect(provider.stream({ system: '', tools: [], messages: [] }))).find((event) => event.type === 'usage');
+    const usage = (await collect(provider.stream({ system: '', tools: [], messages: [] }))).find((event) => event.type === 'usage') as CachedUsage;
     assert.equal(usage.input, null, 'an unsafe sum must not be reported as an exact token count');
     assert.equal(usage.cache.uncachedInputTokens, Number.MAX_SAFE_INTEGER);
   });
@@ -237,11 +268,11 @@ test('output exhaustion preserves partial text and does not parse incomplete too
       finish_reason: 'length',
     }],
   }, async (provider) => {
-    assert.deepEqual(await collect(provider.stream({})), [
+    assert.deepEqual(await collect(provider.stream({} as unknown as ModelRequest)), [
       { type: 'text', text: 'partial' },
       { type: 'finish', reason: 'length' },
     ]);
-    await assert.rejects(createLoop({ kernel: createKernel(), provider }).run('question'), (error) => error.code === 'provider_output_exhausted');
+    await assert.rejects(createLoop({ kernel: createKernel(), provider }).run('question'), (error) => (error as ProviderFailure).code === 'provider_output_exhausted');
   });
 
   await withJsonEndpoint('messages', {
@@ -249,7 +280,7 @@ test('output exhaustion preserves partial text and does not parse incomplete too
     content: [{ type: 'text', text: 'partial' }, { type: 'tool_use', id: 'toolu_partial', name: 'read', input: {} }],
     stop_reason: 'max_tokens', usage: { input_tokens: 2, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, output_tokens: 3 },
   }, async (provider) => {
-    assert.deepEqual(await collect(provider.stream({})), [
+    assert.deepEqual(await collect(provider.stream({} as unknown as ModelRequest)), [
       { type: 'text', text: 'partial' },
       { type: 'usage', input: 2, output: 3, cache: {
         source: 'anthropic-messages', sourceFields: [
@@ -260,7 +291,7 @@ test('output exhaustion preserves partial text and does not parse incomplete too
       } },
       { type: 'finish', reason: 'max_tokens' },
     ]);
-    await assert.rejects(createLoop({ kernel: createKernel(), provider }).run('question'), (error) => error.code === 'provider_output_exhausted');
+    await assert.rejects(createLoop({ kernel: createKernel(), provider }).run('question'), (error) => (error as ProviderFailure).code === 'provider_output_exhausted');
   });
 });
 
@@ -272,38 +303,46 @@ test('non-streaming malformed JSON and invalid tool arguments use safe stable er
       finish_reason: 'tool_calls',
     }],
   }, async (provider) => {
-    await assert.rejects(collect(provider.stream({})), (error) =>
-      error.code === 'provider_tool_args_invalid' && error.cause === undefined && !String(error.detail).includes('private'));
+    await assert.rejects(collect(provider.stream({} as unknown as ModelRequest)), (error) => {
+      const failure = error as ProviderFailure;
+      return failure.code === 'provider_tool_args_invalid' && failure.cause === undefined && !String(failure.detail).includes('private');
+    });
   });
 
   await withJsonEndpoint('chat', '{"choices":', async (provider) => {
-    await assert.rejects(collect(provider.stream({})), (error) =>
-      error.code === 'provider_stream_invalid' && error.cause === undefined && !String(error.detail).includes('choices'));
+    await assert.rejects(collect(provider.stream({} as unknown as ModelRequest)), (error) => {
+      const failure = error as ProviderFailure;
+      return failure.code === 'provider_stream_invalid' && failure.cause === undefined && !String(failure.detail).includes('choices');
+    });
   }, 'application/json');
   await withJsonEndpoint('messages', '{"stop_reason":"truncated-secret', async (provider) => {
-    await assert.rejects(collect(provider.stream({})), (error) =>
-      error.code === 'provider_stream_invalid' && error.cause === undefined && !String(error.detail).includes('truncated-secret'));
+    await assert.rejects(collect(provider.stream({} as unknown as ModelRequest)), (error) => {
+      const failure = error as ProviderFailure;
+      return failure.code === 'provider_stream_invalid' && failure.cause === undefined && !String(failure.detail).includes('truncated-secret');
+    });
   }, 'application/json');
 });
 
 test('non-streaming JSON response body interruption has a safe transport classification', async () => {
-  for (const api of ['chat', 'messages']) {
+  for (const api of ['chat', 'messages'] as const) {
     await withJsonEndpoint(api, (_request, _count, response) => {
       response.writeHead(200, { 'content-type': 'application/json', 'content-length': '512' });
       response.write('{"partial":"private response text');
       response.flushHeaders();
-      setTimeout(() => response.socket.destroy(), 20);
+      setTimeout(() => (response.socket as Socket).destroy(), 20);
       return undefined;
     }, async (provider) => {
-      await assert.rejects(collect(provider.stream({})), (error) =>
-        error.code === 'provider_stream_interrupted' && error.cause === undefined
-          && !String(error.detail).includes('private response text') && !String(error.message).includes('private response text'));
+      await assert.rejects(collect(provider.stream({} as unknown as ModelRequest)), (error) => {
+        const failure = error as ProviderFailure;
+        return failure.code === 'provider_stream_interrupted' && failure.cause === undefined
+          && !String(failure.detail).includes('private response text') && !String((error as Error).message).includes('private response text');
+      });
     });
   }
 });
 
 test('abort while reading a non-streaming JSON body maps to provider_cancelled', async () => {
-  for (const api of ['chat', 'messages']) {
+  for (const api of ['chat', 'messages'] as const) {
     await withJsonEndpoint(api, (_request, _count, response) => {
       response.writeHead(200, { 'content-type': 'application/json' });
       response.write('{"partial":');
@@ -311,13 +350,16 @@ test('abort while reading a non-streaming JSON body maps to provider_cancelled',
       return undefined;
     }, async (provider, requests) => {
       const controller = new AbortController();
-      const iterator = provider.stream({}, { signal: controller.signal });
+      const iterator = provider.stream({} as unknown as ModelRequest, { signal: controller.signal });
       const pending = iterator.next();
       while (requests.length === 0) await delay(1);
       await delay(20);
       controller.abort();
-      await assert.rejects(pending, (error) => error.code === 'provider_cancelled' && error.cause === undefined);
-      await iterator.return();
+      await assert.rejects(pending, (error) => {
+        const failure = error as ProviderFailure;
+        return failure.code === 'provider_cancelled' && failure.cause === undefined;
+      });
+      await iterator.return(undefined);
     });
   }
 });
@@ -326,27 +368,27 @@ test('empty completed JSON responses fail in the Loop instead of completing the 
   await withJsonEndpoint('chat', {
     choices: [{ index: 0, message: { role: 'assistant', content: null }, finish_reason: 'stop' }],
   }, async (provider) => {
-    await assert.rejects(createLoop({ kernel: createKernel(), provider }).run('question'), (error) => error.code === 'provider_empty_response');
+    await assert.rejects(createLoop({ kernel: createKernel(), provider }).run('question'), (error) => (error as ProviderFailure).code === 'provider_empty_response');
   });
   await withJsonEndpoint('messages', {
     type: 'message', role: 'assistant', content: [], stop_reason: 'end_turn', usage: {},
   }, async (provider) => {
-    await assert.rejects(createLoop({ kernel: createKernel(), provider }).run('question'), (error) => error.code === 'provider_empty_response');
+    await assert.rejects(createLoop({ kernel: createKernel(), provider }).run('question'), (error) => (error as ProviderFailure).code === 'provider_empty_response');
   });
   await withJsonEndpoint('chat', {
     choices: [{ index: 0, message: { role: 'assistant', content: null, reasoning_content: 'thinking only' }, finish_reason: 'stop' }],
   }, async (provider) => {
-    await assert.rejects(createLoop({ kernel: createKernel(), provider }).run('question'), (error) => error.code === 'provider_empty_response');
+    await assert.rejects(createLoop({ kernel: createKernel(), provider }).run('question'), (error) => (error as ProviderFailure).code === 'provider_empty_response');
   });
   await withJsonEndpoint('messages', {
     type: 'message', role: 'assistant', content: [{ type: 'thinking', thinking: 'thinking only' }], stop_reason: 'end_turn', usage: {},
   }, async (provider) => {
-    await assert.rejects(createLoop({ kernel: createKernel(), provider }).run('question'), (error) => error.code === 'provider_empty_response');
+    await assert.rejects(createLoop({ kernel: createKernel(), provider }).run('question'), (error) => (error as ProviderFailure).code === 'provider_empty_response');
   });
 });
 
 test('JSON tool calls with schema-invalid inputs are rejected by Kernel before execution', async () => {
-  for (const api of ['chat', 'messages']) {
+  for (const api of ['chat', 'messages'] as const) {
     let effects = 0;
     const kernel = createKernel();
     kernel.register({
@@ -377,7 +419,7 @@ test('JSON tool calls with schema-invalid inputs are rejected by Kernel before e
 });
 
 test('a later duplicate identity or invalid JSON argument dispatches no earlier valid tool', async () => {
-  const batches = [
+  const batches: { api: JsonApi; code: string; body: Record<string, unknown> }[] = [
     {
       api: 'chat',
       code: 'provider_tool_call_invalid',
@@ -412,7 +454,7 @@ test('a later duplicate identity or invalid JSON argument dispatches no earlier 
       run() { effects += 1; return { text: 'side effect' }; },
     });
     await withJsonEndpoint(api, body, async (provider, requests) => {
-      await assert.rejects(createLoop({ kernel, provider }).run('call tools'), (error) => error.code === code);
+      await assert.rejects(createLoop({ kernel, provider }).run('call tools'), (error) => (error as ProviderFailure).code === code);
       assert.equal(requests.length, 1);
       assert.equal(effects, 0);
     });
@@ -423,20 +465,20 @@ test('non-streaming responses require a finish reason and valid tool identity', 
   await withJsonEndpoint('chat', {
     choices: [{ index: 0, message: { role: 'assistant', content: 'partial' }, finish_reason: null }],
   }, async (provider) => {
-    const events = [];
+    const events: ProviderEvent[] = [];
     await assert.rejects(async () => {
-      for await (const event of provider.stream({})) events.push(event);
-    }, (error) => error.code === 'provider_stream_incomplete');
+      for await (const event of provider.stream({} as unknown as ModelRequest)) events.push(event);
+    }, (error) => (error as ProviderFailure).code === 'provider_stream_incomplete');
     assert.deepEqual(events, [{ type: 'text', text: 'partial' }]);
   });
   await withJsonEndpoint('chat', {
     choices: [{ index: 0, message: { role: 'assistant', content: null, tool_calls: [{ type: 'function', function: { name: 'read', arguments: '{}' } }] }, finish_reason: 'tool_calls' }],
   }, async (provider) => {
-    await assert.rejects(collect(provider.stream({})), (error) => error.code === 'provider_tool_call_invalid');
+    await assert.rejects(collect(provider.stream({} as unknown as ModelRequest)), (error) => (error as ProviderFailure).code === 'provider_tool_call_invalid');
   });
   await withJsonEndpoint('messages', {
     type: 'message', role: 'assistant', content: [{ type: 'tool_use', name: 'read', input: {} }], stop_reason: 'tool_use',
   }, async (provider) => {
-    await assert.rejects(collect(provider.stream({})), (error) => error.code === 'provider_tool_call_invalid');
+    await assert.rejects(collect(provider.stream({} as unknown as ModelRequest)), (error) => (error as ProviderFailure).code === 'provider_tool_call_invalid');
   });
 });

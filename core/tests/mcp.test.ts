@@ -13,6 +13,16 @@ import {
 import { createPermissionContext } from '../dist/kernel/permission.js';
 import { KernelError } from '../dist/kernel/error.js';
 import { policyArgsHash } from '../dist/kernel/policy.js';
+import type { McpRegistry } from '../dist/capability/mcp.js';
+import type { ToolDefinition } from '../dist/kernel/kernel.js';
+import type { HostOptions } from '../dist/host/host.js';
+import type { HostProvider } from '../dist/host/provider.js';
+
+type CodedError = { code?: string; detail?: string };
+type RegistryView = Pick<McpRegistry, 'servers' | 'toolsOf' | 'definition' | 'call'>;
+type FakeRegistry = RegistryView & { calls: [string, string, unknown][] };
+type InspectResult = { text: string; schemaDigest: string };
+type PolicyQuestionView = { tool: string; identityDigest?: string };
 
 const serverEntry = fileURLToPath(new URL('../node_modules/@modelcontextprotocol/server-filesystem/dist/index.js', import.meta.url));
 const externalPermission = createPermissionContext('full-access', 'unrestricted', {
@@ -43,9 +53,9 @@ test('the server config takes a plain command and only ${NAME} credential refere
   assert.deepEqual(mcpServerConfigs(configsToConfig({ TOKEN: '${MCP_TEST_TOKEN}' }), {}).map((entry) => entry.env), [{}]);
   assert.throws(
     () => mcpServerConfigs(configsToConfig({ TOKEN: 'a-secret' })),
-    (error) => error.code === 'mcp_env_unsupported',
+    (error) => (error as CodedError).code === 'mcp_env_unsupported',
   );
-  assert.throws(() => mcpServerConfigs(configsToConfig(undefined, { command: 'node /x.js' })), (error) => error.code === 'mcp_command_invalid');
+  assert.throws(() => mcpServerConfigs(configsToConfig(undefined, { command: 'node /x.js' })), (error) => (error as CodedError).code === 'mcp_command_invalid');
   // 判据看的是空白：合法的可执行文件名里常带字母 s，按字母判会把整份配置拒掉。
   const plain = mcpServerConfigs(configsToConfig(undefined, { command: 'mcp-server-stdio' }))[0];
   assert.equal(plain.command, 'mcp-server-stdio');
@@ -82,7 +92,7 @@ test('a server without an explicit working directory is bound to its project roo
 
 test('the server identity depends on PATH only when a bare command needs PATH lookup', () => {
   const projectRoot = join(tmpdir(), 'mcp-path-identity-project');
-  const configFor = (command) => ({ mcp: { servers: { probe: { command, args: [], cwd: projectRoot } } } });
+  const configFor = (command: string) => ({ mcp: { servers: { probe: { command, args: [], cwd: projectRoot } } } });
 
   const absolute = configFor(process.execPath);
   const absoluteFromFirstPath = mcpServerConfigs(absolute, { PATH: 'C:\\tools\\first' }, projectRoot)[0];
@@ -113,7 +123,7 @@ test('an MCP child inherits runtime variables and only explicitly referenced sec
   }));
   try {
     await registry.toolsOf('env');
-    const response = await registry.call('env', 'inspect_environment', {});
+    const response = await registry.call('env', 'inspect_environment', {}) as { content: { text: string }[] };
     assert.deepEqual(JSON.parse(response.content[0].text), {
       ambient: null,
       explicit: 'explicit-test-secret',
@@ -128,7 +138,7 @@ test('an MCP child inherits runtime variables and only explicitly referenced sec
   }
 });
 
-function configsToConfig(env, tools = { command: 'node' }) {
+function configsToConfig(env: Record<string, string> | undefined, tools: Record<string, unknown> = { command: 'node' }) {
   return { mcp: { servers: { fs: { ...tools, ...(env === undefined ? {} : { env }) } } } };
 }
 
@@ -167,7 +177,7 @@ test('arguments honor numeric, enum, and union schema constraints', () => {
 
 test('a changed schema reusing its $id is validated from the new definition', () => {
   const id = '$id';
-  const schema = (minimum) => ({
+  const schema = (minimum: number) => ({
     [id]: 'urn:ligule:mcp:test:changed-schema',
     type: 'object',
     properties: { value: { type: 'integer', minimum } },
@@ -211,15 +221,15 @@ test('an invalid tool schema fails closed with the existing argument error code'
   assert.notDeepEqual(validateToolArguments({}, { type: 'bogus' }), []);
   await assert.rejects(
     () => callTool.run({ server: 'fs', tool: 'read_file', arguments: '{}', schemaDigest: 'aaaa' }),
-    (error) => error.code === 'mcp_arguments_invalid',
+    (error) => (error as CodedError).code === 'mcp_arguments_invalid',
   );
   assert.deepEqual(registry.calls, [], 'a call with a schema that cannot compile never reaches the server');
 });
 
 // 一台假的服务器，只用来把「定义换了」这一件事演出来：真实协议的那一段在下面那几条里跑。
-function fakeRegistry(digest = 'aaaa', inputSchema = { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] }) {
+function fakeRegistry(digest = 'aaaa', inputSchema: Record<string, unknown> = { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] }): FakeRegistry {
   const definition = { name: 'read_file', description: 'read one file', digest, inputSchema, annotations: { readOnlyHint: true } };
-  const calls = [];
+  const calls: [string, string, unknown][] = [];
   return {
     calls,
     servers: () => ['fs'],
@@ -234,7 +244,7 @@ function fakeRegistry(digest = 'aaaa', inputSchema = { type: 'object', propertie
 
 test('a call needs a disclosure, and a moved definition has to be inspected again', async () => {
   const registry = fakeRegistry('aaaa');
-  const disclosed = { seen: new Set() };
+  const disclosed = { seen: new Set<string>() };
   const { inspectTool, callTool } = createMcpTools(registry, disclosed);
   const seen = await inspectTool.run({ server: 'fs', tool: 'read_file' });
   assert.equal(seen.schemaDigest, 'aaaa');
@@ -242,23 +252,23 @@ test('a call needs a disclosure, and a moved definition has to be inspected agai
   // 没见过的那一版：先让它去看。
   await assert.rejects(
     () => callTool.run({ server: 'fs', tool: 'read_file', arguments: '{"path":"a.txt"}', schemaDigest: 'bbbb' }),
-    (error) => error.code === 'mcp_not_disclosed',
+    (error) => (error as CodedError).code === 'mcp_not_disclosed',
   );
   // 看过 aaaa 而服务器现在是 cccc：按一份没在看的形状发起调用要挡住，并要求重新 inspect。
   const moved = { registry: fakeRegistry('cccc'), disclosed: { seen: new Set(['fs/read_file@aaaa']) } };
   const second = createMcpTools(moved.registry, moved.disclosed);
   await assert.rejects(
     () => second.callTool.run({ server: 'fs', tool: 'read_file', arguments: '{"path":"a.txt"}', schemaDigest: 'aaaa' }),
-    (error) => error.code === 'mcp_definition_stale' && /now at cccc/.test(error.detail),
+    (error) => (error as CodedError).code === 'mcp_definition_stale' && /now at cccc/.test((error as CodedError).detail as string),
   );
 
   await assert.rejects(
     () => callTool.run({ server: 'fs', tool: 'read_file', arguments: '{"nope":1}', schemaDigest: 'aaaa' }),
-    (error) => error.code === 'mcp_arguments_invalid',
+    (error) => (error as CodedError).code === 'mcp_arguments_invalid',
   );
   await assert.rejects(
     () => callTool.run({ server: 'fs', tool: 'read_file', arguments: 'not json', schemaDigest: 'aaaa' }),
-    (error) => error.code === 'mcp_arguments_invalid_json',
+    (error) => (error as CodedError).code === 'mcp_arguments_invalid_json',
   );
   const result = await callTool.run({ server: 'fs', tool: 'read_file', arguments: '{"path":"a.txt"}', schemaDigest: 'aaaa' });
   assert.equal(result.text, 'the body');
@@ -270,7 +280,7 @@ test('the decision chain judges the effective capability, not mcp.call', async (
   const registry = fakeRegistry();
   const disclosed = { seen: new Set(['fs/read_file@aaaa']) };
   const { callTool } = createMcpTools(registry, disclosed);
-  const asked = [];
+  const asked: PolicyQuestionView[] = [];
   const chain = createDecisionChain({
     mode: 'ask',
     rules: [{ tool: 'mcp:fs/edit_file', decision: 'deny', reason: 'editing through MCP is not allowed' }],
@@ -284,12 +294,12 @@ test('the decision chain judges the effective capability, not mcp.call', async (
     permission: externalPermission,
     policy: chain,
   });
-  kernel.register(callTool);
+  kernel.register(callTool as ToolDefinition);
   await assert.rejects(
     () => kernel.call('mcp.call', { server: 'fs', tool: 'edit_file', arguments: '{}', schemaDigest: 'aaaa' }),
-    (error) => error.code === 'policy_denied',
+    (error) => (error as CodedError).code === 'policy_denied',
   );
-  const seenByGuard = [];
+  const seenByGuard: string[] = [];
   chain.guard(({ tool }) => {
     seenByGuard.push(tool);
     return undefined;
@@ -335,11 +345,11 @@ test('an Agent Control MCP ceiling denies before Policy asks or any MCP operatio
     permission: externalPermission,
     policy: createDecisionChain({ mode: 'ask', ask: async () => { asked += 1; return true; } }),
   });
-  kernel.register(callTool);
+  kernel.register(callTool as ToolDefinition);
 
   await assert.rejects(
     () => kernel.call('mcp.call', { server: 'fs', tool: 'read_file', arguments: '{}', schemaDigest: 'aaaa' }),
-    (error) => error.code === 'agent_control_mcp_tool_denied',
+    (error) => (error as CodedError).code === 'agent_control_mcp_tool_denied',
   );
   assert.equal(asked, 0);
   assert.deepEqual(registry.calls, []);
@@ -361,14 +371,14 @@ test('trusted MCP tools are visible and callable in workspace-write without full
   await kernel.call('mcp.inspect', { server: 'fs', tool: 'read_file' });
   const result = await kernel.call('mcp.call', {
     server: 'fs', tool: 'read_file', arguments: '{"path":"note.txt"}', schemaDigest: 'aaaa',
-  });
+  }) as { text: string };
   assert.equal(result.text, 'the body');
   assert.equal(registry.calls.length, 1);
 });
 
 test('nothing is registered when no server is configured', () => {
   const kernel = createKernel({ config: createConfig({ user: { boundary: process.cwd() } }) });
-  const undo = createMcpPlugin({ servers: () => [], toolsOf: async () => [], definition: async () => ({}), call: async () => ({}) }).setup(kernel);
+  const undo = createMcpPlugin({ servers: () => [], toolsOf: async () => [], definition: async () => ({}), call: async () => ({}) } as unknown as RegistryView).setup(kernel);
   assert.deepEqual(kernel.list(), [], '两件固定工具不登记：没人用的工具会改掉每次请求的前缀字节（D12）');
   undo();
 });
@@ -389,22 +399,22 @@ test('a real stdio server answers inspect and call through the registry', async 
   loadAssembly(kernel, [createMcpPlugin(registry)]);
   try {
   assert.deepEqual(kernel.list(), ['mcp.call', 'mcp.inspect']);
-  const listed = await kernel.call('mcp.inspect', {});
+  const listed = await kernel.call('mcp.inspect', {}) as InspectResult;
   assert.equal(listed.text, 'fs');
-  const tools = await kernel.call('mcp.inspect', { server: 'fs' });
+  const tools = await kernel.call('mcp.inspect', { server: 'fs' }) as InspectResult;
   assert.match(tools.text, /read_text_file\t[0-9a-f]{12}/);
-  const one = await kernel.call('mcp.inspect', { server: 'fs', tool: 'read_text_file' });
+  const one = await kernel.call('mcp.inspect', { server: 'fs', tool: 'read_text_file' }) as InspectResult;
   assert.equal(one.schemaDigest.length, 12);
   const read = await kernel.call('mcp.call', {
     server: 'fs',
     tool: 'read_text_file',
     arguments: JSON.stringify({ path: join(root, 'note.txt') }),
     schemaDigest: one.schemaDigest,
-  });
+  }) as { text: string };
   assert.match(read.text, /hello from the server/);
   await assert.rejects(
     () => kernel.call('mcp.inspect', { server: 'gone' }),
-    (error) => error.code === 'mcp_server_unknown',
+    (error) => (error as CodedError).code === 'mcp_server_unknown',
   );
   } finally {
     await registry.close();
@@ -419,7 +429,7 @@ test('registered real MCP calls retain configuration identity for deny and remem
   const otherCwd = join(root, 'other');
   await mkdir(otherCwd);
   await writeFile(join(root, 'note.txt'), 'identity-bound content');
-  const questions = [];
+  const questions: PolicyQuestionView[] = [];
   const chain = createDecisionChain({ mode: 'ask', ask: (question) => { questions.push(question); return false; } });
   let firstIdentity;
   try {
@@ -432,7 +442,7 @@ test('registered real MCP calls retain configuration identity for deny and remem
         const definition = await inspectTool.run({ server: 'fs', tool: 'read_text_file' });
         const args = { server: 'fs', tool: 'read_text_file', arguments: JSON.stringify({ path: join(root, 'note.txt') }), schemaDigest: definition.schemaDigest };
         const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), permission: externalPermission, policy: chain });
-        kernel.register(callTool);
+        kernel.register(callTool as ToolDefinition);
         if (firstIdentity === undefined) {
           firstIdentity = identity;
           const argsHash = policyArgsHash(args, identity);
@@ -440,7 +450,7 @@ test('registered real MCP calls retain configuration identity for deny and remem
           await assert.rejects(kernel.call('mcp.call', args), { code: 'policy_denied' });
           assert.equal(questions.length, 0, 'a matching denial must not ask');
           chain.setRules([{ tool: 'mcp:fs/read_text_file', decision: 'allow', argsHash }]);
-          assert.equal((await kernel.call('mcp.call', args)).text, 'identity-bound content');
+          assert.equal((await kernel.call('mcp.call', args) as { text: string }).text, 'identity-bound content');
           assert.equal(questions.length, 0, 'a remembered allow must match after registration');
         } else {
           assert.notEqual(identity, firstIdentity);
@@ -469,7 +479,7 @@ test('Host Policy denies a real MCP write under the server root', async () => {
   });
   loadAssembly(kernel, [createMcpPlugin(registry)]);
   try {
-    const definition = await kernel.call('mcp.inspect', { server: 'fs', tool: 'write_file' });
+    const definition = await kernel.call('mcp.inspect', { server: 'fs', tool: 'write_file' }) as InspectResult;
     await assert.rejects(
       () => kernel.call('mcp.call', {
         server: 'fs',
@@ -477,7 +487,7 @@ test('Host Policy denies a real MCP write under the server root', async () => {
         arguments: JSON.stringify({ path: target, content: 'must not be written' }),
         schemaDigest: definition.schemaDigest,
       }),
-      (error) => error.code === 'policy_denied',
+      (error) => (error as CodedError).code === 'policy_denied',
     );
     await assert.rejects(() => access(target), { code: 'ENOENT' });
   } finally {
@@ -501,21 +511,21 @@ test('a server that moved its definition is caught over the real protocol', asyn
   });
   loadAssembly(kernel, [createMcpPlugin(registry)]);
   try {
-  const first = await kernel.call('mcp.inspect', { server: 'fx', tool: 'echo' });
+  const first = await kernel.call('mcp.inspect', { server: 'fx', tool: 'echo' }) as InspectResult;
   await writeFile(schema, JSON.stringify({ type: 'object', properties: { value: { type: 'number' } }, required: ['value'] }));
   await assert.rejects(
     () => kernel.call('mcp.call', { server: 'fx', tool: 'echo', arguments: '{"value":"x"}', schemaDigest: first.schemaDigest }),
-    (error) => error.code === 'mcp_definition_stale',
+    (error) => (error as CodedError).code === 'mcp_definition_stale',
   );
-  const second = await kernel.call('mcp.inspect', { server: 'fx', tool: 'echo' });
+  const second = await kernel.call('mcp.inspect', { server: 'fx', tool: 'echo' }) as InspectResult;
   assert.notEqual(second.schemaDigest, first.schemaDigest, 'the digest follows the definition');
   // 新的那一份声明要的是数字：按新形状递才通得过，这一句同时说明校验读的是当前定义而不是旧的。
-  const called = await kernel.call('mcp.call', { server: 'fx', tool: 'echo', arguments: '{"value":7}', schemaDigest: second.schemaDigest });
+  const called = await kernel.call('mcp.call', { server: 'fx', tool: 'echo', arguments: '{"value":7}', schemaDigest: second.schemaDigest }) as { text: string; effectiveCapability: string };
   assert.match(called.text, /echo: 7/);
   assert.equal(called.effectiveCapability, 'mcp:fx/echo');
   await assert.rejects(
     () => kernel.call('mcp.call', { server: 'fx', tool: 'echo', arguments: '{"value":"x"}', schemaDigest: second.schemaDigest }),
-    (error) => error.code === 'mcp_arguments_invalid',
+    (error) => (error as CodedError).code === 'mcp_arguments_invalid',
   );
   } finally {
     await registry.close();
@@ -526,7 +536,7 @@ test('a server that moved its definition is caught over the real protocol', asyn
 // 固定的 MCP 披露工具不受模式筛选，始终可用。
 test('a mode can neither select nor hide the two MCP tools', async () => {
   const kernel = createKernel({ config: createConfig({ user: { boundary: process.cwd() } }), permission: externalPermission });
-  loadAssembly(kernel, [createMcpPlugin({ servers: () => ['fx'], toolsOf: async () => [], definition: async () => ({}), call: async () => ({}) })]);
+  loadAssembly(kernel, [createMcpPlugin({ servers: () => ['fx'], toolsOf: async () => [], definition: async () => ({}), call: async () => ({}) } as unknown as RegistryView)]);
   assert.deepEqual(kernel.list(), ['mcp.call', 'mcp.inspect']);
   assert.deepEqual(kernel.selectable(), [], '登记了但不在模式能挑的范围里');
   const chain = createDecisionChain({ mode: 'auto' });
@@ -545,16 +555,16 @@ test('the host wires the two tools from the config, and not when there is no ser
       mcp: { servers: { fs: { command: process.execPath, args: [serverEntry, root] } } },
     },
   });
-  const provider = { capabilities: MESSAGES_CAPABILITIES, model: 'm', async *stream() { yield { type: 'text', text: 'ok' }; } };
+  const provider = { capabilities: MESSAGES_CAPABILITIES, model: 'm', async *stream() { yield { type: 'text', text: 'ok' }; } } as unknown as HostProvider;
   const pair = createMemoryConnectionPair();
   const host = serveHost({
-    input: pair.host.input, output: pair.host.output, config: withServer, provider, policy: withServer.policy,
+    input: pair.host.input, output: pair.host.output, config: withServer, provider, policy: withServer.policy as HostOptions['policy'],
     permission: externalPermission,
   });
   const connection = createConnection(pair.client);
   try {
-    const { sessionId } = await connection.request('session.create', {});
-    const status = await connection.request('status.get', { sessionId });
+    const { sessionId } = await connection.request('session.create', {}) as { sessionId: string };
+    const status = await connection.request('status.get', { sessionId }) as { tools: string[] };
     assert.deepEqual(status.tools.filter((name) => name.startsWith('mcp.')), ['mcp.call', 'mcp.inspect']);
     assert.equal(status.tools.includes('read'), true, 'the rest of the registry is untouched');
   } finally {

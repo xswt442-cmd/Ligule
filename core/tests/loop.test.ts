@@ -4,24 +4,30 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { appendFile, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createConfig, createKernel, createLoop, createSessionLog, createTaskBudget, DEFAULT_LOOP_LIMITS, KernelError, KernelRuntimeError } from '../dist/index.js';
+import type { LoopProgressEvent, ModelProvider, ModelRequest, ProviderEvent } from '../dist/kernel/loop.js';
+import type { ToolDefinition } from '../dist/kernel/kernel.js';
+import type { ProviderDiagnostic } from '../dist/kernel/error.js';
+
+// 脚本事件不必字段齐全：缺少 id/args 的调用也是循环要接住的输入。
+type ScriptedEvent = { readonly type: string; readonly [key: string]: unknown };
 
 // 脚本化提供方只用于驱动循环；本文件不测试具体模型端点。
-function scriptedProvider(turns, fallback = [{ type: 'text', text: 'done' }]) {
-  const requests = [];
+function scriptedProvider(turns: ScriptedEvent[][], fallback: readonly ScriptedEvent[] = [{ type: 'text', text: 'done' }]): ModelProvider & { requests: ModelRequest[] } {
+  const requests: ModelRequest[] = [];
   return {
     requests,
     async *stream(request) {
       requests.push(request);
-      yield* (turns.shift() ?? fallback);
+      yield* (turns.shift() ?? fallback) as unknown as ProviderEvent[];
     },
   };
 }
 
-function tool(name, run, execution) {
+function tool(name: string, run: ToolDefinition['run'], execution?: ToolDefinition['execution']): ToolDefinition {
   return { name, description: `the ${name} tool`, access: 'read', parameters: { type: 'object', properties: {} }, execution, run };
 }
 
-function kernelWith(tools) {
+function kernelWith(tools: ToolDefinition[]) {
   const kernel = createKernel();
   for (const entry of tools) kernel.register(entry);
   return kernel;
@@ -39,13 +45,13 @@ test('parallel tool limits reject unsafe concurrency', () => {
   for (const maxParallelTools of [0, 33]) {
     assert.throws(
       () => createLoop({ kernel: kernelWith([]), provider: scriptedProvider([]), limits: { ...DEFAULT_LOOP_LIMITS, maxParallelTools } }),
-      (error) => error.code === 'loop_parallel_limit_invalid',
+      (error) => (error as { code?: string }).code === 'loop_parallel_limit_invalid',
     );
   }
 });
 
 test('loop progress reports real request and tool phases in execution order', async () => {
-  const progress = [];
+  const progress: LoopProgressEvent[] = [];
   const provider = scriptedProvider([
     [{ type: 'text', text: 'checking' }, { type: 'tool-call', id: 'call_1', name: 'peek', args: {} }],
     [{ type: 'text', text: 'answer' }],
@@ -57,8 +63,8 @@ test('loop progress reports real request and tool phases in execution order', as
   ]);
   assert.ok(progress.some((event) => event.kind === 'activity' && event.activity === 'model_output'));
   assert.ok(progress.some((event) => event.kind === 'activity' && event.activity === 'tool'));
-  assert.equal(progress.at(-1).modelCalls, 2);
-  assert.equal(progress.at(-1).toolCalls, 1);
+  assert.equal(progress.at(-1)!.modelCalls, 2);
+  assert.equal(progress.at(-1)!.toolCalls, 1);
 });
 
 test('empty output and reasoning-only output fail with one persistent terminal', async () => {
@@ -67,12 +73,12 @@ test('empty output and reasoning-only output fail with one persistent terminal',
     for (const [id, events] of [
       ['empty', [{ type: 'finish', reason: 'stop' }]],
       ['reasoning', [{ type: 'reasoning', text: 'thinking' }, { type: 'finish', reason: 'stop' }]],
-    ]) {
+    ] as [string, ScriptedEvent[]][]) {
       const session = createSessionLog({ directory: root, id });
       const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), session });
       await assert.rejects(
         () => createLoop({ kernel, provider: scriptedProvider([events]), session }).run('go'),
-        (error) => error.code === 'provider_empty_response',
+        (error) => (error as { code?: string }).code === 'provider_empty_response',
       );
       const records = await session.read();
       assert.deepEqual(records.filter((event) => event.kind === 'turn').map((event) => [event.status, event.code]), [
@@ -90,7 +96,7 @@ test('a provider failure keeps its safe diagnostics in the persistent turn event
   try {
     const session = createSessionLog({ directory: root, id: 'provider-diagnostic' });
     const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), session });
-    const diagnostics = {
+    const diagnostics: ProviderDiagnostic = {
       category: 'server', status: 503, attempts: 3,
       responseReceived: true, streamReceived: false, recoverable: true,
     };
@@ -99,9 +105,9 @@ test('a provider failure keeps its safe diagnostics in the persistent turn event
     };
     await assert.rejects(
       () => createLoop({ kernel, provider, session }).run('go'),
-      (error) => error.code === 'provider_http_error' && assert.deepEqual(error.diagnostics, diagnostics) === undefined,
+      (error) => (error as KernelError).code === 'provider_http_error' && assert.deepEqual((error as KernelError).diagnostics, diagnostics) === undefined,
     );
-    const turn = (await session.read()).find((event) => event.kind === 'turn');
+    const turn = (await session.read()).find((event) => event.kind === 'turn')!;
     assert.deepEqual(turn.diagnostics, diagnostics);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -112,15 +118,15 @@ test('providers that require protocol completion do not treat iterable EOF as su
   const session = createSessionLog({ directory: await mkdtemp(join(process.cwd(), 'testplace', 'loop-')), id: 'missing-finish' });
   try {
     const kernel = createKernel({ config: createConfig({ user: { boundary: session.directory } }), session });
-    const provider = { requiresCompletion: true, async *stream() { yield { type: 'text', text: 'partial' }; } };
+    const provider: ModelProvider = { requiresCompletion: true, async *stream() { yield { type: 'text', text: 'partial' }; } };
     await assert.rejects(
       () => createLoop({ kernel, provider, session }).run('go'),
-      (error) => error.code === 'provider_stream_incomplete',
+      (error) => (error as { code?: string }).code === 'provider_stream_incomplete',
     );
     const events = await session.read();
     assert.ok(events.some((event) => event.kind === 'assistant' && event.text === 'partial'));
     assert.equal(events.filter((event) => event.kind === 'turn').length, 1);
-    assert.equal(events.at(-1).code, 'provider_stream_incomplete');
+    assert.equal(events.at(-1)!.code, 'provider_stream_incomplete');
   } finally {
     await rm(session.directory, { recursive: true, force: true });
   }
@@ -131,7 +137,7 @@ test('all tool arguments are preflighted before any tool in the response can run
   try {
     const session = createSessionLog({ directory: root, id: 'batch-preflight' });
     const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), session });
-    const ran = [];
+    const ran: string[] = [];
     kernel.register(tool('side_effect', async () => { ran.push('side_effect'); return { text: 'changed' }; }));
     kernel.register({
       ...tool('needs_value', async () => { ran.push('needs_value'); return { text: 'unexpected' }; }),
@@ -149,9 +155,9 @@ test('all tool arguments are preflighted before any tool in the response can run
     assert.deepEqual(ran, []);
     const records = await session.read();
     assert.equal(records.filter((event) => event.kind === 'tool').length, 2);
-    assert.deepEqual(records.filter((event) => event.kind === 'tool').map((event) => event.result.code), ['tool_skipped', 'tool_args_invalid']);
+    assert.deepEqual(records.filter((event) => event.kind === 'tool').map((event) => (event.result as { code?: string }).code), ['tool_skipped', 'tool_args_invalid']);
     assert.equal(records.filter((event) => event.kind === 'turn').length, 1);
-    assert.equal(records.at(-1).status, 'completed');
+    assert.equal(records.at(-1)!.status, 'completed');
     assert.equal(provider.requests.length, 2);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -163,7 +169,7 @@ test('output exhaustion preserves partial text and answers any incomplete calls 
   try {
     const session = createSessionLog({ directory: root, id: 'output-exhausted' });
     const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), session });
-    const ran = [];
+    const ran: string[] = [];
     kernel.register(tool('side_effect', async () => { ran.push('side_effect'); return { text: 'changed' }; }));
     const provider = scriptedProvider([[
       { type: 'text', text: 'partial answer' },
@@ -172,14 +178,14 @@ test('output exhaustion preserves partial text and answers any incomplete calls 
     ]]);
     await assert.rejects(
       () => createLoop({ kernel, provider, session }).run('go'),
-      (error) => error.code === 'provider_output_exhausted',
+      (error) => (error as { code?: string }).code === 'provider_output_exhausted',
     );
     assert.deepEqual(ran, []);
     const events = await session.read();
     assert.ok(events.some((event) => event.kind === 'assistant' && event.text === 'partial answer'));
     assert.equal(events.filter((event) => event.kind === 'tool').length, 1);
     assert.equal(events.filter((event) => event.kind === 'turn').length, 1);
-    assert.equal(events.at(-1).code, 'provider_output_exhausted');
+    assert.equal(events.at(-1)!.code, 'provider_output_exhausted');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -190,10 +196,10 @@ test('a provider failure after partial output preserves trace and does not dispa
   try {
     const session = createSessionLog({ directory: root, id: 'partial-stream-failure' });
     const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), session });
-    const ran = [];
+    const ran: string[] = [];
     kernel.register(tool('side_effect', async () => { ran.push('side_effect'); return { text: 'changed' }; }));
     const provider = {
-      async *stream() {
+      async *stream(): AsyncGenerator<ProviderEvent> {
         yield { type: 'text', text: 'partial answer' };
         yield { type: 'tool-call', id: 'call_1', name: 'side_effect', args: {} };
         throw new KernelError('provider_tool_args_invalid', { detail: 'tool arguments are not valid JSON' });
@@ -201,14 +207,14 @@ test('a provider failure after partial output preserves trace and does not dispa
     };
     await assert.rejects(
       () => createLoop({ kernel, provider, session }).run('go'),
-      (error) => error.code === 'provider_tool_args_invalid',
+      (error) => (error as { code?: string }).code === 'provider_tool_args_invalid',
     );
     assert.deepEqual(ran, []);
     const events = await session.read();
     assert.ok(events.some((event) => event.kind === 'assistant' && event.text === 'partial answer'));
     assert.equal(events.filter((event) => event.kind === 'tool').length, 1);
     assert.equal(events.filter((event) => event.kind === 'turn').length, 1);
-    assert.equal(events.at(-1).code, 'provider_tool_args_invalid');
+    assert.equal(events.at(-1)!.code, 'provider_tool_args_invalid');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -227,14 +233,14 @@ test('the iteration limit and the model call budget each stop the run with their
   const tight = scriptedProvider([], [{ type: 'tool-call', name: 'noop' }]);
   await assert.rejects(
     () => createLoop({ kernel, provider: tight, limits: { iterations: 99, modelCalls: 1 } }).run('go'),
-    (error) => error.code === 'loop_model_budget_exhausted',
+    (error) => (error as { code?: string }).code === 'loop_model_budget_exhausted',
   );
   assert.equal(tight.requests.length, 1);
 });
 
 test('adjacent parallel calls overlap and a serial call forms a boundary', async () => {
-  const log = [];
-  const slow = (name) => tool(name, async () => {
+  const log: string[] = [];
+  const slow = (name: string) => tool(name, async () => {
     log.push(`${name}-start`);
     await sleep(10);
     log.push(`${name}-end`);
@@ -264,9 +270,9 @@ test('adjacent parallel calls overlap and a serial call forms a boundary', async
 
 test('a parallel interaction pauses only its tool while another active tool keeps the deadline running', async () => {
   const budget = createTaskBudget({ maxModelCalls: 2, timeoutMs: 500, requestTimeoutMs: 200, interactionWaitTimeoutMs: 2_000 });
-  let markActiveStarted;
-  const activeStarted = new Promise((resolve) => { markActiveStarted = resolve; });
-  let executionPausedWhileOtherToolRan;
+  let markActiveStarted!: () => void;
+  const activeStarted = new Promise<void>((resolve) => { markActiveStarted = resolve; });
+  let executionPausedWhileOtherToolRan!: boolean;
   const awaitingApproval = tool('await_approval', async () => {
     const finishInteraction = budget.startInteraction();
     try {
@@ -315,7 +321,7 @@ test('a parallel completion tool is a barrier and every call receives exactly on
     await assert.rejects(readFile(join(root, 'effects.txt')), { code: 'ENOENT' });
     const results = (await session.read()).filter(event => event.kind === 'tool');
     for (const call of calls) assert.equal(results.filter(event => event.callId === call.id).length, 1);
-    assert.deepEqual(results.map(event => event.result.code), [undefined, 'tool_skipped', 'tool_skipped']);
+    assert.deepEqual(results.map(event => (event.result as { code?: string }).code), [undefined, 'tool_skipped', 'tool_skipped']);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -352,7 +358,7 @@ test('parallel tools use a bounded rolling pool and cancellation does not start 
       else assert.equal(started, 7);
       const results = (await session.read()).filter(event => event.kind === 'tool');
       for (const call of calls) assert.equal(results.filter(event => event.callId === call.id).length, 1);
-      assert.equal(results.filter(event => event.result.code === 'tool_skipped').length, cancel ? 7 - started : 0);
+      assert.equal(results.filter(event => (event.result as { code?: string }).code === 'tool_skipped').length, cancel ? 7 - started : 0);
     }
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -369,7 +375,7 @@ test('a cancelled run persists its terminal and answers every dispatched call', 
     kernel.register(tool('long', async (args, context) => {
       setTimeout(() => controller.abort(), 5);
       await sleep(20);
-      if (context.signal.aborted) throw new KernelError('exec_cancelled');
+      if (context.signal!.aborted) throw new KernelError('exec_cancelled');
       return { text: 'never' };
     }));
     const provider = scriptedProvider([
@@ -378,13 +384,13 @@ test('a cancelled run persists its terminal and answers every dispatched call', 
     ]);
     await assert.rejects(
       () => createLoop({ kernel, provider, session }).run('go', { signal: controller.signal }),
-      (error) => error.code === 'loop_cancelled',
+      (error) => (error as { code?: string }).code === 'loop_cancelled',
     );
     const turns = (await session.read()).filter((event) => event.kind === 'turn');
     assert.equal(turns.length, 1, '取消只写一条终态');
     assert.equal(turns[0].status, 'cancelled');
     assert.equal(turns[0].code, 'loop_cancelled');
-    assert.equal(turns[0].userSeq, (await session.read()).find((event) => event.kind === 'user').seq);
+    assert.equal(turns[0].userSeq, (await session.read()).find((event) => event.kind === 'user')!.seq);
     const events = await session.read();
     assert.deepEqual(events.map((event) => event.kind), ['user', 'assistant', 'tool', 'turn']);
     assert.deepEqual(events[2].result, { kind: 'failure', failed: true, code: 'exec_cancelled', content: '' });
@@ -403,7 +409,7 @@ test('a cancellation between two groups answers the call that never ran', async 
     const session = createSessionLog({ directory: root, id: 'between' });
     const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), session });
     const controller = new AbortController();
-    const ran = [];
+    const ran: string[] = [];
     kernel.register(tool('stop_now', async () => {
       ran.push('stop_now');
       controller.abort();
@@ -419,7 +425,7 @@ test('a cancellation between two groups answers the call that never ran', async 
     ]]);
     await assert.rejects(
       () => createLoop({ kernel, provider, session }).run('go', { signal: controller.signal }),
-      (error) => error.code === 'loop_cancelled',
+      (error) => (error as { code?: string }).code === 'loop_cancelled',
     );
     assert.deepEqual(ran, ['stop_now'], 'a call queued behind a cancelled run does not execute');
     assert.deepEqual(await session.modelView(), [
@@ -447,7 +453,7 @@ test('the tool that ends the round answers the calls behind it', async () => {
   try {
     const session = createSessionLog({ directory: root, id: 'completes' });
     const kernel = createKernel({ config: createConfig({ user: { boundary: root } }), session });
-    const ran = [];
+    const ran: string[] = [];
     kernel.register(tool('finish', async () => ({ text: 'done' })));
     kernel.register(tool('behind', async () => {
       ran.push('behind');
@@ -586,21 +592,21 @@ test('completed and budget-exhausted rounds each leave one terminal event', asyn
     const done = await createLoop({ kernel, provider, session }).run('first');
 
     const events = await session.read();
-    const marker = events.at(-1);
+    const marker = events.at(-1)!;
     assert.equal(marker.kind, 'turn');
     assert.equal(marker.status, 'completed');
     assert.equal(marker.ignorable, true, '旧版本读不懂时可以跳过它，但它仍然占一个序号');
-    assert.equal(marker.userSeq, events.find((event) => event.kind === 'user').seq, '身份证就是这一轮的那条用户输入');
+    assert.equal(marker.userSeq, events.find((event) => event.kind === 'user')!.seq, '身份证就是这一轮的那条用户输入');
     assert.equal(marker.iterations, done.iterations);
     assert.equal(marker.modelCalls, done.modelCalls);
     assert.equal(marker.completedBy, undefined);
     // 投影里没有它的位置：这一轮交回去的那四段与加这条标记之前一样多。
-    assert.deepEqual((await session.modelView()).map((entry) => entry.role), ['user', 'assistant', 'tool', 'assistant']);
+    assert.deepEqual((await session.modelView()).map((entry) => (entry as { role: string }).role), ['user', 'assistant', 'tool', 'assistant']);
 
     // 由一件算完成本轮的工具收尾的那一种，标记里说出是哪一件。
     const byTool = scriptedProvider([[{ type: 'tool-call', id: 'c2', name: 'peek', args: {} }]]);
     await createLoop({ kernel, provider: byTool, session, completesRun: ['peek'] }).run('second');
-    assert.equal((await session.read()).at(-1).completedBy, 'peek');
+    assert.equal((await session.read()).at(-1)!.completedBy, 'peek');
 
     // 模型调用预算耗尽是一条失败终态，不可作为分支点。
     const stuck = createSessionLog({ directory: root, id: 'stuck' });
@@ -613,13 +619,13 @@ test('completed and budget-exhausted rounds each leave one terminal event', asyn
         session: stuck,
         limits: { iterations: 32, modelCalls: 1 },
       }).run('go'),
-      (error) => error.code === 'loop_model_budget_exhausted',
+      (error) => (error as { code?: string }).code === 'loop_model_budget_exhausted',
     );
     const failed = (await stuck.read()).filter((event) => event.kind === 'turn');
     assert.equal(failed.length, 1);
     assert.equal(failed[0].status, 'failed');
     assert.equal(failed[0].code, 'loop_model_budget_exhausted');
-    assert.equal(failed[0].userSeq, (await stuck.read()).find((event) => event.kind === 'user').seq);
+    assert.equal(failed[0].userSeq, (await stuck.read()).find((event) => event.kind === 'user')!.seq);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

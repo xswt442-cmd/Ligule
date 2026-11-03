@@ -12,15 +12,26 @@ import {
   applyMode, createConfig, createConnection, createKernel, createMemoryConnectionPair, createSkillPlugin, DEFAULT_MODE,
   loadAssembly, loadMode, MESSAGES_CAPABILITIES, minimalPlugin, modeDirectories, serveHost, createSessionLog,
 } from '../dist/index.js';
-import { createHost } from '../dist/host/host.js';
+import { createHost, type Host } from '../dist/host/host.js';
 import { resolveModeSelection } from '../dist/kernel/modes.js';
+import type { ModeDirectories } from '../dist/kernel/modes.js';
+import type { ModelRequest } from '../dist/kernel/loop.js';
+import type { SessionEvent } from '../dist/session/format.js';
+import type { HostProvider } from '../dist/host/provider.js';
+import type { PolicyMode } from '../dist/kernel/policy.js';
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
 const MINIMAL = ['create', 'delete', 'edit', 'exec', 'find', 'read', 'search', 'write'];
 const HOST_MINIMAL = [...MINIMAL, 'managed_process'];
 
+type ModeLayout = {
+  readonly directories: ModeDirectories;
+  readonly projectRoot: string;
+  readonly userHome: string;
+};
+
 // 三层目录各放在一个临时根下：userHome 与 projectRoot 指哪儿都由调用方给，不碰进程环境。
-async function withLayout(run) {
+async function withLayout(run: (layout: ModeLayout) => Promise<void>) {
   const root = await mkdtemp(join(tmpdir(), 'ligule-modes-'));
   const projectRoot = join(root, 'project');
   const userHome = join(root, 'home');
@@ -33,14 +44,14 @@ async function withLayout(run) {
   }
 }
 
-async function writeMode(directories, layer, name, text) {
+async function writeMode(directories: ModeDirectories, layer: keyof ModeDirectories, name: string, text: string) {
   const path = join(directories[layer], `${name}.toml`);
   await mkdir(directories[layer], { recursive: true });
   await writeFile(path, text);
   return path;
 }
 
-const complete = (tools) => `tools = ${tools}\nprompt = []\n`;
+const complete = (tools: string) => `tools = ${tools}\nprompt = []\n`;
 
 test('the same name in two layers resolves to the highest one, whole file and no merging', async () => {
   await withLayout(async ({ directories }) => {
@@ -58,7 +69,7 @@ test('a name only the shipped layer has still loads, and the default is the ship
     const minimal = await loadMode(DEFAULT_MODE, shipped);
     assert.equal(minimal.layer, 'shipped');
     // 文件里写的顺序就是要交给模型的那一份顺序，装载不重排；这里比的是同一批成员。
-    assert.deepEqual([...minimal.tools].sort(), [...HOST_MINIMAL].sort());
+    assert.deepEqual([...(minimal.tools as string[])].sort(), [...HOST_MINIMAL].sort());
     const full = await loadMode('full', shipped);
     assert.equal(full.tools, '*');
   });
@@ -118,16 +129,16 @@ test('delegation mode selections normalize legacy names, inherited names, and in
   await withLayout(async ({ directories }) => {
     const path = await writeMode(directories, 'project', 'review', complete('["read"]'));
     const named = await loadMode('review', directories);
-    const inherited = await resolveModeSelection(undefined, directories, named);
+    const inherited = (await resolveModeSelection(undefined, directories, named))!;
     assert.equal(inherited.source, 'named');
     assert.equal(inherited.name, 'review');
     assert.equal(inherited.application, named);
 
-    const legacy = await resolveModeSelection('review', directories);
-    const explicit = await resolveModeSelection({ type: 'named', name: 'review' }, directories);
+    const legacy = (await resolveModeSelection('review', directories))!;
+    const explicit = (await resolveModeSelection({ type: 'named', name: 'review' }, directories))!;
     assert.equal(legacy.fileDigest, named.digest);
     assert.deepEqual(explicit, legacy);
-    assert.equal(explicit.application.path, path);
+    assert.equal((explicit.application as { path?: string }).path, path);
 
     const inline = await resolveModeSelection({ type: 'inline', tools: ['read'], prompt: [] }, directories);
     assert.deepEqual(inline, {
@@ -169,11 +180,11 @@ function kernelWithDisclosure() {
 test('a mode cannot name the disclosure entry, and hiding the rest still leaves it visible', async () => {
   await withLayout(async ({ directories }) => {
     await writeMode(directories, 'user', 'withskill', complete('["read", "skill"]'));
-    let error;
+    let error!: { code: string; detail: string };
     try {
       applyMode(kernelWithDisclosure(), await loadMode('withskill', directories));
     } catch (failure) {
-      error = failure;
+      error = failure as { code: string; detail: string };
     }
     // 写它的名字是清单写错了：静默收下会让人以为那一件被关掉了。
     assert.equal(error.code, 'mode_tool_not_selectable');
@@ -207,11 +218,11 @@ test('a mode naming a tool this run never registered fails instead of quietly of
   await withLayout(async ({ directories }) => {
     await writeMode(directories, 'user', 'typo', complete('["read", "browser"]'));
     const mode = await loadMode('typo', directories);
-    let error;
+    let error!: { code: string; detail: string };
     try {
       applyMode(kernelWithMinimal(), mode);
     } catch (failure) {
-      error = failure;
+      error = failure as { code: string; detail: string };
     }
     assert.equal(error.code, 'mode_tool_unregistered');
     assert.match(error.detail, /browser/);
@@ -236,21 +247,21 @@ test('a session built by the Host asks the provider with only the mode-selected 
       policy: { mode: 'ask' },
     },
   });
-  const requests = [];
+  const requests: ModelRequest[] = [];
   const provider = {
     capabilities: MESSAGES_CAPABILITIES,
     model: 'test-model',
-    async *stream(request) {
+    async *stream(request: ModelRequest) {
       requests.push(request);
       yield { type: 'text', text: 'ok' };
     },
-  };
+  } as unknown as HostProvider;
   const pair = createMemoryConnectionPair();
-  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy, modeName: 'readonly', modePaths: directories,
+  const host = serveHost({ input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy as { mode?: PolicyMode }, modeName: 'readonly', modePaths: directories,
     skillRegistry: { skills: [], diagnostics: [] } });
   const connection = createConnection(pair.client);
   try {
-    const { sessionId } = await connection.request('session.create', {});
+    const { sessionId } = await connection.request('session.create', {}) as { sessionId: string };
     await connection.request('run.start', { sessionId, input: 'say ok' });
     assert.equal(requests.length, 1);
     assert.deepEqual(requests[0].tools.map((entry) => entry.name), ['compact', 'read']);
@@ -273,61 +284,61 @@ test('a switch asked for during a round takes effect only once that round ends',
         policy: { mode: 'ask' },
       },
     });
-    let release;
-    const requests = [];
+    let release!: () => void;
+    const requests: ModelRequest[] = [];
     const provider = {
       capabilities: MESSAGES_CAPABILITIES,
       model: 'test-model',
-      async *stream(request) {
+      async *stream(request: ModelRequest) {
         requests.push(request);
         // 只卡第一次模型调用，让测试能站在「本轮还在跑」这一侧提请求；第二次照常走完。
         if (requests.length === 1) {
-          await new Promise((resolve) => {
+          await new Promise<void>((resolve) => {
             release = resolve;
           });
         }
         yield { type: 'text', text: 'ok' };
       },
-    };
+    } as unknown as HostProvider;
     const pair = createMemoryConnectionPair();
     const host = serveHost({
-      input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy,
+      input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy as { mode?: PolicyMode },
       modeName: 'readonly', modePaths: directories, skillRegistry: { skills: [], diagnostics: [] },
     });
     const connection = createConnection(pair.client);
     const waiting = connection.request('session.create', {});
     try {
-      const { sessionId } = await waiting;
+      const { sessionId } = await waiting as { sessionId: string };
       const running = connection.request('run.start', { sessionId, input: 'first' });
       // 等的是条件而不是「running 那一格刚落」：本轮真正卡在第一次模型请求上，那一次没到就没有 `release` 可按。
-      for (let tried = 0; (await connection.request('status.get', { sessionId })).running !== true || requests.length === 0; tried += 1) {
+      for (let tried = 0; ((await connection.request('status.get', { sessionId })) as { running?: boolean }).running !== true || requests.length === 0; tried += 1) {
         assert.ok(tried < 100, 'the round never started');
         await setTimeout(5);
       }
 
-      const asked = await connection.request('mode.set', { sessionId, name: 'wide' });
+      const asked = await connection.request('mode.set', { sessionId, name: 'wide' }) as { pending?: string | null; tools?: string[] };
       assert.equal(asked.pending, 'wide');
       assert.deepEqual(asked.tools, ['compact', 'read'], '本轮交给模型的那一栏没在半路变');
 
       // 再选一次当前那一份：这是撤回，不是第二次切换。
-      const withdrawn = await connection.request('mode.set', { sessionId, name: 'readonly' });
+      const withdrawn = await connection.request('mode.set', { sessionId, name: 'readonly' }) as { pending?: string | null; mode?: string };
       assert.equal(withdrawn.pending, null);
       assert.equal(withdrawn.mode, 'readonly');
 
       await connection.request('mode.set', { sessionId, name: 'wide' });
       release();
-      assert.equal((await running).text, 'ok');
+      assert.equal((await running as { text: string }).text, 'ok');
 
-      const after = await connection.request('status.get', { sessionId });
+      const after = await connection.request('status.get', { sessionId }) as { mode?: string; pendingMode?: string | null; tools?: string[] };
       assert.equal(after.mode, 'wide');
       assert.equal(after.pendingMode, null);
       assert.deepEqual(after.tools, ['compact', 'find', 'read']);
       // 下一轮真的用上新清单（收紧撤掉后 find 又回来了）。
       await connection.request('run.start', { sessionId, input: 'second' });
       assert.deepEqual(requests[1].tools.map((entry) => entry.name), ['compact', 'find', 'read']);
-      const { events } = await connection.request('session.read', { sessionId });
+      const { events } = await connection.request('session.read', { sessionId }) as { events: SessionEvent[] };
       assert.deepEqual(events.filter((event) => event.kind === 'mode').map((event) => event.name), ['readonly', 'wide']);
-      assert.deepEqual(events.filter((event) => event.kind === 'mode').at(-1).tools, ['compact', 'find', 'read'],
+      assert.deepEqual(events.filter((event) => event.kind === 'mode').at(-1)!.tools, ['compact', 'find', 'read'],
         'a successful wider mode records the final tools instead of the temporary intersection');
     } finally {
       release?.();
@@ -361,15 +372,15 @@ test('session close cannot retire a session while execute is settling a pending 
         policy: { mode: 'ask' },
       },
     });
-    let releaseSummary;
-    let summaryStarted;
-    const started = new Promise((resolve) => { summaryStarted = resolve; });
-    const summaryResponse = new Promise((resolve) => { releaseSummary = resolve; });
+    let releaseSummary!: () => void;
+    let summaryStarted!: () => void;
+    const started = new Promise<void>((resolve) => { summaryStarted = resolve; });
+    const summaryResponse = new Promise<void>((resolve) => { releaseSummary = resolve; });
     const provider = {
       capabilities: MESSAGES_CAPABILITIES,
       model: 'test-model',
-      async *stream(request) {
-        if (String(request.messages?.[0]?.text ?? '').startsWith('Write a summary')) {
+      async *stream(request: ModelRequest) {
+        if (String((request.messages?.[0] as { text?: string } | undefined)?.text ?? '').startsWith('Write a summary')) {
           summaryStarted();
           await summaryResponse;
           yield { type: 'text', text: 'A concise summary of the completed turns.' };
@@ -377,15 +388,15 @@ test('session close cannot retire a session while execute is settling a pending 
           yield { type: 'text', text: 'ok' };
         }
       },
-    };
-    let host;
-    let closeAttempt;
-    let releaseHost;
+    } as unknown as HostProvider;
+    let host!: Host;
+    let closeAttempt!: Promise<{ value?: unknown; error?: { code?: string } }>;
+    let releaseHost!: Promise<void>;
     let settlingObserved = false;
     const connection = {
       request: async () => { throw new Error('unexpected_host_request'); },
-      notify(message) {
-        if (message.notify !== 'progress' || message.sessionId !== sessionId || message.progress?.phase !== 'settling') return;
+      notify(message: Record<string, unknown>) {
+        if (message.notify !== 'progress' || message.sessionId !== sessionId || (message.progress as { phase?: string } | undefined)?.phase !== 'settling') return;
         settlingObserved = true;
         closeAttempt = host.handle({ method: 'session.close', params: { sessionId } }, connection).then(
           (value) => ({ value }),
@@ -398,7 +409,7 @@ test('session close cannot retire a session while execute is settling a pending 
     host = createHost({
       config,
       provider,
-      policy: config.policy,
+      policy: config.policy as { mode?: PolicyMode },
       modeName: 'readonly',
       modePaths: directories,
       skillRegistry: { skills: [], diagnostics: [] },
@@ -408,7 +419,7 @@ test('session close cannot retire a session while execute is settling a pending 
       await host.handle({ method: 'session.open', params: { sessionId, projectRoot } }, connection);
       const running = host.handle({ method: 'session.compact', params: { sessionId } }, connection);
       await started;
-      const mode = await host.handle({ method: 'mode.set', params: { sessionId, name: 'wide' } }, connection);
+      const mode = await host.handle({ method: 'mode.set', params: { sessionId, name: 'wide' } }, connection) as { pending?: string | null };
       assert.equal(mode.pending, 'wide');
 
       releaseSummary();
@@ -439,40 +450,40 @@ test('a rejected mode switch preserves the current tools through the next round 
         policy: { mode: 'ask' },
       },
     });
-    const requests = [];
+    const requests: ModelRequest[] = [];
     const provider = {
       capabilities: MESSAGES_CAPABILITIES,
       model: 'test-model',
-      async *stream(request) {
+      async *stream(request: ModelRequest) {
         requests.push(request);
         yield { type: 'text', text: 'ok' };
       },
-    };
+    } as unknown as HostProvider;
     const pair = createMemoryConnectionPair();
     const host = serveHost({
-      input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy,
+      input: pair.host.input, output: pair.host.output, config, provider, policy: config.policy as { mode?: PolicyMode },
       modeName: 'readonly', modePaths: directories, skillRegistry: { skills: [], diagnostics: [] },
     });
     const connection = createConnection(pair.client);
     try {
-      const { sessionId } = await connection.request('session.create', {});
-      assert.deepEqual((await connection.request('status.get', { sessionId })).tools, ['compact', 'read']);
+      const { sessionId } = await connection.request('session.create', {}) as { sessionId: string };
+      assert.deepEqual((await connection.request('status.get', { sessionId }) as { tools?: string[] }).tools, ['compact', 'read']);
 
       await assert.rejects(
         connection.request('mode.set', { sessionId, name: 'invalid' }),
-        (error) => error.code === 'mode_tool_unregistered',
+        (error) => (error as { code?: string }).code === 'mode_tool_unregistered',
       );
       await assert.rejects(
         connection.request('mode.set', { sessionId, name: 'missing-prompt' }),
-        (error) => error.code === 'mode_prompt_unavailable',
+        (error) => (error as { code?: string }).code === 'mode_prompt_unavailable',
       );
-      const afterFailures = await connection.request('status.get', { sessionId });
+      const afterFailures = await connection.request('status.get', { sessionId }) as { mode?: string; tools?: string[] };
       assert.equal(afterFailures.mode, 'readonly');
       assert.deepEqual(afterFailures.tools, ['compact', 'read']);
 
       await connection.request('session.close', { sessionId });
       await connection.request('session.open', { sessionId });
-      const recovered = await connection.request('status.get', { sessionId });
+      const recovered = await connection.request('status.get', { sessionId }) as { mode?: string; tools?: string[] };
       assert.equal(recovered.mode, 'readonly');
       assert.deepEqual(recovered.tools, ['compact', 'read']);
 
