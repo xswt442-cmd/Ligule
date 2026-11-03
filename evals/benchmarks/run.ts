@@ -20,7 +20,7 @@ type Plan = ManifestPlan & {
   verifier: { reward_key: string; pass_threshold: number; authority: string };
 };
 
-type ExecutionStatus = 'completed' | 'failed' | 'timed_out';
+type ExecutionStatus = 'completed' | 'failed' | 'timed_out' | 'interrupted';
 
 function runIdentity(): RunIdentity {
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repository, encoding: 'utf8', windowsHide: true });
@@ -379,7 +379,9 @@ async function main(): Promise<void> {
   });
   const finished = new Date().toISOString();
   const timedOut = execution.timedOut;
-  const executionStatus: ExecutionStatus = timedOut ? 'timed_out' : execution.status === 0 ? 'completed' : 'failed';
+  const executionStatus: ExecutionStatus = timedOut
+    ? 'timed_out'
+    : execution.interrupted ? 'interrupted' : execution.status === 0 ? 'completed' : 'failed';
   const stdoutPath = join(runDirectory, 'harbor.stdout.log');
   const stderrPath = join(runDirectory, 'harbor.stderr.log');
   await writeFile(stdoutPath, execution.stdout, 'utf8');
@@ -387,6 +389,7 @@ async function main(): Promise<void> {
   await writeFile(join(runDirectory, 'run-state.json'), `${JSON.stringify({
     status: executionStatus,
     timedOut,
+    interrupted: execution.interrupted,
     started,
     finished,
     timeoutMs,
@@ -425,6 +428,7 @@ async function main(): Promise<void> {
     ...baseRecord,
     executionStatus,
     timedOut,
+    interrupted: execution.interrupted,
     started,
     finished,
     timeoutMs,

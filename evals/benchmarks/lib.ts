@@ -10,6 +10,7 @@ export type ProcessResult = {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  interrupted: boolean;
   terminationPending: boolean;
   error?: string;
 };
@@ -35,6 +36,7 @@ export async function runProcess(
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let interrupted = false;
     let terminationPending = false;
     let settled = false;
     const append = (current: string, chunk: Buffer): string => {
@@ -46,10 +48,11 @@ export async function runProcess(
     const finish = (status: number | null, signal: NodeJS.Signals | null, error?: string): void => {
       if (settled) return;
       settled = true;
-      resolveRun({ status, signal, stdout, stderr, timedOut, terminationPending, ...(error === undefined ? {} : { error }) });
+      process.off('SIGINT', onInterrupt);
+      process.off('SIGTERM', onInterrupt);
+      resolveRun({ status, signal, stdout, stderr, timedOut, interrupted, terminationPending, ...(error === undefined ? {} : { error }) });
     };
     const killTree = (): void => {
-      timedOut = true;
       if (process.platform === 'win32') {
         if (child.pid !== undefined) {
           spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: 30_000 });
@@ -60,7 +63,14 @@ export async function runProcess(
       }
       setTimeout(() => { terminationPending = true; finish(null, 'SIGKILL'); }, 10_000).unref();
     };
-    const timer = setTimeout(killTree, timeoutMs);
+    const onInterrupt = (): void => {
+      interrupted = true;
+      clearTimeout(timer);
+      killTree();
+    };
+    process.once('SIGINT', onInterrupt);
+    process.once('SIGTERM', onInterrupt);
+    const timer = setTimeout(() => { timedOut = true; killTree(); }, timeoutMs);
     child.once('error', (error) => {
       clearTimeout(timer);
       finish(null, null, error.message);
