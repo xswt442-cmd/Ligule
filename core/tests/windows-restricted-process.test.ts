@@ -7,10 +7,10 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
-import { withoutAutoInheritanceMarker } from './helpers/windows-acl.js';
 import { createAppContainerProfile, runAppContainerCommand } from '../dist/capability/windows-appcontainer-process.js';
 import { createOwnedProcessJob } from '../dist/capability/win32-job.js';
 import { spawnWindowsCommand } from '../dist/capability/windows-command.js';
+import { withoutAutoInheritanceMarker } from './helpers/windows-acl.ts';
 
 test('a WRITE_RESTRICTED process writes the workspace and refuses a sibling path', {
   skip: process.platform !== 'win32',
@@ -101,7 +101,7 @@ test('a WRITE_RESTRICTED process writes the workspace and refuses a sibling path
     const [exitCode, signal] = await once(child, 'close');
     assert.equal(signal, null, stderr);
     assert.equal(exitCode, 0, `stdout=${stdout}\nstderr=${stderr}`);
-    const report = JSON.parse(stdout.trim().split(/\r?\n/u).at(-1));
+    const report = JSON.parse(stdout.trim().split(/\r?\n/u).at(-1)!);
     assert.equal(report.cmdExitCode, 0, JSON.stringify(report));
     assert.equal(report.powershellExitCode, 0, JSON.stringify(report));
     assert.equal(report.nodeExitCode, 0, JSON.stringify(report));
@@ -137,7 +137,7 @@ test('the Guardian grants workspace and private-temp writes, then blocks a sibli
   environment.LIGULE_HOME = home;
   environment.TEMP = temp;
   environment.TMP = temp;
-  const command = join(process.env.SystemRoot, 'System32', 'cmd.exe');
+  const command = join(process.env.SystemRoot!, 'System32', 'cmd.exe');
   const owned = spawnWindowsCommand(command, [
     '/d', '/q', '/c', 'echo %TEMP% & echo workspace-write> workspace.txt & echo private-temp> %TEMP%\\private.txt & echo escaped> ..\\outside\\escaped.txt',
   ], workspace, environment, { kind: 'restricted-token', workspaceRoot: workspace, tempDirectory: temp, aclLockRoot: home });
@@ -229,7 +229,7 @@ test('the Guardian still permits known hard-link and FILE_DELETE_CHILD boundary 
   environment.LIGULE_HOME = home;
   environment.TEMP = temp;
   environment.TMP = temp;
-  const command = join(process.env.SystemRoot, 'System32', 'cmd.exe');
+  const command = join(process.env.SystemRoot!, 'System32', 'cmd.exe');
   try {
     const write = spawnWindowsCommand(process.execPath, ['-e', "require('fs').writeFileSync('hardlink-alias.txt','outside-modified')"],
       workspace, environment, { kind: 'restricted-token', workspaceRoot: workspace, tempDirectory: temp, aclLockRoot: home });
@@ -271,7 +271,7 @@ test('a force-killed Guardian leaves a SID-only ACE that a same-user Low AppCont
   environment.LIGULE_HOME = home;
   environment.TEMP = temp;
   environment.TMP = temp;
-  const command = join(process.env.SystemRoot, 'System32', 'cmd.exe');
+  const command = join(process.env.SystemRoot!, 'System32', 'cmd.exe');
   const tryLowIntegrityWrite = async () => {
     const profile = await createAppContainerProfile();
     const job = await createOwnedProcessJob({ assignCurrentProcess: false });
@@ -289,7 +289,7 @@ test('a force-killed Guardian leaves a SID-only ACE that a same-user Low AppCont
       job.close();
     }
   };
-  let guardian;
+  let guardian: ReturnType<typeof spawnWindowsCommand> | undefined;
   try {
     await tryLowIntegrityWrite();
     assert.equal(await readFile(canary, 'utf8'), 'medium-baseline');
@@ -298,9 +298,9 @@ test('a force-killed Guardian leaves a SID-only ACE that a same-user Low AppCont
     guardian = spawnWindowsCommand(process.execPath, ['-e', source], workspace, environment, {
       kind: 'restricted-token', workspaceRoot: workspace, tempDirectory: temp, aclLockRoot: home,
     });
-    const ready = new Promise((resolveReady, reject) => {
+    const ready = new Promise<void>((resolveReady, reject) => {
       const timer = setTimeout(() => reject(new Error('restricted Guardian did not grant its ACLs')), 5_000);
-      guardian.child.once('message', (message) => {
+      guardian!.child.once('message', (message) => {
         if (typeof message !== 'object' || message === null || !('kind' in message) || message.kind !== 'ready') return;
         clearTimeout(timer);
         resolveReady();

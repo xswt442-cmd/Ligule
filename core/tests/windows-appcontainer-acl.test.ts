@@ -141,7 +141,7 @@ test('a temporary restricted-token write ACE covers existing and new workspace f
   await writeFile(existingFile, 'existing');
   const sidPart = () => randomInt(1, 2 ** 30);
   const sid = `S-1-4-${sidPart()}-${sidPart()}`;
-  const acl = (path) => execFileSync('icacls.exe', [path], { encoding: 'utf8', windowsHide: true });
+  const acl = (path: string) => execFileSync('icacls.exe', [path], { encoding: 'utf8', windowsHide: true });
   const before = new Map([workspace, nested, existingFile].map((path) => [path, acl(path)]));
   let grantAttempted = false;
   try {

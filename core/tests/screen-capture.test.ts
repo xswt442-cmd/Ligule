@@ -46,7 +46,7 @@ test('the Windows capture Job owns a real child by PID and closes it', { skip: p
   const closed = once(child, 'close');
   try {
     await once(child, 'message');
-    job.assignPid(child.pid);
+    job.assignPid(child.pid!);
     job.close();
     const deadline = new AbortController();
     try {

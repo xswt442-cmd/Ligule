@@ -40,9 +40,9 @@ for (const api of ['chat-completions', 'messages']) {
         const provider = providerFromConfig({ model: { api, baseURL: `http://127.0.0.1:${port}/v1`, model: 'local-model', apiKeyEnv: 'SUMMARY_TEST_KEY' } });
         const compaction = createCompaction({ provider, session, directory, id,
           limits: { contextTokens: 2000, compactThresholdRatio: 0.8, compactRetainRatio: 0.16, resultBytes: 16000 } });
-        await assert.rejects(compaction.compactNow(), (error) => error.code === (empty ? 'provider_empty_response' : 'provider_output_exhausted'));
+        await assert.rejects(compaction.compactNow(), (error: unknown) => error instanceof Error && (error as { code?: string }).code === (empty ? 'provider_empty_response' : 'provider_output_exhausted'));
         assert.deepEqual(await readFile(join(directory, `${id}.jsonl`)), before);
-        await assert.rejects(readFile(join(directory, `${id}.checkpoint.json`)), (error) => error.code === 'ENOENT');
+        await assert.rejects(readFile(join(directory, `${id}.checkpoint.json`)), (error: unknown) => error instanceof Error && (error as { code?: string }).code === 'ENOENT');
       } finally {
         if (previous === undefined) delete process.env.SUMMARY_TEST_KEY; else process.env.SUMMARY_TEST_KEY = previous;
         server.closeAllConnections();

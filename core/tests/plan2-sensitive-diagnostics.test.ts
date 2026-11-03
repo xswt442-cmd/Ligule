@@ -9,7 +9,7 @@ const ARGUMENT_SENTINEL = 'synthetic-tool-argument-sentinel-not-a-credential';
 const API_KEY_ENV = `LIGULE_PLAN2_DIAGNOSTIC_${randomUUID().replaceAll('-', '')}`;
 const RETRY = { ...DEFAULT_RETRY, maxAttempts: 1, baseDelayMs: 1 };
 
-async function withEndpoint(run) {
+async function withEndpoint(run: (baseUrl: string) => Promise<void>) {
   const server = createServer((_request, response) => {
     const argumentsText = JSON.stringify({ path: 'note.txt', marker: ARGUMENT_SENTINEL })
       .replace(ARGUMENT_SENTINEL, `${ARGUMENT_SENTINEL}" broken`);
@@ -39,7 +39,7 @@ async function withEndpoint(run) {
   }
 }
 
-async function collect(stream) {
+async function collect(stream: AsyncIterable<unknown>) {
   for await (const _event of stream) {
     // The malformed tool call is reported after the provider has assembled the response.
   }
@@ -58,9 +58,10 @@ test('malformed tool arguments do not enter provider diagnostics', async () => {
 
       await assert.rejects(
         collect(provider.stream({ system: '', tools: [], messages: [] })),
-        (error) => {
-          assert.equal(error.code, 'provider_tool_args_invalid');
-          const diagnostic = [error.message, error.detail, error.cause?.message, error.stack].join('\n');
+        (error: unknown) => {
+          const failure = error as { code?: string; message?: string; detail?: unknown; cause?: { message?: string }; stack?: string };
+          assert.equal(failure.code, 'provider_tool_args_invalid');
+          const diagnostic = [failure.message, failure.detail, failure.cause?.message, failure.stack].join('\n');
           assert.equal(
             diagnostic.includes(ARGUMENT_SENTINEL),
             false,

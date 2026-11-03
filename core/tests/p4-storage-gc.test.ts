@@ -4,18 +4,19 @@ import { access, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { claimStorageOwner, previewStorageGarbage, applyStorageGarbage, storageGcParent } from '../dist/capability/storage-gc.js';
+import type { StorageGcKind } from '../dist/capability/storage-gc.js';
 
 const fixtureRoot = fileURLToPath(new URL('../../testplace/v0.1.1/', import.meta.url));
 const workspace = 'fixture-workspace';
 const old = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
 
-async function fixture(run) {
+async function fixture(run: (root: string) => Promise<void>) {
   await mkdir(fixtureRoot, { recursive: true });
   const root = await mkdtemp(join(fixtureRoot, 'p4-gc-'));
   try { await run(root); }
   finally { await rm(root, { recursive: true, force: true }); }
 }
-async function owned(root, kind, id, { hold = false } = {}) {
+async function owned(root: string, kind: StorageGcKind, id: string, { hold = false }: { hold?: boolean } = {}) {
   const release = await claimStorageOwner(root, workspace, kind, id, id);
   const directory = join(storageGcParent(root, kind), id);
   const marker = join(directory, '.ligule-owner.json');

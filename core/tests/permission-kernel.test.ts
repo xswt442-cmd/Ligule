@@ -5,8 +5,10 @@ import { createConfig } from '../dist/kernel/config.js';
 import { createDecisionChain } from '../dist/kernel/policy.js';
 import { DEFAULT_PERMISSION_CONTEXT, createPermissionContext } from '../dist/kernel/permission.js';
 import { createAskUserPlugin } from '../dist/tools/ask-user.js';
+import type { PermissionAccess } from '../dist/kernel/permission.js';
+import type { ToolDefinition } from '../dist/kernel/kernel.js';
 
-function tool(access, run) {
+function tool(access: PermissionAccess, run: ToolDefinition['run']) {
   return {
     name: 'operation',
     description: 'A permission test operation.',
@@ -19,7 +21,7 @@ function tool(access, run) {
 test('permission denial runs before Policy approval and records the separate decision', async () => {
   let asked = false;
   let executed = false;
-  const events = [];
+  const events: Record<string, unknown>[] = [];
   const kernel = createKernel({
     config: createConfig({ user: { boundary: process.cwd() } }),
     permission: DEFAULT_PERMISSION_CONTEXT,
@@ -38,13 +40,13 @@ test('permission denial runs before Policy approval and records the separate dec
     code: 'permission_read_only', reason: 'this session only permits reads',
   });
   assert.equal(events[0].verdict, undefined);
-  assert.equal(events[0].result.code, 'permission_read_only');
+  assert.equal((events[0].result as { code?: string }).code, 'permission_read_only');
 });
 
 test('a workspace profile can execute when the platform reports partial filesystem confinement', async () => {
   let asked = false;
   let executed = false;
-  const events = [];
+  const events: Record<string, unknown>[] = [];
   const kernel = createKernel({
     config: createConfig({ user: { boundary: process.cwd() } }),
     permission: createPermissionContext('workspace-write', 'policy', {
@@ -58,8 +60,8 @@ test('a workspace profile can execute when the platform reports partial filesyst
   const result = await kernel.call('operation', {});
   assert.equal(asked, false);
   assert.equal(executed, true);
-  assert.equal(result.text, 'bounded');
-  assert.equal(events.some((event) => event.permission?.decision === 'deny'), false);
+  assert.equal((result as { text?: unknown }).text, 'bounded');
+  assert.equal(events.some((event) => (event.permission as { decision?: string } | undefined)?.decision === 'deny'), false);
 });
 
 test('a workspace profile refuses execution when filesystem confinement is unavailable', async () => {
@@ -80,7 +82,7 @@ test('a workspace profile refuses execution when filesystem confinement is unava
 
 test('unknown tool access labels are rejected during registration', () => {
   const kernel = createKernel();
-  assert.throws(() => kernel.register(tool('files-everywhere', async () => {})), { code: 'tool_access_unknown' });
+  assert.throws(() => kernel.register(tool('files-everywhere' as unknown as PermissionAccess, async () => {})), { code: 'tool_access_unknown' });
 });
 
 test('a user question remains available without granting filesystem or network access', () => {

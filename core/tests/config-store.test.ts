@@ -66,11 +66,11 @@ test('configuration reads merge policy rules by exact identity and allow editing
     ]);
 
     const saved = await store.write({
-      field: 'policy.rules', layer: 'projectLocal', version: shown.layers.find((item) => item.layer === 'projectLocal').version,
+      field: 'policy.rules', layer: 'projectLocal', version: shown.layers.find((item) => item.layer === 'projectLocal')!.version,
       op: 'add', rule: { tool: 'write', decision: 'deny' },
     });
     assert.equal(saved.shadowed, false);
-    assert.ok(saved.effective.some((rule) => rule.tool === 'write' && rule.decision === 'deny'));
+    assert.ok((saved.effective as { tool: string; decision: string }[]).some((rule) => rule.tool === 'write' && rule.decision === 'deny'));
     assert.ok((await readFile(join(projectRoot, '.ligule', 'config.local.toml'), 'utf8')).includes('tool = "write"'));
   } finally {
     await rm(root, { recursive: true, force: true });

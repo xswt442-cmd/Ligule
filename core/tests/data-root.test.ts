@@ -15,7 +15,7 @@ test('the data root is ~/.ligule unless LIGULE_HOME names another directory', ()
 
 // 相对写法不当成「相对当前目录」：同一份环境从两个目录下起来会写出两份数据。
 test('a relative LIGULE_HOME is refused with its own code', () => {
-  assert.throws(() => dataRoot('/home/me', { LIGULE_HOME: 'elsewhere' }), (error) => error.code === 'data_root_invalid');
+  assert.throws(() => dataRoot('/home/me', { LIGULE_HOME: 'elsewhere' }), (error: unknown) => error instanceof Error && (error as { code?: string }).code === 'data_root_invalid');
 });
 
 test('the user layer, the mode and skill lookups and the terminal history all follow the one root', () => {

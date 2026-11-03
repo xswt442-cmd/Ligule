@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { KernelError, probeBackend } from '../dist/index.js';
 
 function recordingLogger() {
-  const seen = [];
+  const seen: Record<string, unknown>[] = [];
   return {
     seen,
-    logger: { debug: () => {}, log: () => {}, error: (message, fields) => seen.push(fields) },
+    logger: { debug: () => {}, log: () => {}, error: (message: string, fields: Record<string, unknown>) => seen.push(fields) },
   };
 }
 

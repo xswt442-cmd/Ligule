@@ -4,8 +4,13 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { join } from 'node:path';
 import { createConfig } from '../dist/index.js';
 import { createBrowserSupport } from '../dist/capability/browser.js';
+import type { ConfigSnapshot } from '../dist/kernel/config.js';
+import type { SessionDirectoryConfig } from '../dist/session/list.js';
+import type { NormalizedMcpServerConfig } from '../dist/capability/mcp.js';
 
-async function withRoot(run) {
+type BrowserTestConfig = ConfigSnapshot & SessionDirectoryConfig;
+
+async function withRoot(run: (root: string) => Promise<void>) {
   await mkdir(join(process.cwd(), 'testplace'), { recursive: true });
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'browser-config-'));
   try { await run(root); }
@@ -15,7 +20,7 @@ async function withRoot(run) {
 test('missing or project-only browser settings never activate an external backend', async () => {
   await withRoot(async root => {
     const selected = { provider: 'playwright-mcp', entryPoint: '/not-present/cli.js', executablePath: '/not-present/chrome' };
-    const config = createConfig({ user: { boundary: root, workspaceRoot: root }, project: { browser: selected } });
+    const config = createConfig({ user: { boundary: root, workspaceRoot: root }, project: { browser: selected } }) as BrowserTestConfig;
     const result = await createBrowserSupport(config, { user: {}, project: { browser: selected } });
     assert.deepEqual(result.status, { configured: false, available: false, code: 'browser_not_configured' });
     assert.equal(result.server, undefined);
@@ -25,7 +30,7 @@ test('missing or project-only browser settings never activate an external backen
 
 test('invalid and missing installed browser dependencies expose a real unavailable diagnostic', async () => {
   await withRoot(async root => {
-    const config = browser => createConfig({ user: { boundary: root, browser } });
+    const config = (browser: Record<string, unknown>) => createConfig({ user: { boundary: root, browser } }) as BrowserTestConfig;
     const invalid = await createBrowserSupport(config({ provider: 'other', entryPoint: 'relative', executablePath: 'relative' }), {});
     assert.equal(invalid.status.code, 'browser_settings_invalid');
     const missing = await createBrowserSupport(config({ provider: 'playwright-mcp', entryPoint: join(root, 'missing', 'cli.js'), executablePath: join(root, 'missing', 'chrome') }), {});
@@ -41,12 +46,12 @@ test('an installed backend gets immutable headless configuration, independent st
 }, async () => {
   await withRoot(async root => {
     const config = createConfig({ user: { boundary: root, workspaceRoot: root,
-      browser: { provider: 'playwright-mcp', entryPoint, executablePath } } });
+      browser: { provider: 'playwright-mcp', entryPoint, executablePath } } }) as BrowserTestConfig;
     const support = await createBrowserSupport(config, {});
     assert.deepEqual(support.status, { configured: true, available: true });
     const first = await support.session('owner');
     const child = await support.session('owner.sub-1');
-    const output = server => server.args[server.args.indexOf('--output-dir') + 1];
+    const output = (server: NormalizedMcpServerConfig) => server.args[server.args.indexOf('--output-dir') + 1];
     assert.notEqual(output(first), output(child));
     assert.equal(first.identityDigest, child.identityDigest);
     const path = first.args[first.args.indexOf('--config') + 1];

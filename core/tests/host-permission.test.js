@@ -12,7 +12,7 @@ import { createPermissionContext } from '../dist/kernel/permission.js';
 import { createInteractivePermissionContext } from '../dist/capability/permission-capabilities.js';
 import { resolveShell } from '../dist/capability/shell.js';
 import { waitFor, withTuiHost } from './helpers/tui-host.ts';
-import { withoutAutoInheritanceMarker } from './helpers/windows-acl.js';
+import { withoutAutoInheritanceMarker } from './helpers/windows-acl.ts';
 
 const fullPermission = createPermissionContext('full-access', 'unrestricted', {
   filesystemRead: 'unavailable', filesystemWrite: 'unavailable', network: 'unavailable', process: 'unavailable',

@@ -3,6 +3,15 @@ import test from 'node:test';
 import { controlPresets, presetGrantCeiling } from '../dist/host/control-presets.js';
 import { withTuiHost } from './helpers/tui-host.ts';
 
+type AgentControlList = { version: string };
+
+type AgentControlGrant = {
+  maxPermissionProfile: string;
+  maxNetwork: string;
+  allowOperator: boolean;
+  allowedMcpServers: unknown[];
+};
+
 test('safe presets stay inside the minimal permission envelope', () => {
   const presets = controlPresets({ partialWorkspaceWriteConfirmationRequired: true, partialWorkspaceWriteConfirmed: false });
   assert.deepEqual(presets.map(preset => preset.id), ['reader', 'workspace']);
@@ -55,7 +64,7 @@ test('a preset ceiling never widens what the grant may grant', () => {
 test('the observer preset creates a grant whose ceiling the Host accepts verbatim', async () => {
   const [reader] = controlPresets({ partialWorkspaceWriteConfirmationRequired: false, partialWorkspaceWriteConfirmed: false });
   await withTuiHost(async ({ client, projectDirectory }) => {
-    const before = await client.request('agent-control.list', {});
+    const before = await client.request('agent-control.list', {}) as AgentControlList;
     const created = await client.request('agent-control.create', {
       version: before.version,
       grantName: 'preset-reader-test',
@@ -66,7 +75,7 @@ test('the observer preset creates a grant whose ceiling the Host accepts verbati
       maxNetwork: reader.maxNetwork,
       defaultPolicy: reader.defaultPolicy,
       allowedPolicyAsk: reader.allowedPolicies.includes('ask'),
-      allowedPolicyAuto: reader.allowedPolicies.includes('auto'),
+      allowedPolicyAuto: (reader.allowedPolicies as readonly string[]).includes('auto'),
       allowedPolicyNone: reader.allowedPolicies.includes('none'),
       allowOperator: reader.allowOperator,
       allowedMcpServers: [],
@@ -77,7 +86,7 @@ test('the observer preset creates a grant whose ceiling the Host accepts verbati
       confirmWorkspaceTrust: reader.confirmWorkspaceTrust,
       expiresAt: '',
     });
-    const grant = created.grants.at(-1);
+    const grant = (created as { grants: AgentControlGrant[] }).grants.at(-1)!;
     assert.equal(grant.maxPermissionProfile, 'read-only');
     assert.equal(grant.maxNetwork, 'policy');
     assert.equal(grant.allowOperator, false);

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createKernel, createSlotRegistry, loadAssembly } from '../dist/index.js';
 
-const panelSlot = { name: 'panel', accepts: (payload) => typeof payload?.title === 'string' };
+const panelSlot = { name: 'panel', accepts: (payload: { title?: unknown }) => typeof payload?.title === 'string' };
 
 test('the registry starts from the host-declared slots and holds nothing', () => {
   const registry = createSlotRegistry([panelSlot]);
@@ -12,9 +12,9 @@ test('the registry starts from the host-declared slots and holds nothing', () =>
 
 test('an undeclared slot and a payload of the wrong shape are both refused', () => {
   const registry = createSlotRegistry([panelSlot]);
-  assert.throws(() => registry.register('sidebar', { title: 'x' }), (error) => error.code === 'slot_unknown');
-  assert.throws(() => registry.register('panel', { title: 7 }), (error) => error.code === 'slot_payload_rejected');
-  assert.throws(() => registry.list('sidebar'), (error) => error.code === 'slot_unknown');
+  assert.throws(() => registry.register('sidebar', { title: 'x' }), (error: unknown) => error instanceof Error && (error as { code?: string }).code === 'slot_unknown');
+  assert.throws(() => registry.register('panel', { title: 7 }), (error: unknown) => error instanceof Error && (error as { code?: string }).code === 'slot_payload_rejected');
+  assert.throws(() => registry.list('sidebar'), (error: unknown) => error instanceof Error && (error as { code?: string }).code === 'slot_unknown');
 });
 
 test('two plugins may fill one slot and each unload removes only its own entry', () => {

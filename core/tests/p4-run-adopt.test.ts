@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { createSessionLog } from '../dist/session/session.js';
 import { adoptLegacySessions } from '../dist/session/adopt.js';
 import { createRunAcceptance, publishRunResult, readRunResult } from '../dist/session/run.js';
+import type { RunResultRef } from '../dist/session/run.js';
+import type { RunResult } from '../dist/delegation.js';
 
 const fixtureRoot = fileURLToPath(new URL('../../testplace/', import.meta.url));
 
@@ -22,7 +24,7 @@ test('legacy adoption preserves completed run result sidecars and keeps the sour
   try {
     const acceptance = createRunAcceptance(sessionId, 'create a report', undefined, 'controller:local', 'adopt-key');
     const user = await session.append({ kind: 'user', text: 'create a report', run: acceptance });
-    const result = {
+    const result: RunResult = {
       runId: acceptance.runId, sessionId, state: 'completed', stopReason: 'assistant_completed',
       output: { text: 'report delivered' }, validation: { status: 'not_requested' },
       artifacts: [{ kind: 'session', sessionId }], usage: { iterations: 1, modelCalls: 1 }, userSeq: user.seq,
@@ -42,7 +44,7 @@ test('legacy adoption preserves completed run result sidecars and keeps the sour
     assert.ok(adoptedTurn);
     assert.deepEqual(await readRunResult(target, workspace, sessionId, {
       runId: acceptance.runId, userSeq: user.seq, sessionId, acceptedAt: acceptance.acceptedAt,
-      state: 'completed', requestKey: acceptance.requestKey, resultRef: adoptedTurn.resultRef,
+      state: 'completed', requestKey: acceptance.requestKey, resultRef: adoptedTurn.resultRef as RunResultRef | undefined,
     }), result);
     const second = await adoptLegacySessions(legacy, target, { projectRoot: project });
     assert.ok(second.already.includes(resultRef.name));

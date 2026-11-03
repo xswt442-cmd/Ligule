@@ -66,7 +66,7 @@ test('Windows reports Job Object ownership only when its runtime probe succeeds'
 
   assert.equal(probes, 1);
   assert.equal(snapshot.backend, 'unavailable');
-  assert.match(snapshot.reason, /restricted-token launch failed/u);
+  assert.match(snapshot.reason!, /restricted-token launch failed/u);
   assert.deepEqual(snapshot.capabilities, {
     filesystemRead: 'unavailable', filesystemWrite: 'unavailable', network: 'unavailable', process: 'full',
   });

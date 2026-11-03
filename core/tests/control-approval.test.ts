@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createControl } from '../dist/host/control.js';
 import { requestAgentControl } from '../dist/host/agent-control-runtime.js';
+import type { Host } from '../dist/host/host.js';
 
 test('external operation status exposes only an approval summary and the local human channel can expand it', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ligule-control-approval-'));
@@ -20,7 +21,7 @@ test('external operation status exposes only an approval summary and the local h
   let answer;
   const requestId = 'approval-1';
   const hash = createHash('sha256').update(content).digest('hex');
-  const host = {
+  const host: Host = {
     async handle(message, connection) {
       if (message.method === 'session.create') return { sessionId: 'session-1' };
       if (message.method === 'run.start') {
@@ -59,14 +60,14 @@ test('external operation status exposes only an approval summary and the local h
     assert.equal(pending.details.contentBytes, content.length);
     assert.equal(pending.details.contentSha256, hash);
     assert.equal(pending.details.callId, 'call-1');
-    assert.ok(String(pending.details.args.content).length <= 513);
+    assert.ok(String((pending.details.args as { content: unknown }).content).length <= 513);
 
     assert.throws(() => control.replyInteraction({
       sessionId: opened.sessionId, requestId, type: 'approval', decision: 'allow', rememberScope: 'project', rememberTarget: 'file',
     }, 'controller'), { code: 'policy_memory_trusted_user_required' });
 
     const expanded = await requestAgentControl(projectRoot, opened.sessionId, { action: 'details', requestId });
-    assert.equal(expanded.args.content, content);
+    assert.equal((expanded as { args: { content: unknown } }).args.content, content);
     await requestAgentControl(projectRoot, opened.sessionId, {
       action: 'reply', requestId, type: 'approval', decision: 'allow', rememberScope: 'project', rememberTarget: 'file',
     });

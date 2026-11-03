@@ -39,9 +39,9 @@ test('Guardian AppContainer requires LOCALAPPDATA and cleans its private temp di
     { name: 'minimal-canonical-path', environment: canonicalPathEnvironment },
     { name: 'minimal-plus-LOCALAPPDATA', environment: { ...minimalEnvironment, LOCALAPPDATA: process.env.LOCALAPPDATA } },
   ];
-  const acl = (path) => execFileSync('icacls.exe', [path], { encoding: 'utf8', windowsHide: true });
+  const acl = (path: string) => execFileSync('icacls.exe', [path], { encoding: 'utf8', windowsHide: true });
   const baselineAcl = acl(workspace);
-  const outcomes = [];
+  const outcomes: Array<{ name: string; exitCode?: number; errorCode?: string; detail?: string; stdout?: string; stderr?: string }> = [];
 
   try {
     for (const scenario of cases) {
@@ -55,8 +55,9 @@ test('Guardian AppContainer requires LOCALAPPDATA and cleans its private temp di
       owned.child.stderr?.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
       try {
         outcomes.push({ name: scenario.name, exitCode: await owned.completion, stdout: stdout.trim(), stderr: stderr.trim() });
-      } catch (error) {
-        outcomes.push({ name: scenario.name, errorCode: error.code, detail: error.detail, stdout: stdout.trim(), stderr: stderr.trim() });
+      } catch (error: unknown) {
+        const failure = error as { code?: string; detail?: string };
+        outcomes.push({ name: scenario.name, errorCode: failure.code, detail: failure.detail, stdout: stdout.trim(), stderr: stderr.trim() });
       }
     }
 

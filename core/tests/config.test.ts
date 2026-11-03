@@ -38,7 +38,7 @@ test('policy rules override by exact tool and match while unrelated lower-layer 
     ] } },
   });
 
-  assert.deepEqual(config.policy.rules, [
+  assert.deepEqual((config.policy as { rules: unknown }).rules, [
     { tool: 'mcp:playwright/browser_navigate', decision: 'allow' },
     { tool: 'exec', match: 'git status*', decision: 'allow' },
     { tool: 'exec', match: 'pnpm install*', decision: 'deny' },
@@ -52,7 +52,7 @@ test('a deny wins duplicate policy rules in the same layer regardless of array o
     { tool: 'mcp:playwright/browser_navigate', decision: 'deny' },
   ] } } });
 
-  assert.deepEqual(config.policy.rules, [
+  assert.deepEqual((config.policy as { rules: unknown }).rules, [
     { tool: 'mcp:playwright/browser_navigate', decision: 'deny' },
   ]);
 });
@@ -73,15 +73,15 @@ test('the snapshot is read all the way down', () => {
   assert.ok(Object.isFrozen(config.sandbox));
   assert.ok(Object.isFrozen(config.allow));
   assert.throws(() => {
-    config.sandbox = {};
+    (config as Record<string, unknown>).sandbox = {};
   }, TypeError);
 });
 
 // 项目配置是不可信输入。TOML 中的 `["__proto__"]` 是普通键，合并时不能把它写入对象原型。
 test('a __proto__ key in a layer is refused instead of polluting every object', () => {
   const hostile = JSON.parse('{"__proto__": {"polluted": 1}}');
-  assert.throws(() => createConfig({ user: hostile }), (error) => error.code === 'config_key_unsafe');
-  assert.equal({}.polluted, undefined, 'nothing reached Object.prototype');
+  assert.throws(() => createConfig({ user: hostile }), (error: unknown) => error instanceof KernelError && error.code === 'config_key_unsafe');
+  assert.equal(({} as { polluted?: unknown }).polluted, undefined, 'nothing reached Object.prototype');
 });
 
 // TOML 日期时间会解析为对象而不是普通表；合并配置时必须保留该值，不能递归展开并丢失它。
@@ -90,8 +90,8 @@ test('a datetime in a higher layer replaces the lower one instead of merging awa
     user: { when: new Date('1979-05-27T07:32:00Z'), keep: new Date('2000-01-01T00:00:00Z') },
     project: { when: new Date('2026-10-01T00:00:00Z') },
   });
-  assert.equal(snapshot.when.toISOString(), '2026-10-01T00:00:00.000Z');
-  assert.equal(snapshot.keep.toISOString(), '2000-01-01T00:00:00.000Z', 'a lower layer value still survives on its own');
+  assert.equal((snapshot.when as Date).toISOString(), '2026-10-01T00:00:00.000Z');
+  assert.equal((snapshot.keep as Date).toISOString(), '2000-01-01T00:00:00.000Z', 'a lower layer value still survives on its own');
 });
 
 test('the snapshot does not share references with the layer objects', () => {
@@ -110,7 +110,7 @@ test('an unknown layer name or a layer that is not an object fails at once', () 
   );
   assert.throws(
     () => createConfig({ user: ['mode', 'x'] }),
-    (error) => error.code === 'config_layer_must_be_object',
+    (error: unknown) => error instanceof KernelError && error.code === 'config_layer_must_be_object',
   );
-  assert.throws(() => createConfig('user'), (error) => error.code === 'config_layers_must_be_object');
+  assert.throws(() => createConfig('user'), (error: unknown) => error instanceof KernelError && error.code === 'config_layers_must_be_object');
 });

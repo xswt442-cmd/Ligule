@@ -72,7 +72,7 @@ test('trusted invalid selection or missing service fails with a search error', (
     createConfig({ user: { search: { provider: 'deepseek', serviceId: 'missing' }, model: { services: [service()] } } }),
     createConfig({ user: { search: { provider: 'deepseek', serviceId: 'deepseek-official' } } }),
   ]) {
-    assert.throws(() => searchSettingsOf(config), (error) => error.code.startsWith('search_'));
+    assert.throws(() => searchSettingsOf(config), (error: unknown) => error instanceof Error && (error as unknown as { code: string }).code.startsWith('search_'));
   }
 });
 
@@ -89,10 +89,10 @@ test('only the official HTTPS origin and approved API paths can supply a search 
     'https://api.deepseek.com/anthropic/v1beta',
   ]) {
     const config = createConfig({ user: { search, model: { services: [service({ baseURL })] } } });
-    assert.throws(() => searchSettingsOf(config), (error) => error.code.startsWith('search_'), baseURL);
+    assert.throws(() => searchSettingsOf(config), (error: unknown) => error instanceof Error && (error as unknown as { code: string }).code.startsWith('search_'), baseURL);
   }
   for (const baseURL of ['https://api.deepseek.com', 'https://api.deepseek.com/', 'https://api.deepseek.com/v1/', 'https://api.deepseek.com/anthropic/v1/']) {
     const config = createConfig({ user: { search, model: { services: [service({ baseURL })] } } });
-    assert.equal(searchSettingsOf(config).serviceId, 'deepseek-official');
+    assert.equal(searchSettingsOf(config)!.serviceId, 'deepseek-official');
   }
 });
