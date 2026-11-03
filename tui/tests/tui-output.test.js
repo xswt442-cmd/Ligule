@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { configureTerminalColors, titleEscape, titleText } from '../dist/tui/output.js';
 import { clipboardPayload, copyToClipboard, lastAnswer } from '../dist/tui/clipboard.js';
 import { routeInput } from '../dist/tui/commands.js';
-import { waitFor, withTuiHost } from '../../core/tests/helpers/tui-host.ts';
+import { waitFor, withTuiHost } from './helpers/tui-host.ts';
 
 let missing = '';
 try {

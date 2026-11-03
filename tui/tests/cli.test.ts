@@ -4,6 +4,7 @@ import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -16,20 +17,23 @@ const isolatedHome = mkdtempSync(join(tmpdir(), 'ligule-cli-home-'));
 const childEnv = { ...process.env, HOME: isolatedHome, USERPROFILE: isolatedHome };
 after(() => rmSync(isolatedHome, { recursive: true, force: true }));
 
-function capture(...args) {
+type Captured = { ok: boolean; stdout: string; stderr: string; status?: number | null };
+
+function capture(...args: string[]): Captured {
   try {
-    return { ok: true, stdout: execFileSync(process.execPath, [cli, ...args], { cwd: repo, encoding: 'utf8', env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] }) };
+    return { ok: true, stdout: execFileSync(process.execPath, [cli, ...args], { cwd: repo, encoding: 'utf8', env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] }) } as Captured;
   } catch (error) {
-    return { ok: false, stdout: error.stdout, stderr: error.stderr, status: error.status };
+    const failure = error as { stdout?: string; stderr?: string; status?: number | null };
+    return { ok: false, stdout: failure.stdout as string, stderr: failure.stderr as string, status: failure.status };
   }
 }
 
-function captureAsync(env, ...args) {
+function captureAsync(env: NodeJS.ProcessEnv, ...args: string[]) {
   return captureAsyncAt(repo, env, ...args);
 }
 
-function captureAsyncAt(cwd, env, ...args) {
-  return new Promise((resolve, reject) => {
+function captureAsyncAt(cwd: string, env: NodeJS.ProcessEnv, ...args: string[]) {
+  return new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
     const child = spawn(process.execPath, [cli, ...args], { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
@@ -40,12 +44,14 @@ function captureAsyncAt(cwd, env, ...args) {
   });
 }
 
-async function withToolModelServer(run, { name, args }) {
+type ToolModelContext = { root: string; project: string; sessions: string; env: NodeJS.ProcessEnv; configArgs: string[] };
+
+async function withToolModelServer(run: (context: ToolModelContext) => Promise<void>, { name, args }: { name: string; args: Record<string, unknown> }): Promise<void> {
   let sentToolCall = false;
-  let root;
+  let root: string | undefined;
   const server = createServer(async (request, response) => {
     try {
-      const chunks = [];
+      const chunks: Buffer[] = [];
       for await (const chunk of request) chunks.push(chunk);
       JSON.parse(Buffer.concat(chunks).toString('utf8'));
       const frames = sentToolCall
@@ -64,12 +70,12 @@ async function withToolModelServer(run, { name, args }) {
       response.end(`${frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join('')}data: [DONE]\n\n`);
     } catch (error) {
       response.writeHead(500, { 'content-type': 'text/plain' });
-      response.end(error.message);
+      response.end((error as Error).message);
     }
   });
-  await new Promise((resolve, reject) => {
+  await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', resolve);
+    server.listen(0, '127.0.0.1', () => resolve());
   });
   try {
     const address = server.address();
@@ -81,10 +87,10 @@ async function withToolModelServer(run, { name, args }) {
     mkdirSync(project, { recursive: true });
     mkdirSync(home, { recursive: true });
     mkdirSync(sessions, { recursive: true });
-    const env = { ...childEnv, HOME: home, USERPROFILE: home, LIGULE_HOME: join(home, '.ligule') };
+    const env: NodeJS.ProcessEnv = { ...childEnv, HOME: home, USERPROFILE: home, LIGULE_HOME: join(home, '.ligule') };
     const configArgs = [
       '--config', 'model.api = "chat-completions"',
-      '--config', `model.baseURL = "http://127.0.0.1:${address.port}/v1"`,
+      '--config', `model.baseURL = "http://127.0.0.1:${(address as AddressInfo).port}/v1"`,
       '--config', 'model.model = "cli-local-tool-test"',
       '--config', 'model.apiKeyEnv = "LIGULE_CLI_TEST_API_KEY"',
       '--config', `host.sessionDirectory = ${JSON.stringify(sessions)}`,
@@ -95,14 +101,14 @@ async function withToolModelServer(run, { name, args }) {
   } finally {
     try {
       server.closeAllConnections();
-      await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     } finally {
       if (root !== undefined) rmSync(root, { recursive: true, force: true });
     }
   }
 }
 
-async function withModelServer(run) {
+async function withModelServer(run: (context: { env: NodeJS.ProcessEnv; configArgs: string[]; failProvider: () => void }) => Promise<void>): Promise<void> {
   let statusCode = 200;
   const server = createServer(async (request, response) => {
     for await (const _chunk of request) { /* consume the request before responding */ }
@@ -119,9 +125,9 @@ async function withModelServer(run) {
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     response.end(`${frames.map(frame => `data: ${JSON.stringify(frame)}\n\n`).join('')}data: [DONE]\n\n`);
   });
-  await new Promise((resolve, reject) => {
+  await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', resolve);
+    server.listen(0, '127.0.0.1', () => resolve());
   });
   try {
     const address = server.address();
@@ -129,14 +135,14 @@ async function withModelServer(run) {
     const env = { ...childEnv, LIGULE_CLI_TEST_API_KEY: 'test-only-key' };
     const configArgs = [
       '--config', 'model.api = "chat-completions"',
-      '--config', `model.baseURL = "http://127.0.0.1:${address.port}/v1"`,
+      '--config', `model.baseURL = "http://127.0.0.1:${(address as AddressInfo).port}/v1"`,
       '--config', 'model.model = "cli-test-model"',
       '--config', 'model.apiKeyEnv = "LIGULE_CLI_TEST_API_KEY"',
     ];
     await run({ env, configArgs, failProvider: () => { statusCode = 500; } });
   } finally {
     server.closeAllConnections();
-    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
   }
 }
 
@@ -213,7 +219,7 @@ test('run is read-only by default and full access requires its explicit flag', a
     const result = await captureAsyncAt(project, env, 'run', '--json', 'write a file', ...configArgs);
     assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
     const receipt = JSON.parse(result.stdout);
-    const events = readFileSync(join(sessions, `${receipt.sessionId}.jsonl`), 'utf8').trim().split('\n').map(JSON.parse);
+    const events = readFileSync(join(sessions, `${receipt.sessionId}.jsonl`), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
     const refusal = events.find(event => event.kind === 'tool' && event.tool === 'create');
     assert.equal(refusal?.result?.code, 'permission_read_only');
     assert.equal(existsSync(join(project, 'created-by-cli.txt')), false);
@@ -235,7 +241,7 @@ test('explicit full access permits a controlled local Shell command but Policy d
     assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
     const receipt = JSON.parse(result.stdout);
     const events = readFileSync(join(sessions, `${receipt.sessionId}.jsonl`), 'utf8')
-      .trim().split('\n').map(JSON.parse);
+      .trim().split('\n').map((line) => JSON.parse(line));
     const executed = events.filter(event => event.kind === 'tool' && event.tool === 'exec').at(-1)?.result;
     assert.notEqual(executed?.failed, true, JSON.stringify(executed));
     assert.equal(executed?.content?.exitCode, 0, JSON.stringify(executed));
@@ -261,7 +267,7 @@ test('explicit full access permits a controlled local Shell command but Policy d
     const result = await captureAsyncAt(project, env, 'run', '--allow-full-access', '--json', 'run a policy-denied command', ...configArgs);
     assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
     const receipt = JSON.parse(result.stdout);
-    const events = readFileSync(join(sessions, `${receipt.sessionId}.jsonl`), 'utf8').trim().split('\n').map(JSON.parse);
+    const events = readFileSync(join(sessions, `${receipt.sessionId}.jsonl`), 'utf8').trim().split('\n').map((line) => JSON.parse(line));
     const denied = events.find(event => event.kind === 'tool' && event.tool === 'exec');
     assert.equal(denied?.result?.code, 'policy_denied');
     assert.equal(existsSync(join(project, 'exec-created.txt')), false);
@@ -293,9 +299,9 @@ test('a bare invocation and the explicit tui alias both require an interactive t
 });
 
 test('--config narrows the boundary from the command line and a valueless flag is refused', () => {
-  const scoped = capture('call', 'find', JSON.stringify({ pattern: '*.js', path: 'tests' }), '--config', 'boundary = "tests"');
+  const scoped = capture('call', 'find', JSON.stringify({ pattern: '*.ts', path: 'tests' }), '--config', 'boundary = "tests"');
   assert.ok(scoped.ok, scoped.stderr);
-  assert.match(scoped.stdout, /^cli\.test\.js$/m);
+  assert.match(scoped.stdout, /^cli\.test\.ts$/m);
   assert.doesNotMatch(scoped.stdout, /src/);
 
   const missing = capture('tools', '--config');
@@ -443,7 +449,7 @@ test('policy summarises the decisions one session recorded', () => {
     assert.equal(machine.status, 0, machine.stderr);
     assert.equal(JSON.parse(machine.stdout)[0].denied, 1);
 
-    for (const [args, expected] of [[['policy', 'nope'], /session_not_found/], [['policy'], /cli_policy_needs_the_session_id/]]) {
+    for (const [args, expected] of [[['policy', 'nope'], /session_not_found/], [['policy'], /cli_policy_needs_the_session_id/]] as [string[], RegExp][]) {
       const refused = spawnSync(process.execPath, [cli, ...args], { cwd: project, encoding: 'utf8', env });
       assert.equal(refused.status, 1, refused.stdout);
       assert.match(refused.stderr, expected);

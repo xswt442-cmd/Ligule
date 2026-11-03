@@ -2,25 +2,30 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PassThrough } from 'node:stream';
 import { createElement } from 'react';
+import type { ReactElement } from 'react';
 import { render } from 'ink';
 import { applyOverrides, CURRENT } from '../dist/tui/keymap.js';
 import { HelpPanel, ChoicePanel } from '../dist/tui/panels.js';
-import { completeFrame } from './helpers/frames.js';
+import type { PanelChoice } from '../dist/tui/panels.js';
+import { completeFrame } from './helpers/frames.ts';
+
+type FakeInput = PassThrough & { isTTY: boolean; setRawMode(): unknown; ref(): void; unref(): void };
+type FakeOutput = PassThrough & { columns: number; isTTY: boolean };
 
 function terminal() {
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as FakeOutput;
   stdout.columns = 80;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk.toString(); });
-  const stdin = new PassThrough();
+  const stdin = new PassThrough() as FakeInput;
   stdin.isTTY = true;
   stdin.setRawMode = () => stdin;
   stdin.ref = () => {};
   stdin.unref = () => {};
-  const instance = (node) => render(node, {
-    stdin,
-    stdout,
+  const instance = (node: ReactElement) => render(node, {
+    stdin: stdin as unknown as NodeJS.ReadStream,
+    stdout: stdout as unknown as NodeJS.WriteStream,
     exitOnCtrlC: false,
     patchConsole: false,
     interactive: true,
@@ -28,11 +33,13 @@ function terminal() {
   return { stdin, stdout, painted: () => painted, render: instance };
 }
 
-function visible(tty) {
+type Terminal = ReturnType<typeof terminal>;
+
+function visible(tty: Terminal) {
   return completeFrame(tty.painted()).replace(/\x1B\[[0-?]*[ -/]*[@-~]/gu, '');
 }
 
-async function waitFor(tty, predicate) {
+async function waitFor(tty: Terminal, predicate: (output: string) => boolean) {
   const deadline = Date.now() + 2_000;
   while (!predicate(visible(tty))) {
     if (Date.now() > deadline) throw new Error(`panel output did not reach the expected state: ${visible(tty)}`);
@@ -71,7 +78,7 @@ test('ChoicePanel follows personal key bindings for movement, selection, hints, 
   try {
     applyOverrides({ 'panel-up': 'k', 'panel-down': 'j', 'panel-close': 'q' });
     const tty = terminal();
-    let selected;
+    let selected: PanelChoice | undefined;
     let closed = false;
     const instance = tty.render(createElement(ChoicePanel, {
       title: 'Choose one',
@@ -96,7 +103,7 @@ test('ChoicePanel follows personal key bindings for movement, selection, hints, 
     } finally {
       instance.unmount();
     }
-    assert.equal(selected.id, 'second');
+    assert.equal(selected!.id, 'second');
     assert.equal(closed, true);
   } finally {
     applyOverrides(Object.fromEntries(Object.entries(before).map(([action, spec]) => [action, spec])));

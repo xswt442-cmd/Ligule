@@ -6,22 +6,46 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createElement } from 'react';
 import { render } from 'ink';
-import { completeFrame } from './helpers/frames.js';
+import { completeFrame } from './helpers/frames.ts';
 import { App } from '../dist/tui/app.js';
+import type { TuiClient } from '../dist/tui/app.js';
 import { UI_COMMANDS } from '../dist/tui/commands.js';
 import { readInput, rememberInput } from '../dist/tui/input-store.js';
-import { measuredPermissionContext, waitFor, withTuiHost } from '../../core/tests/helpers/tui-host.ts';
+import type { SavedInput } from '../dist/tui/input-store.js';
+import type { Connection } from '@ligule/core/tui.js';
+import { measuredPermissionContext, waitFor, withTuiHost } from './helpers/tui-host.ts';
 
-async function withApp(context, run, { columns = 80, rows = 24, inputs } = {}) {
-  const stdout = Object.assign(new PassThrough(), { columns, rows, isTTY: true });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref() {}, unref() {} });
+type FakeInput = PassThrough & { isTTY: boolean; setRawMode(): unknown; ref(): void; unref(): void };
+type FakeOutput = PassThrough & { columns: number; rows: number; isTTY: boolean };
+type ReadEvent = { kind?: string; result?: { code?: string } };
+type InputStore = {
+  read(projectRoot: string, sessionId: string): Promise<SavedInput>;
+  write(projectRoot: string, sessionId: string, draft: string, queued: readonly string[]): Promise<void>;
+};
+
+type AppHandle = {
+  frame: () => string;
+  output: () => string;
+  stdin: FakeInput;
+  type: (text: string) => Promise<void>;
+  wait: (condition: () => boolean | Promise<boolean>) => Promise<void>;
+  stdout: FakeOutput;
+};
+
+async function withApp(
+  context: { client: Connection; sessionId: string; config: { boundary: string } },
+  run: (app: AppHandle) => Promise<void>,
+  { columns = 80, rows = 24, inputs }: { columns?: number; rows?: number; inputs?: InputStore } = {},
+): Promise<void> {
+  const stdout = Object.assign(new PassThrough(), { columns, rows, isTTY: true }) as FakeOutput;
+  const stdin: FakeInput = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref() {}, unref() {} });
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
   const frame = () => completeFrame(painted);
   const output = () => painted.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
-  const instance = render(createElement(App, { client: context.client, sessionId: context.sessionId, stdout, inputs, info: { boundary: context.config.boundary } }), { stdout, stdin, patchConsole: false, exitOnCtrlC: false, interactive: true });
-  const wait = (condition) => waitFor(condition, { read: frame });
-  const type = async (text) => { stdin.write(text); await delay(50); stdin.write('\r'); };
+  const instance = render(createElement(App, { client: context.client as TuiClient, sessionId: context.sessionId, stdout: stdout as unknown as NodeJS.WriteStream, inputs, info: { boundary: context.config.boundary } }), { stdout: stdout as unknown as NodeJS.WriteStream, stdin: stdin as unknown as NodeJS.ReadStream, patchConsole: false, exitOnCtrlC: false, interactive: true });
+  const wait = (condition: () => boolean | Promise<boolean>) => waitFor(condition, { read: frame });
+  const type = async (text: string) => { stdin.write(text); await delay(50); stdin.write('\r'); };
   try {
     await wait(() => frame().includes('审批 逐次审批'));
     await run({ frame, output, stdin, type, wait, stdout });
@@ -74,7 +98,7 @@ test('long questions page their complete options while keeping an answer editor 
     await wait(() => frame().includes('等待回答 1/1'));
     assert.ok(frame().includes('输入回答'));
     assert.ok(!frame().includes('工具模式'));
-    const seen = new Set();
+    const seen = new Set<number>();
     for (let page = 0; page < 80; page += 1) {
       const current = frame();
       assert.ok(current.trimEnd().split('\n').length <= 14, current);
@@ -102,12 +126,12 @@ test('an approval with insufficient room ignores allow keys and paste while deny
       stdin.write('\x1b[200~2\x1b[201~');
       await delay(80);
       assert.ok(frame().includes('请放大窗口后再审批'));
-      const pending = await context.client.request('session.read', { sessionId: context.sessionId });
+      const pending = await context.client.request('session.read', { sessionId: context.sessionId }) as { events: ReadEvent[] };
       assert.ok(!pending.events.some(event => event.kind === 'sessionPolicyRule'));
       stdin.write('n');
       await wait(() => !frame().includes('请放大窗口后再审批'));
       await wait(() => output().includes('本轮已完成'));
-      const denied = await context.client.request('session.read', { sessionId: context.sessionId });
+      const denied = await context.client.request('session.read', { sessionId: context.sessionId }) as { events: ReadEvent[] };
       assert.ok(denied.events.some(event => event.kind === 'tool' && event.result?.code === 'ask_declined'));
     }, { columns: 50, rows: 4 });
   });
@@ -141,16 +165,16 @@ for (const source of ['grant wizard', 'ordinary composer']) {
     test(`a Host question isolates a partial ${source} draft and preserves it through ${finish}`, async () => {
       await withTuiHost(async context => {
         const inputFile = join(context.directory, 'question-input.jsonl');
-        const writes = [];
-        const inputs = {
+        const writes: string[] = [];
+        const inputs: InputStore = {
           read: (root, id) => readInput(inputFile, root, id),
           write: async (root, id, text, queued) => {
-            await rememberInput(inputFile, { projectRoot: root, sessionId: id, draft: text, queued });
+            await rememberInput(inputFile, { projectRoot: root, sessionId: id, draft: text, queued: queued as string[] });
             writes.push(text);
           },
         };
         await withApp(context, async ({ frame, stdin, type }) => {
-          const wait = condition => waitFor(condition, { within: 5000, read: frame });
+          const wait = (condition: () => boolean | Promise<boolean>) => waitFor(condition, { within: 5000, read: frame });
           if (source === 'grant wizard') {
             await type('/control create');
             await wait(() => frame().includes('授权名称'));
@@ -182,8 +206,8 @@ for (const source of ['grant wizard', 'ordinary composer']) {
             if (finish === 'answer') stdin.write('\r');
             else await context.client.request('run.cancel', { sessionId: context.sessionId });
             if (finish === 'answer') await execution;
-            else await assert.rejects(execution, error => error.code === 'loop_cancelled');
-            const read = await context.client.request('session.read', { sessionId: context.sessionId });
+            else await assert.rejects(execution, error => (error as { code?: string }).code === 'loop_cancelled');
+            const read = await context.client.request('session.read', { sessionId: context.sessionId }) as { events: ReadEvent[] };
             if (finish === 'answer') assert.ok(JSON.stringify(read.events).includes('真实问答答案'));
             else assert.ok(read.events.some(event => event.result?.code === 'ask_user_cancelled'));
             assert.ok(!JSON.stringify(read.events).includes('keepAB'));
@@ -198,7 +222,7 @@ for (const source of ['grant wizard', 'ordinary composer']) {
             await execution.catch(() => undefined);
           }
         }, { inputs });
-      }, { interactive: true });
+      }, { interactive: true, permissionControl: source === 'grant wizard' });
     });
   }
 }
@@ -207,12 +231,12 @@ test('queue recovery during a question preserves the ordinary draft and leaves t
   await withTuiHost(async context => {
     const inputFile = join(context.directory, 'queue-question.jsonl');
     await rememberInput(inputFile, { projectRoot: context.projectDirectory, sessionId: context.sessionId, draft: 'kept-task', queued: ['queued-task'] });
-    const inputs = {
+    const inputs: InputStore = {
       read: (root, id) => readInput(inputFile, root, id),
-      write: (root, id, text, queued) => rememberInput(inputFile, { projectRoot: root, sessionId: id, draft: text, queued }),
+      write: (root, id, text, queued) => rememberInput(inputFile, { projectRoot: root, sessionId: id, draft: text, queued: queued as string[] }),
     };
     await withApp(context, async ({ frame, output, stdin, type }) => {
-      const wait = condition => waitFor(condition, { within: 5000, read: frame });
+      const wait = (condition: () => boolean | Promise<boolean>) => waitFor(condition, { within: 5000, read: frame });
       await wait(() => frame().includes('› kept-task') && frame().includes('队列已暂停：1 条'));
       const execution = context.client.request('run.start', { sessionId: context.sessionId, input: JSON.stringify({
         tool: 'ask_user_question', args: { questions: JSON.stringify([{ question: '确认继续？' }]) },
@@ -229,7 +253,7 @@ test('queue recovery during a question preserves the ordinary draft and leaves t
         await type('yes');
         await execution;
         await wait(() => frame().includes('kept-task') && frame().includes('queued-task'));
-        const read = await context.client.request('session.read', { sessionId: context.sessionId });
+        const read = await context.client.request('session.read', { sessionId: context.sessionId }) as { events: ReadEvent[] };
         assert.ok(!JSON.stringify(read.events).includes('queued-task'));
       } finally {
         await context.client.request('run.cancel', { sessionId: context.sessionId }).catch(error => {
@@ -290,7 +314,7 @@ test('pasting a regional indicator moves beyond the merged flag before Backspace
 
 test('session filtering stays out of the draft and resumes the selected Host session', async () => {
   await withTuiHost(async (context) => {
-    const other = await context.client.request('session.create', {});
+    const other = await context.client.request('session.create', {}) as { sessionId: string };
     await context.client.request('session.label', { sessionId: other.sessionId, name: '西藏行程' });
     await withApp(context, async ({ frame, stdin, type, wait }) => {
       await type('/sessions');
@@ -307,9 +331,9 @@ test('session filtering stays out of the draft and resumes the selected Host ses
       stdin.write('西藏');
       await wait(() => frame().includes('西藏 · 1/2'));
       stdin.write('\r');
-      await wait(() => context.requests.some(request => request.method === 'session.open' && request.params.sessionId === other.sessionId)
+      await wait(() => context.requests.some(request => request.method === 'session.open' && (request.params as { sessionId?: string }).sessionId === other.sessionId)
         && frame().includes('会话 西藏行程 · project'));
-      assert.ok(context.requests.some(request => request.method === 'session.close' && request.params.sessionId === context.sessionId));
+      assert.ok(context.requests.some(request => request.method === 'session.close' && (request.params as { sessionId?: string }).sessionId === context.sessionId));
       assert.equal(context.providerRequests.length, 0);
     });
   });
@@ -319,7 +343,7 @@ test('complete history opens in a bounded viewport and keyboard navigation reach
   await withTuiHost(async (context) => withApp(context, async ({ frame, output, stdin, type, wait }) => {
     const text = Array.from({ length: 60 }, (_, index) => `历史行 ${index}`).join('\n');
     await type(text);
-    await wait(() => context.notifications.some((notice) => notice.event?.kind === 'assistant'));
+    await wait(() => context.notifications.some((notice) => (notice.event as { kind?: string } | undefined)?.kind === 'assistant'));
     await delay(80);
     stdin.write('\x0f');
     await wait(() => frame().includes('完整历史'));
@@ -348,7 +372,7 @@ test('an approval exposes its entire change through pages and Escape cancels wit
     await wait(() => frame().includes('待审批内容 39'));
     stdin.write('\x1b');
     await wait(() => output().includes('本轮已取消'));
-    await assert.rejects(access(join(context.config.boundary, 'approval.md')), (error) => error.code === 'ENOENT');
+    await assert.rejects(access(join(context.config.boundary, 'approval.md')), (error) => (error as { code?: string }).code === 'ENOENT');
     assert.ok(context.requests.some((request) => request.method === 'run.cancel'));
   }), { permission });
 });
@@ -401,7 +425,7 @@ test('interrupting the round takes the pending question away with it', async () 
     await wait(() => output().includes('本轮已取消'));
     await delay(120);
     assert.ok(!frame().includes('等待回答'), '取消后提问卡已关闭');
-    const { events } = await context.client.request('session.read', { sessionId: context.sessionId });
+    const { events } = await context.client.request('session.read', { sessionId: context.sessionId }) as { events: ReadEvent[] };
     assert.ok(events.some((event) => event.result?.code === 'ask_user_cancelled'), '记录里说的是这一题被取消，不是超时');
   }), { interactive: true });
 });

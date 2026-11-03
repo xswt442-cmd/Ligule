@@ -10,7 +10,7 @@ import { App } from '../dist/tui/app.js';
 import type { TuiClient } from '../dist/tui/app.js';
 import { readInput, rememberInput } from '../dist/tui/input-store.js';
 import { completeFrame } from './helpers/frames.ts';
-import { waitFor, withTuiHost } from '../../core/tests/helpers/tui-host.ts';
+import { waitFor, withTuiHost } from './helpers/tui-host.ts';
 
 const editorFixture = fileURLToPath(new URL('./fixtures/editor.mjs', import.meta.url));
 const quoted = (value: string) => `"${value.replaceAll('"', '\\"')}"`;

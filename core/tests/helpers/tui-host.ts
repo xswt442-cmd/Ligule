@@ -46,7 +46,7 @@ export type TuiHostSetupPaths = {
   sessionDirectory: string;
 };
 
-type TuiHostContext = Omit<TuiHostSetupPaths, 'homeDirectory'> & {
+export type TuiHostContext = Omit<TuiHostSetupPaths, 'homeDirectory'> & {
   client: Connection;
   config: TestConfig;
   sessionId: string;

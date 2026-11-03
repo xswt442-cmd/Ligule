@@ -5,21 +5,32 @@ import assert from 'node:assert/strict';
 import { access, appendFile, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
+import type { PassThrough } from 'node:stream';
 import { fileURLToPath } from 'node:url';
-import { measuredPermissionContext, waitFor, withTuiHost } from '../../core/tests/helpers/tui-host.ts';
-import { completeFrame } from './helpers/frames.js';
+import { measuredPermissionContext, waitFor, withTuiHost } from './helpers/tui-host.ts';
+import { completeFrame } from './helpers/frames.ts';
 import { HISTORY_LIMIT, historyPathOf, loadHistory, pushHistory, rememberHistory } from '../../core/dist/kernel/input-history.js';
 import { SEARCH_ROWS, searchHistory } from '../dist/tui/history.js';
 import { helpEntries, helpTabTitle } from '../dist/tui/help.js';
+import type { Locale } from '../../core/dist/tui.js';
+import type { TuiClient } from '../dist/tui/app.js';
+import type { SavedInput } from '../dist/tui/input-store.js';
+import type { StatusLike } from '../dist/tui/status-line.js';
+import type { TranscriptItem } from '../dist/tui/transcript.js';
 
-let rows = {};
+type AppModule = typeof import('../dist/tui/app.js');
+type FakeOutput = PassThrough & NodeJS.WriteStream;
+type FakeInput = PassThrough & NodeJS.ReadStream;
+
+let rows = {} as AppModule;
 let missing = '';
 const previousForceColor = process.env.FORCE_COLOR;
 process.env.FORCE_COLOR = '1';
 try {
   rows = await import('../dist/tui/app.js');
 } catch (error) {
-  missing = error.code === 'ERR_MODULE_NOT_FOUND' ? 'the terminal UI dependencies are not installed' : error.message;
+  const failure = error as { code?: string; message?: string };
+  missing = failure.code === 'ERR_MODULE_NOT_FOUND' ? 'the terminal UI dependencies are not installed' : failure.message as string;
 } finally {
   if (previousForceColor === undefined) delete process.env.FORCE_COLOR;
   else process.env.FORCE_COLOR = previousForceColor;
@@ -28,11 +39,13 @@ try {
 const options = { skip: missing === '' ? false : missing };
 const editorFixture = fileURLToPath(new URL('./fixtures/editor.mjs', import.meta.url));
 const mcpServerFixture = fileURLToPath(new URL('../../tests/fixtures/mcp-minimal.mjs', import.meta.url));
-const { foldText, editDraft, projectRecord, buildStatusLine, activeRunBudgetSegment, contextSegment, findRecord, branchOf, detailTitle, routeInput, candidatesOf, describeChange, displayWidth, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS, isTypingRun } = rows;
-const quoted = (value) => `"${value.replaceAll('"', '\\"')}"`;
-const plainOutput = (value) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
+const { foldText, editDraft, buildStatusLine, activeRunBudgetSegment, contextSegment, findRecord, branchOf, detailTitle, routeInput, candidatesOf, describeChange, displayWidth, UI_COMMANDS, markdownLines, changeSummary, capabilityOf, queuedLine, sessionLines, findLines, mentionToken, insertMention, resolveSessionId, SESSION_ROWS, isTypingRun } = rows;
+// 界面记录只带界面关心的字段；测试直接写这种不带 `seq` 的投影输入。
+const projectRecord = rows.projectRecord as (record: Record<string, unknown>, locale?: Locale) => TranscriptItem[];
+const quoted = (value: string) => `"${value.replaceAll('"', '\\"')}"`;
+const plainOutput = (value: string) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
 
-function assertInTestplace(path) {
+function assertInTestplace(path: string) {
   const root = resolve('testplace');
   const absolutePath = resolve(path);
   const relativePath = relative(root, absolutePath);
@@ -125,17 +138,17 @@ test('the app paints the session line and the input hint onto the terminal', opt
   const { setTimeout: delay } = await import('node:timers/promises');
   const { App } = await import('../dist/tui/app.js');
 
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 80;
   stdout.isTTY = false;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = new PassThrough();
+  const stdin = new PassThrough() as unknown as FakeInput;
   stdin.isTTY = false;
-  const status = await client.request('status.get', { sessionId });
+  const status = await (client as TuiClient).request('status.get', { sessionId });
 
   const instance = render(
-    createElement(App, { client, sessionId, info: { model: 'test-model' }, interactive: false }),
+    createElement(App, { client: client as TuiClient, sessionId, info: { model: 'test-model' }, interactive: false }),
     { stdout, stdin, exitOnCtrlC: false, patchConsole: false },
   );
   // 非交互渲染只在结束时输出一次；等待界面发送 `status.get` 后再检查最终状态。
@@ -148,7 +161,7 @@ test('the app paints the session line and the input hint onto the terminal', opt
   assert.match(painted, new RegExp(`会话 ${sessionId.slice(0, 8)}`));
   const configurationLine = plainOutput(painted).split(/\r?\n/u).filter((line) => line.includes('模型 ') && line.includes('工具模式 ')).at(-1);
   assert.ok(configurationLine, '模型、工具模式和审批方式共用一行底部配置');
-  assert.equal(configurationLine.split(status.model).length - 1, 1, '模型名在底部配置行只显示一次');
+  assert.equal(configurationLine.split(status.model as string).length - 1, 1, '模型名在底部配置行只显示一次');
   assert.match(painted, /工具模式 minimal/);
   assert.match(painted, /审批 逐次审批/);
   assert.match(painted, /\/ 命令/);
@@ -158,7 +171,7 @@ test('the metadata line keeps the session and its workspace, never budgets or co
   const status = {
     mode: 'minimal', pendingMode: null, policy: 'ask', tools: ['read', 'find'], eventCount: 3,
     usage: { window: 200_000, threshold: 160_000, estimated: 42_000 },
-  };
+  } as unknown as StatusLike;
   const line = buildStatusLine({ sessionId: 'abcdef0123456789', boundary: 'C:\\workspace\\project', status, running: true, seconds: 12.7, expanded: true, columns: 180 });
   assert.match(line, /会话 abcdef01/);
   assert.match(line, /project/);
@@ -168,13 +181,13 @@ test('the metadata line keeps the session and its workspace, never budgets or co
   assert.doesNotMatch(line, /minimal|policy|test-model|model:/);
   assert.equal(contextSegment(null), '');
   assert.equal(contextSegment(undefined), '');
-  const noWindow = buildStatusLine({ sessionId: 'abcdef0123456789', status: { ...status, usage: undefined }, running: false, seconds: 0, expanded: false });
+  const noWindow = buildStatusLine({ sessionId: 'abcdef0123456789', status: { ...status, usage: undefined } as unknown as StatusLike, running: false, seconds: 0, expanded: false });
   assert.doesNotMatch(noWindow, /ctx:/);
   assert.doesNotMatch(noWindow, /minimal|policy|model:/);
 });
 
 test('a named session shows its name on the metadata line instead of the short id', options, () => {
-  const status = { mode: 'minimal', policy: 'ask', tools: [], eventCount: 1 };
+  const status = { mode: 'minimal', policy: 'ask', tools: [], eventCount: 1 } as unknown as StatusLike;
   const named = buildStatusLine({ sessionId: 'abcdef0123456789', name: '整理 P7 的界面', boundary: 'C:\workspace\project', status, running: false, seconds: 0, expanded: false, columns: 120 });
   assert.match(named, /会话 整理 P7 的界面/);
   assert.doesNotMatch(named, /abcdef01/);
@@ -193,7 +206,7 @@ test('the metadata line identifies the Host phase and elapsed time since actual 
       phase: 'model_request', startedAt: 1_000, phaseStartedAt: 2_000, lastProgressAt: 4_000,
       modelCalls: 2, toolCalls: 1, outputTokens: 16_384,
     },
-  };
+  } as unknown as StatusLike;
   const line = buildStatusLine({ sessionId: 'session-id', status, running: true, seconds: 6, expanded: false, now: 11_000 });
   assert.match(line, /请求模型/);
   assert.match(line, /7 秒无新进展/);
@@ -201,7 +214,7 @@ test('the metadata line identifies the Host phase and elapsed time since actual 
   const english = buildStatusLine({ sessionId: 'session-id', status, running: true, seconds: 6, expanded: false, locale: 'en', now: 11_000 });
   assert.match(english, /Requesting model/);
   assert.match(english, /7s without progress/);
-  for (const locale of ['zh', 'en']) {
+  for (const locale of ['zh', 'en'] as const) {
     for (const columns of [60, 80, 120]) {
       const narrow = buildStatusLine({ sessionId: 'session-id', status, running: true, seconds: 6,
         expanded: false, now: 11_000, locale, columns });
@@ -218,7 +231,7 @@ test('English terminal labels preserve model content, paths and command help ent
   assert.match(help, /\/model \[service model\]/);
   assert.match(help, /Global/);
   assert.doesNotMatch(help, /[\u3400-\u9fff]/u);
-  assert.equal(candidatesOf('/mo', [], 8, 'en').find(command => command.name === 'model').hint, '[service model]');
+  assert.equal(candidatesOf('/mo', [], 8, 'en').find(command => command.name === 'model')!.hint, '[service model]');
   assert.deepEqual(projectRecord({ kind: 'user', text: '中文问题' }, 'en'), [{ kind: 'question', text: '中文问题' }]);
   assert.equal(projectRecord({ kind: 'turn', status: 'cancelled' }, 'en')[0].text, 'Turn cancelled');
   const changed = describeChange('edit', { path: '中文目录/note.txt', anchor: '原文', replacement: '新文' }, 'en');
@@ -242,9 +255,9 @@ test('/show takes the number from the record, not the row on screen', options, (
   const events = [{ seq: 0, kind: 'mode' }, { seq: 1, kind: 'user', text: 'hi' }];
   assert.deepEqual(findRecord(events, '1'), { record: events[1] });
   // 格式错误的编号和不存在的编号应返回不同提示；空编号用于折叠，不走这条错误路径。
-  assert.equal(findRecord(events, 'third').code, 'tui_show_needs_a_number');
-  assert.equal(findRecord(events, '-1').code, 'tui_show_needs_a_number');
-  assert.equal(findRecord(events, '7').record, null);
+  assert.equal((findRecord(events, 'third') as { code: string }).code, 'tui_show_needs_a_number');
+  assert.equal((findRecord(events, '-1') as { code: string }).code, 'tui_show_needs_a_number');
+  assert.equal((findRecord(events, '7') as { record: unknown }).record, null);
 });
 
 // 派生会话使用父记录中对应结果的编号，并从结果内容读取派生会话 ID。
@@ -252,8 +265,8 @@ test('/sub reads the branch reference out of the delegation result', options, ()
   assert.ok(UI_COMMANDS.some((command) => command.name === 'sub'), 'the command is listed in help');
   const branch = { kind: 'tool', tool: 'subagent', result: { failed: false, content: { sessionId: 'parent.sub-1', text: 'done' } } };
   assert.deepEqual(branchOf({ seq: 4, ...branch }), { sessionId: 'parent.sub-1' });
-  assert.equal(branchOf({ seq: 4, kind: 'tool', tool: 'read', result: { content: { sessionId: 'x' } } }).code, 'tui_sub_needs_a_branch');
-  assert.equal(branchOf({ seq: 4, kind: 'user', text: 'hi' }).code, 'tui_sub_needs_a_branch');
+  assert.equal((branchOf({ seq: 4, kind: 'tool', tool: 'read', result: { content: { sessionId: 'x' } } }) as { code: string }).code, 'tui_sub_needs_a_branch');
+  assert.equal((branchOf({ seq: 4, kind: 'user', text: 'hi' }) as { code: string }).code, 'tui_sub_needs_a_branch');
   // 结果过长时内容写入文件，记录中不包含 sessionId。
   const spilled = { seq: 4, kind: 'tool', tool: 'subagent', result: { failed: false, content: 'a truncated string', spilled: 'result-1.json' } };
   assert.deepEqual(branchOf(spilled), { code: 'tui_sub_reference_spilled', spilled: 'result-1.json' });
@@ -275,13 +288,13 @@ test('the approval box names the shell backend and its executable', options, asy
   const { setTimeout: delay } = await import('node:timers/promises');
   const { App } = await import('../dist/tui/app.js');
 
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 100;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
-  const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
+  const instance = render(createElement(App, { client: client as TuiClient, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   try {
     const run = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'git --version' } }) });
     // 等待确认提示渲染后再输入拒绝答案，避免按键进入草稿。
@@ -305,19 +318,19 @@ test('the TUI remembers a session-scoped approval and applies it after the next 
     const { PassThrough } = await import('node:stream');
     const { App } = await import('../dist/tui/app.js');
     await writeFile(join(projectDirectory, 'note.txt'), 'TUI approval memory');
-    const stdout = new PassThrough();
+    const stdout = new PassThrough() as unknown as FakeOutput;
     stdout.columns = 110;
     stdout.isTTY = true;
     let painted = '';
     stdout.on('data', (chunk) => { painted += chunk; });
-    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
     let approvalCount = 0;
     const onRequest = client.onRequest.bind(client);
     client.onRequest = (handler) => onRequest((message) => {
       if (message.method === 'approval.request') approvalCount += 1;
       return handler(message);
     });
-    const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true }), {
+    const instance = render(createElement(App, { client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true }), {
       stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true,
     });
     try {
@@ -329,8 +342,8 @@ test('the TUI remembers a session-scoped approval and applies it after the next 
       stdin.write('2');
       await first;
       assert.equal(approvalCount, 1);
-      const records = await client.request('session.read', { sessionId });
-      assert.ok(records.events.some((event) => event.kind === 'sessionPolicyRule' && event.rule.tool === 'read'));
+      const records = await (client as TuiClient).request('session.read', { sessionId });
+      assert.ok(records.events.some((event) => event.kind === 'sessionPolicyRule' && (event.rule as { tool: string }).tool === 'read'));
 
       await client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'read', args: { path: 'note.txt' } }) });
       assert.equal(approvalCount, 1);
@@ -347,17 +360,17 @@ test('the TUI shows the MCP program before trusting it and starts it only after 
     const { PassThrough } = await import('node:stream');
     const { App } = await import('../dist/tui/app.js');
     const markerPath = join(projectDirectory, 'mcp-started.pid');
-    const stdout = new PassThrough();
+    const stdout = new PassThrough() as unknown as FakeOutput;
     stdout.columns = 110;
     stdout.isTTY = true;
     let painted = '';
     stdout.on('data', (chunk) => { painted += chunk; });
     const shown = () => plainOutput(painted);
-    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
     const instance = render(createElement(App, {
-      client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+      client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true,
     }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
-    const sendCommand = async (text) => {
+    const sendCommand = async (text: string) => {
       const start = painted.length;
       const currentDraft = () => plainOutput(completeFrame(painted.slice(start)));
       stdin.write(text);
@@ -365,7 +378,7 @@ test('the TUI shows the MCP program before trusting it and starts it only after 
       stdin.write('\r');
     };
     try {
-      const trustServer = await client.request('mcp.trust.list', { projectRoot: projectDirectory });
+      const trustServer = await (client as TuiClient).request('mcp.trust.list', { projectRoot: projectDirectory });
       const server = trustServer.servers[0];
       assert.equal(server.name, 'probe');
       assert.equal(server.trust, null);
@@ -374,7 +387,7 @@ test('the TUI shows the MCP program before trusting it and starts it only after 
 
       await sendCommand('/mcp trust probe project');
       await waitFor(() => shown().includes('待确认：probe') && shown().includes(mcpServerFixture), { within: 5_000, read: shown });
-      await assert.rejects(() => access(markerPath), (error) => error.code === 'ENOENT');
+      await assert.rejects(() => access(markerPath), (error) => (error as { code?: string }).code === 'ENOENT');
 
       await sendCommand('/mcp confirm');
       await waitFor(() => shown().includes('已在project范围信任 probe'), { within: 5_000, read: shown });
@@ -382,12 +395,12 @@ test('the TUI shows the MCP program before trusting it and starts it only after 
       await waitFor(() => shown().includes('echo one value'), { within: 5_000, read: shown });
       const pid = Number(await readFile(markerPath, 'utf8'));
       assert.ok(pid > 0);
-      const trusted = await client.request('mcp.trust.list', { projectRoot: projectDirectory });
+      const trusted = await (client as TuiClient).request('mcp.trust.list', { projectRoot: projectDirectory });
       assert.equal(trusted.servers[0].trust?.trusted, true);
 
       await sendCommand('/mcp revoke probe project');
       await waitFor(() => shown().includes('已撤销 probe 的 project 信任。'), { within: 5_000, read: shown });
-      const revoked = await client.request('mcp.trust.list', { projectRoot: projectDirectory });
+      const revoked = await (client as TuiClient).request('mcp.trust.list', { projectRoot: projectDirectory });
       assert.equal(revoked.servers[0].trust?.trusted, false);
     } finally {
       instance.unmount();
@@ -414,14 +427,14 @@ test('a delayed MCP trust list cannot move session trust to a newly opened Sessi
     const { PassThrough } = await import('node:stream');
     const { App } = await import('../dist/tui/app.js');
     const originalRequest = client.request.bind(client);
-    let releaseTrustList = () => {};
+    let releaseTrustList: (value?: unknown) => void = () => {};
     let trustListStarted = false;
     let trustListSettled = false;
-    let nextSessionId;
+    let nextSessionId: string | undefined;
     const trustListGate = new Promise((resolve) => { releaseTrustList = resolve; });
     client.request = (method, params) => {
       const pending = originalRequest(method, params);
-      if (method === 'mcp.trust.list' && params.sessionId === sessionId) {
+      if (method === 'mcp.trust.list' && (params as { sessionId?: string }).sessionId === sessionId) {
         trustListStarted = true;
         return pending.then(async (snapshot) => {
           await trustListGate;
@@ -431,24 +444,24 @@ test('a delayed MCP trust list cannot move session trust to a newly opened Sessi
       }
       if (method === 'session.create') {
         return pending.then((created) => {
-          nextSessionId = created.sessionId;
+          nextSessionId = (created as { sessionId: string }).sessionId;
           return created;
         });
       }
       return pending;
     };
 
-    const stdout = new PassThrough();
+    const stdout = new PassThrough() as unknown as FakeOutput;
     stdout.columns = 110;
     stdout.isTTY = true;
     let painted = '';
     stdout.on('data', (chunk) => { painted += chunk; });
     const shown = () => plainOutput(painted);
-    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
     const instance = render(createElement(App, {
-      client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+      client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true,
     }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
-    const sendCommand = async (text) => {
+    const sendCommand = async (text: string) => {
       const start = painted.length;
       const currentDraft = () => plainOutput(painted.slice(start));
       stdin.write(text);
@@ -460,7 +473,7 @@ test('a delayed MCP trust list cannot move session trust to a newly opened Sessi
       await waitFor(() => shown().includes('描述任务'), { read: shown });
       await sendCommand('/mcp trust probe session');
       await waitFor(() => trustListStarted && requests.some((request) =>
-        request.method === 'mcp.trust.list' && request.params.sessionId === sessionId), { within: 5_000, read: shown });
+        request.method === 'mcp.trust.list' && (request.params as { sessionId?: string }).sessionId === sessionId), { within: 5_000, read: shown });
 
       await sendCommand('/new');
       await waitFor(() => nextSessionId !== undefined && nextSessionId !== sessionId
@@ -472,7 +485,7 @@ test('a delayed MCP trust list cannot move session trust to a newly opened Sessi
 
       assert.equal(requests.some((request) => request.method === 'mcp.trust.set'), false,
         'a trust request started in the prior Session must never be submitted for the new Session');
-      const sessionTrust = await originalRequest('mcp.trust.list', { projectRoot: projectDirectory, sessionId: nextSessionId });
+      const sessionTrust = await originalRequest('mcp.trust.list', { projectRoot: projectDirectory, sessionId: nextSessionId }) as { servers: readonly { trustScopes: { session: unknown } }[] };
       assert.equal(sessionTrust.servers[0]?.trustScopes.session, null);
     } finally {
       releaseTrustList();
@@ -500,23 +513,23 @@ test('a completed MCP trust confirmation is reported to its originating Session 
     const { PassThrough } = await import('node:stream');
     const { App } = await import('../dist/tui/app.js');
     const originalRequest = client.request.bind(client);
-    let releaseTrustSet = () => {};
+    let releaseTrustSet: (value?: unknown) => void = () => {};
     let trustSetApplied = false;
     let trustSetSettled = false;
-    let newSessionId;
-    let thirdSessionId;
+    let newSessionId: string | undefined;
+    let thirdSessionId: string | undefined;
     let createdSessions = 0;
     let failNextTrustSet = false;
     let trustFailureApplied = false;
     let trustFailureSettled = false;
-    let trustFailureCode;
-    let releaseTrustFailure = () => {};
+    let trustFailureCode: string | undefined;
+    let releaseTrustFailure: (value?: unknown) => void = () => {};
     const trustSetGate = new Promise((resolve) => { releaseTrustSet = resolve; });
     const trustFailureGate = new Promise((resolve) => { releaseTrustFailure = resolve; });
     client.request = (method, params) => {
-      if (method === 'mcp.trust.set' && params.sessionId === newSessionId && failNextTrustSet) {
+      if (method === 'mcp.trust.set' && (params as { sessionId?: string }).sessionId === newSessionId && failNextTrustSet) {
         failNextTrustSet = false;
-        return originalRequest(method, { ...params, identityDigest: '0'.repeat(64) }).catch(async (error) => {
+        return originalRequest(method, { ...(params as Record<string, unknown>), identityDigest: '0'.repeat(64) }).catch(async (error) => {
           trustFailureCode = error.code ?? String(error);
           trustFailureApplied = true;
           await trustFailureGate;
@@ -525,7 +538,7 @@ test('a completed MCP trust confirmation is reported to its originating Session 
         });
       }
       const pending = originalRequest(method, params);
-      if (method === 'mcp.trust.set' && params.sessionId === sessionId) {
+      if (method === 'mcp.trust.set' && (params as { sessionId?: string }).sessionId === sessionId) {
         return pending.then(async (result) => {
           trustSetApplied = true;
           await trustSetGate;
@@ -536,26 +549,26 @@ test('a completed MCP trust confirmation is reported to its originating Session 
       if (method === 'session.create') {
         return pending.then((created) => {
           createdSessions += 1;
-          if (createdSessions === 1) newSessionId = created.sessionId;
-          else thirdSessionId = created.sessionId;
+          if (createdSessions === 1) newSessionId = (created as { sessionId: string }).sessionId;
+          else thirdSessionId = (created as { sessionId: string }).sessionId;
           return created;
         });
       }
       return pending;
     };
 
-    const stdout = new PassThrough();
+    const stdout = new PassThrough() as unknown as FakeOutput;
     stdout.columns = 110;
     stdout.isTTY = true;
     let painted = '';
     stdout.on('data', (chunk) => { painted += chunk; });
     const shown = () => plainOutput(painted);
-    const shownSince = (start) => plainOutput(painted.slice(start));
-    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+    const shownSince = (start: number) => plainOutput(painted.slice(start));
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
     const instance = render(createElement(App, {
-      client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+      client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true,
     }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
-    const sendCommand = async (text) => {
+    const sendCommand = async (text: string) => {
       const start = painted.length;
       const currentDraft = () => plainOutput(completeFrame(painted.slice(start)));
       stdin.write(text);
@@ -569,7 +582,7 @@ test('a completed MCP trust confirmation is reported to its originating Session 
       await waitFor(() => shown().includes('待确认：probe'), { within: 5_000, read: shown });
       await sendCommand('/mcp confirm');
       await waitFor(() => trustSetApplied && requests.some((request) =>
-        request.method === 'mcp.trust.set' && request.params.sessionId === sessionId), { within: 5_000, read: shown });
+        request.method === 'mcp.trust.set' && (request.params as { sessionId?: string }).sessionId === sessionId), { within: 5_000, read: shown });
 
       await sendCommand('/new');
       await waitFor(() => newSessionId !== undefined && newSessionId !== sessionId
@@ -585,11 +598,11 @@ test('a completed MCP trust confirmation is reported to its originating Session 
       await waitFor(() => shown().includes(`已恢复会话 ${sessionId.slice(0, 8)}`)
         && plainOutput(painted.slice(originalSessionOutput)).includes('已在session范围信任 probe'), { within: 5_000, read: shown });
 
-      const trusted = await originalRequest('mcp.trust.list', { projectRoot: projectDirectory, sessionId });
+      const trusted = await originalRequest('mcp.trust.list', { projectRoot: projectDirectory, sessionId }) as { servers: readonly { trustScopes: { session: unknown } }[] };
       assert.notEqual(trusted.servers[0]?.trustScopes.session, null, 'the confirmed trust must remain bound to the original Session');
 
-      await sendCommand(`/resume ${newSessionId.slice(0, 8)}`);
-      await waitFor(() => shown().includes(`已恢复会话 ${newSessionId.slice(0, 8)}`), { within: 5_000, read: shown });
+      await sendCommand(`/resume ${newSessionId!.slice(0, 8)}`);
+      await waitFor(() => shown().includes(`已恢复会话 ${newSessionId!.slice(0, 8)}`), { within: 5_000, read: shown });
       failNextTrustSet = true;
       const failurePromptOutput = painted.length;
       await sendCommand('/mcp trust probe session');
@@ -607,10 +620,10 @@ test('a completed MCP trust confirmation is reported to its originating Session 
         'a trust failure must not be appended to another Session');
 
       const failedSessionOutput = painted.length;
-      await sendCommand(`/resume ${newSessionId.slice(0, 8)}`);
-      await waitFor(() => shown().includes(`已恢复会话 ${newSessionId.slice(0, 8)}`)
+      await sendCommand(`/resume ${newSessionId!.slice(0, 8)}`);
+      await waitFor(() => shown().includes(`已恢复会话 ${newSessionId!.slice(0, 8)}`)
         && plainOutput(painted.slice(failedSessionOutput)).includes('MCP Server 未获信任'), { within: 5_000, read: shown });
-      const failedSessionTrust = await originalRequest('mcp.trust.list', { projectRoot: projectDirectory, sessionId: newSessionId });
+      const failedSessionTrust = await originalRequest('mcp.trust.list', { projectRoot: projectDirectory, sessionId: newSessionId }) as { servers: readonly { trustScopes: { session: unknown } }[] };
       assert.equal(failedSessionTrust.servers[0]?.trustScopes.session, null, 'a rejected trust change must not be stored');
     } finally {
       releaseTrustSet();
@@ -688,14 +701,14 @@ test('typing a template command completes it and expands through the host', opti
   const { setTimeout: delay } = await import('node:timers/promises');
   const { App } = await import('../dist/tui/app.js');
 
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 120;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
 
-  const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const instance = render(createElement(App, { client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   try {
     stdin.write('/gi');
     await waitFor(() => /git:release:prepare/.test(plainOutput(painted)), { read: () => plainOutput(painted) });
@@ -728,10 +741,10 @@ test('markdown text splits into the shapes a terminal can show', options, () => 
   // 代码围栏中的 `#` 不作为标题解析，行尾空格也应保留。
   const shellLines = markdownLines('```sh\n# 注释   \nls -la\n```');
   assert.deepEqual(shellLines.map(({ kind, text }) => ({ kind, text })), [{ kind: 'code', text: '# 注释   ' }, { kind: 'code', text: 'ls -la' }]);
-  assert.ok(shellLines[0].spans.some((span) => span.scope?.startsWith('comment')), '代码注释带高亮范围');
+  assert.ok(shellLines[0].spans!.some((span) => span.scope?.startsWith('comment')), '代码注释带高亮范围');
   const jsLines = markdownLines('```js\nconst a = 1\n```');
   assert.equal(jsLines[0].text, 'const a = 1', '高亮不改变代码正文');
-  assert.ok(jsLines[0].spans.some((span) => span.scope?.startsWith('keyword')), 'JavaScript 关键字带高亮范围');
+  assert.ok(jsLines[0].spans!.some((span) => span.scope?.startsWith('keyword')), 'JavaScript 关键字带高亮范围');
   // 保留链接文字和地址；去掉 Markdown 标记，同时保留斜体的样式范围。
   assert.deepEqual(markdownLines('看 [文档](https://example.com/a) 与 a*b*c'), [
     { kind: 'text', text: '看 文档 (https://example.com/a) 与 abc', spans: [{ text: '看 文档 (https://example.com/a) 与 a' }, { text: 'b', scope: 'md-em' }, { text: 'c' }] },
@@ -792,13 +805,13 @@ test('an answer with markdown shapes paints a heading, a list and highlighted co
   const { setTimeout: delay } = await import('node:timers/promises');
   const { App } = await import('../dist/tui/app.js');
 
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 100;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
-  const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
+  const instance = render(createElement(App, { client: client as TuiClient, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   try {
     stdin.write('请原样保留这些内容：\n## 两步\n- 先看\n```js\nconst a = 1\n```\n退出码那行是 **0**');
     await delay(80);
@@ -833,22 +846,22 @@ test('input typed while a round runs queues up and flushes in order', options, a
   const { setTimeout: delay } = await import('node:timers/promises');
   const { App } = await import('../dist/tui/app.js');
 
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 100;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
 
-  const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const instance = render(createElement(App, { client: client as TuiClient, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   // 分开发送文本和回车，模拟键盘的两次独立输入。
-  const type = async (text) => { stdin.write(text); await delay(80); stdin.write('\r'); await delay(200); };
+  const type = async (text: string) => { stdin.write(text); await delay(80); stdin.write('\r'); await delay(200); };
   // 从完整输出流读取最新一帧，避免旧帧内容干扰断言。
   const lastFrame = () => completeFrame(painted);
   try {
     await waitFor(() => painted.includes('描述任务'), { read: () => painted });
     await type('第一条');
-    const started = () => requests.filter((request) => request.method === 'run.start').map((request) => request.params.input);
+    const started = () => requests.filter((request) => request.method === 'run.start').map((request) => (request.params as { input?: unknown }).input);
     await waitFor(() => started().length === 1, { read: () => painted });
     assert.deepEqual(started(), ['第一条'], '第一句直接进这一轮');
     await type('第二条');
@@ -879,8 +892,8 @@ test('the metadata line never carries context pressure', options, () => {
   const status = {
     mode: 'full', pendingMode: null, policy: 'ask', tools: ['a', 'b'], eventCount: 4,
     denials: { consecutive: 0, total: 0 }, usage: { window: 200_000, threshold: 160_000, estimated: 42_000 },
-  };
-  const draw = (columns) => buildStatusLine({ sessionId: 'x', status, running: false, seconds: 0, expanded: false, columns });
+  } as unknown as StatusLike;
+  const draw = (columns: number) => buildStatusLine({ sessionId: 'x', status, running: false, seconds: 0, expanded: false, columns });
   assert.doesNotMatch(draw(200), /ctx:/);
   assert.doesNotMatch(draw(64), /ctx:/);
   assert.doesNotMatch(draw(200), /mode:|policy:|tools:/);
@@ -913,7 +926,7 @@ test('/status does not present a completed task as active and labels a missing l
     modelCalls: 3, maxModelCalls: 64, timeoutMs: 1_800_000, interactionWaitTimeoutMs: 43_200_000,
     interactionWaitMs: 90_000, executionElapsedMs: 31_000, executionPaused: false,
   } }, 'zh'), '');
-  assert.match(activeRunBudgetSegment({ running: true, task: null, taskLimits: { maxModelCalls: 64 }, progress: { modelCalls: 2 } }, 'en'),
+  assert.match(activeRunBudgetSegment({ running: true, task: null, taskLimits: { maxModelCalls: 64 }, progress: { modelCalls: 2 } } as unknown as StatusLike, 'en'),
     /model calls 2 · run budget initializing/);
   assert.match(activeRunBudgetSegment({ running: true, task: null }, 'zh'), /Run 预算准备中/);
 });
@@ -926,13 +939,13 @@ test('/status ignores a previous task snapshot until the current progress carrie
   const startedAt = Date.parse('2026-10-31T00:00:00.000Z');
   const initializing = activeRunBudgetSegment({ running: true, task: previous, taskLimits: { maxModelCalls: 64 }, progress: {
     phase: 'preparing', startedAt, modelCalls: 0,
-  } }, 'en');
+  } } as unknown as StatusLike, 'en');
   assert.match(initializing, /model calls 0 · run budget initializing/);
 
   const current = { ...previous, modelCalls: 2, startedAt: '2026-10-31T00:00:00.000Z' };
   const active = activeRunBudgetSegment({ running: true, task: previous, progress: {
     phase: 'model_request', startedAt, modelCalls: 2, task: current,
-  } }, 'en');
+  } } as unknown as StatusLike, 'en');
   assert.match(active, /model calls 2\/64/);
 });
 
@@ -940,14 +953,14 @@ test('the metadata line shortens the workspace path and keeps the interrupt hint
   const status = {
     mode: 'minimal', pendingMode: null, policy: 'ask', policySource: 'session', tools: ['a', 'b', 'c'], eventCount: 1234,
     denials: { consecutive: 0, total: 0 }, usage: { window: 200_000, threshold: 160_000, estimated: 42_000 },
-  };
+  } as unknown as StatusLike;
   const args = {
     sessionId: 'abcdef0123456789', status, seconds: 12.7,
     boundary: 'C:\\Users\\20411\\AppData\\Local\\Temp\\ligule-tui-7Rm2Qx\\project',
   };
   const idle = { running: false, expanded: false };
   const busy = { running: true, expanded: false };
-  const draw = (columns, extra) => buildStatusLine({ ...args, ...extra, columns });
+  const draw = (columns: number, extra: { running: boolean; expanded: boolean }) => buildStatusLine({ ...args, ...extra, columns });
   // 完整路径只进 /status；常驻行到最窄仍保留会话与工作区叶子名。
   assert.ok(draw(180, idle).endsWith(' · project'), '宽终端也只显示工作区叶子名');
   assert.doesNotMatch(draw(180, idle), /Temp\\/);
@@ -960,13 +973,13 @@ test('a mode change during an active turn becomes effective on the next turn', o
   const running = client.request('run.start', { sessionId, input: 'hold the current mode for this turn' });
   try {
     await waitFor(() => providerRequests.length > 0, { within: 10_000, read: () => `provider requests: ${providerRequests.length}` });
-    const switched = await client.request('mode.set', { sessionId, name: 'full' });
+    const switched = await (client as TuiClient).request('mode.set', { sessionId, name: 'full' });
     assert.equal(switched.pending, 'full');
-    const during = await client.request('status.get', { sessionId });
+    const during = await (client as TuiClient).request('status.get', { sessionId });
     assert.equal(during.mode, 'minimal');
     assert.equal(during.pendingMode, 'full');
     await running;
-    const after = await client.request('status.get', { sessionId });
+    const after = await (client as TuiClient).request('status.get', { sessionId });
     assert.equal(after.mode, 'full');
     assert.equal(after.pendingMode, null);
   } finally {
@@ -987,11 +1000,11 @@ test('the session listing is one row per record and an id prefix resolves to one
   assert.deepEqual(sessionLines([]), ['此工作区暂无会话']);
   assert.equal(SESSION_ROWS > 0, true);
 
-  assert.equal(resolveSessionId('5f3c', listed).id, listed[0].id, '前缀唯一对上就用那一份');
-  assert.equal(resolveSessionId('5F3C1234-AAAA-bbbb-cccc-dddddddddddd', listed).id, listed[0].id, '整串照抄也对得上，大小写不分');
-  assert.equal(resolveSessionId('5f3', listed).code, 'tui_session_ambiguous', '对上两份就不猜，让人多写几段');
-  assert.equal(resolveSessionId('nope', listed).code, 'tui_session_not_listed');
-  assert.equal(resolveSessionId('', listed).code, 'tui_session_ambiguous', '空的那一段对上的是一份都对不上，而不是随便挑一份');
+  assert.equal((resolveSessionId('5f3c', listed) as { id: string }).id, listed[0].id, '前缀唯一对上就用那一份');
+  assert.equal((resolveSessionId('5F3C1234-AAAA-bbbb-cccc-dddddddddddd', listed) as { id: string }).id, listed[0].id, '整串照抄也对得上，大小写不分');
+  assert.equal((resolveSessionId('5f3', listed) as { code: string }).code, 'tui_session_ambiguous', '对上两份就不猜，让人多写几段');
+  assert.equal((resolveSessionId('nope', listed) as { code: string }).code, 'tui_session_not_listed');
+  assert.equal((resolveSessionId('', listed) as { code: string }).code, 'tui_session_ambiguous', '空的那一段对上的是一份都对不上，而不是随便挑一份');
 
   // 切换会话后不再接收旧会话运行产生的事件，但仍可读取旧会话记录。
   assert.equal(routeInput('/resume 5f3c', true).kind, 'blocked');
@@ -1022,17 +1035,17 @@ test('resuming a session repaints that record as the transcript', options, async
   const { setTimeout: delay } = await import('node:timers/promises');
   const { App } = await import('../dist/tui/app.js');
 
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 140;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
 
-  const resumedSession = await client.request('session.create', {});
+  const resumedSession = await (client as TuiClient).request('session.create', {});
   const resumed = resumedSession.sessionId;
   await client.request('run.start', { sessionId: resumed, input: '那一份里问过的事' });
-  const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const instance = render(createElement(App, { client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   try {
     await client.request('run.start', { sessionId, input: '当前这一份里问过的事' });
     await waitFor(() => painted.includes('当前这一份里问过的事'), { read: () => painted });
@@ -1050,11 +1063,11 @@ test('resuming a session repaints that record as the transcript', options, async
     const shown = () => plainOutput(painted.slice(beforeResume));
     await waitFor(() => shown().includes('Local response: 那一份里问过的事'), { read: shown });
     const frame = shown();
-    assert.equal(requests.find((request) => request.method === 'session.open')?.params.sessionId, resumed, '前缀在宿主列出来的那几份里对上了才打开');
+    assert.equal((requests.find((request) => request.method === 'session.open')?.params as { sessionId?: string } | undefined)?.sessionId, resumed, '前缀在宿主列出来的那几份里对上了才打开');
     assert.match(frame, /Local response: 那一份里问过的事/, '接上来的那一份记录整份重画在画面上');
     assert.doesNotMatch(frame, /当前这一份里答过的话/, '换过来之后画面上不再是上一份的投影');
     assert.match(frame, new RegExp(`会话 ${resumed.slice(0, 8)}`), '状态行说的是现在这一份会话');
-    assert.ok(requests.some((request) => request.method === 'session.close' && request.params.sessionId === sessionId),
+    assert.ok(requests.some((request) => request.method === 'session.close' && (request.params as { sessionId?: string }).sessionId === sessionId),
       '换走的那一份会话在宿主里收了，装配与记录锁交回去');
   } finally {
     instance.unmount();
@@ -1069,16 +1082,16 @@ test('finding a phrase shows which session each hit is in', options, async () =>
   const { setTimeout: delay } = await import('node:timers/promises');
   const { App } = await import('../dist/tui/app.js');
 
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 140;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
 
-  const other = (await client.request('session.create', {})).sessionId;
+  const other = (await (client as TuiClient).request('session.create', {})).sessionId;
   await client.request('run.start', { sessionId: other, input: '另一份里问过的事' });
-  const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const instance = render(createElement(App, { client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   try {
     const before = painted.length;
     stdin.write('/find 问过');
@@ -1086,9 +1099,9 @@ test('finding a phrase shows which session each hit is in', options, async () =>
     stdin.write('\r');
     const shown = () => plainOutput(painted.slice(before));
     await waitFor(() => shown().includes(other.slice(0, 8)), { read: shown });
-    assert.ok(requests.some((request) => request.method === 'sessions.search' && request.params.query === '问过'
-      && request.params.projectRoot === projectDirectory), '查的是这一个项目根跑过的那几份记录');
-    assert.ok(requests.some((request) => request.method === 'sessions.search' && request.params.sessionId === sessionId),
+    assert.ok(requests.some((request) => request.method === 'sessions.search' && (request.params as { query?: string; projectRoot?: string }).query === '问过'
+      && (request.params as { query?: string; projectRoot?: string }).projectRoot === projectDirectory), '查的是这一个项目根跑过的那几份记录');
+    assert.ok(requests.some((request) => request.method === 'sessions.search' && (request.params as { sessionId?: string }).sessionId === sessionId),
       '当前这一份另问一次，指名之后连溢出在文件里的那一段一起读');
     assert.match(shown(), /其他会话：/, '两组分开说：这一份与其他');
     assert.match(shown(), /问 第 \d+ 条  另一份里问过的事/, '那一行说出种类、序号与命中那一段');
@@ -1111,17 +1124,17 @@ test('branching copies the record and switches onto the new session', options, a
   const { setTimeout: delay } = await import('node:timers/promises');
   const { App } = await import('../dist/tui/app.js');
 
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 140;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
 
   assert.ok(UI_COMMANDS.some((command) => command.name === 'branch'), '/branch 在命令表里');
   assert.equal(routeInput('/branch', true).kind, 'blocked', '分支会把人从跑着的这一轮带走，那一轮落下来的事件就没人在看');
   await client.request('run.start', { sessionId, input: '先问过一句' });
-  const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const instance = render(createElement(App, { client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   try {
     const before = painted.length;
     stdin.write('/branch');
@@ -1133,10 +1146,11 @@ test('branching copies the record and switches onto the new session', options, a
     await waitFor(() => shown().includes('已恢复会话'), { read: shown });
     const branched = requests.filter((request) => request.method === 'session.branch');
     assert.equal(branched.length, 1);
-    assert.equal(branched[0].params.at, undefined, '不带序号不发 `at`：复制到哪儿由宿主固定那一刻的末端');
-    const opened = requests.filter((request) => request.method === 'session.open').at(-1);
-    assert.notEqual(opened.params.sessionId, sessionId, '接上去的是复制出来的那一份，不是原来那一份');
-    assert.match(shown(), new RegExp(`会话 ${opened.params.sessionId.slice(0, 8)}`), '状态行说的是现在这一份会话');
+    assert.equal((branched[0].params as { at?: number }).at, undefined, '不带序号不发 `at`：复制到哪儿由宿主固定那一刻的末端');
+    const opened = requests.filter((request) => request.method === 'session.open').at(-1)!;
+    const openedSession = (opened.params as { sessionId: string }).sessionId;
+    assert.notEqual(openedSession, sessionId, '接上去的是复制出来的那一份，不是原来那一份');
+    assert.match(shown(), new RegExp(`会话 ${openedSession.slice(0, 8)}`), '状态行说的是现在这一份会话');
 
     const unreadable = painted.length;
     stdin.write('/branch 第三');
@@ -1182,7 +1196,7 @@ test('the history file reads valid entries and reports a malformed line', async 
     await rememberHistory(path, ['最新的一条', '旧的一条']);
     assert.deepEqual(await loadHistory(path), ['最新的一条', '旧的一条'], '先后与文件里一致，最新的排在第一个');
     await appendFile(path, '这一行不是 JSON\n');
-    await assert.rejects(loadHistory(path), (error) => error.code === 'input_history_invalid' && error.detail.includes('line 3'));
+    await assert.rejects(loadHistory(path), (error) => (error as { code?: string }).code === 'input_history_invalid' && (error as { detail?: string }).detail!.includes('line 3'));
   } finally {
     await rm(assertInTestplace(absoluteRoot), { recursive: true, force: true });
   }
@@ -1196,23 +1210,23 @@ test('the arrow keys recall the last sentence and Ctrl+R searches the history', 
   const { setTimeout: delay } = await import('node:timers/promises');
   const { App } = await import('../dist/tui/app.js');
 
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 120;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
 
-  const remembered = [];
+  const remembered: string[] = [];
   const fileEntries = ['改 note.txt 的第一行', '上一次会话里说过的话'];
   const instance = render(createElement(App, {
-    client,
+    client: client as TuiClient,
     sessionId,
     info: {},
     interactive: true,
     stdout,
     // 测试客户端返回已修改的审批内容，界面应显示客户端返回的结果。
-    history: { entries: fileEntries, remember: async (text) => { remembered.push(text); return pushHistory(fileEntries, text); } },
+    history: { entries: fileEntries, remember: async (text: string) => { remembered.push(text); return pushHistory(fileEntries, text); } },
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   const lastFrame = () => completeFrame(painted);
   try {
@@ -1220,7 +1234,7 @@ test('the arrow keys recall the last sentence and Ctrl+R searches the history', 
     await delay(100);
     stdin.write('\r');
     await waitFor(() => remembered.length === 1, { read: () => painted });
-    assert.deepEqual(requests.filter((request) => request.method === 'run.start').map((request) => request.params.input), ['把这条记进历史']);
+    assert.deepEqual(requests.filter((request) => request.method === 'run.start').map((request) => (request.params as { input?: unknown }).input), ['把这条记进历史']);
     assert.deepEqual(remembered, ['把这条记进历史'], '发出去的那一句才交给那一份文件');
 
     // 按上键后，最近发送的消息应成为草稿历史中的第一项。
@@ -1249,16 +1263,16 @@ test('Ctrl+G hands the draft to the editor and reads back what it wrote', option
   const { setTimeout: delay } = await import('node:timers/promises');
   const { App } = await import('../dist/tui/app.js');
 
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 120;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
 
   const editor = `${quoted(process.execPath)} ${quoted(editorFixture)} append-crlf - - -`;
   const instance = render(createElement(App, {
-    client, sessionId, info: { editor }, interactive: true, stdout,
+    client: client as TuiClient, sessionId, info: { editor }, interactive: true, stdout,
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   const lastFrame = () => completeFrame(painted);
   try {
@@ -1282,14 +1296,14 @@ test('Ctrl+G says the editor is not configured instead of guessing one', options
   const { setTimeout: delay } = await import('node:timers/promises');
   const { App } = await import('../dist/tui/app.js');
 
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 120;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
 
-  const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true, stdout }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const instance = render(createElement(App, { client: client as TuiClient, sessionId, info: {}, interactive: true, stdout }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   try {
     stdin.write('\x07');
     await waitFor(() => /请先设置 VISUAL 或 EDITOR/.test(painted), { read: () => painted });
@@ -1309,7 +1323,7 @@ test('a failed editor run leaves no temporary directory behind', async () => {
   process.env.TEMP = sandbox;
   try {
     const leftovers = async () => (await readdir(sandbox, { recursive: true })).map(String).filter((name) => name.includes('ligule-editor-'));
-    const failed = await editInExternalEditor(`${quoted(process.execPath)} ${quoted(join(resolve('tests'), 'fixtures', 'editor.mjs'))} exit - - 17`, '草稿的一半');
+    const failed = await editInExternalEditor(`${quoted(process.execPath)} ${quoted(join(resolve('tests'), 'fixtures', 'editor.mjs'))} exit - - 17`, '草稿的一半') as { code: string; detail: string };
     assert.equal(failed.code, 'tui_editor_failed');
     assert.match(failed.detail, /17/);
     assert.deepEqual(await leftovers(), [], '退出码不是 0 那一条路径上临时目录也删掉了');
@@ -1329,14 +1343,14 @@ test('a pasted block lands in the draft without sending it', options, async () =
   const { PassThrough } = await import('node:stream');
   const { App } = await import('../dist/tui/app.js');
 
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 140;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
 
-  const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const instance = render(createElement(App, { client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   try {
     const esc = String.fromCharCode(27);
     const line = String.fromCharCode(10);
@@ -1348,7 +1362,7 @@ test('a pasted block lands in the draft without sending it', options, async () =
     assert.equal(requests.filter((request) => request.method === 'run.start').length, 0, '粘进来的那一段不发起一轮');
     stdin.write('\r');
     await waitFor(() => requests.some((request) => request.method === 'run.start'), { read: shown });
-    const sent = requests.find((request) => request.method === 'run.start').params.input;
+    const sent = (requests.find((request) => request.method === 'run.start')!.params as { input?: unknown }).input;
     assert.equal(sent, `把这段读一遍${line}注意第三行`, '两条都在草稿里：按 Enter 发出去的就是这一整段');
   } finally {
     instance.unmount();
@@ -1363,17 +1377,17 @@ test('cancelling a round leaves the queued sentences paused', options, async () 
   const { setTimeout: delay } = await import('node:timers/promises');
   const { App } = await import('../dist/tui/app.js');
 
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 100;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
 
-  const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
-  const type = async (text) => { stdin.write(text); await delay(80); stdin.write('\r'); await delay(200); };
+  const instance = render(createElement(App, { client: client as TuiClient, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const type = async (text: string) => { stdin.write(text); await delay(80); stdin.write('\r'); await delay(200); };
   const lastFrame = () => completeFrame(painted);
-  const started = () => requests.filter((request) => request.method === 'run.start').map((request) => request.params.input);
+  const started = () => requests.filter((request) => request.method === 'run.start').map((request) => (request.params as { input?: unknown }).input);
   try {
     await waitFor(() => painted.includes('描述任务'), { read: () => painted });
     await type('第一条');
@@ -1443,21 +1457,21 @@ test('a reopened session takes back its own draft and a paused queue', options, 
   const { PassThrough } = await import('node:stream');
   const { App } = await import('../dist/tui/app.js');
 
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 140;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
   const saved = new Map([[sessionId, { draft: '上次没写完的那一句', queued: ['上次排着的那一句'] }]]);
-  const written = [];
+  const written: { projectRoot: string; sessionId: string; draft: string; queued: readonly string[] }[] = [];
   const inputs = {
-    read: async (projectRoot, own) => saved.get(own) ?? { projectRoot, sessionId: own, draft: '', queued: [] },
-    write: async (projectRoot, own, draft, queued) => { written.push({ projectRoot, sessionId: own, draft, queued }); },
+    read: async (projectRoot: string, own: string) => (saved.get(own) as SavedInput | undefined) ?? { projectRoot, sessionId: own, draft: '', queued: [] },
+    write: async (projectRoot: string, own: string, draft: string, queued: readonly string[]) => { written.push({ projectRoot, sessionId: own, draft, queued }); },
   };
 
   const instance = render(createElement(App, {
-    client, sessionId, info: { boundary: projectDirectory }, interactive: true, inputs, stdout,
+    client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true, inputs, stdout,
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   try {
     await waitFor(() => plainOutput(painted).includes('上次没写完的那一句'), { read: () => plainOutput(painted) });
@@ -1494,15 +1508,15 @@ test('an @ fragment asks the host for project files and Enter picks one', option
   await mkdir(join(projectDirectory, 'notes'), { recursive: true });
   await appendFile(join(projectDirectory, 'notes', 'readings-3.md'), '一段读数');
 
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 120;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
 
   const instance = render(createElement(App, {
-    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+    client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true,
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   const lastFrame = () => completeFrame(painted);
   const started = () => requests.filter((request) => request.method === 'run.start').length;
@@ -1525,7 +1539,7 @@ test('an @ fragment asks the host for project files and Enter picks one', option
     await waitFor(() => lastFrame().includes('Esc 收起'), { read: lastFrame });
     const askedAgain = requests.filter((request) => request.method === 'paths.list');
     assert.equal(askedAgain.length, 2, '改了这个词就重新问一次');
-    assert.equal(askedAgain.at(-1).params.query, 'notes', '问的是新那一段文字');
+    assert.equal((askedAgain.at(-1)!.params as { query?: string }).query, 'notes', '问的是新那一段文字');
 
     stdin.write('\x1b');
     await waitFor(() => !lastFrame().includes('Esc 收起'), { read: lastFrame });
@@ -1567,21 +1581,21 @@ test('Ctrl+Z walks the draft back a unit at a time and Ctrl+Y takes it back', op
   const { setTimeout: delay } = await import('node:timers/promises');
   const { App } = await import('../dist/tui/app.js');
 
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 120;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
   const instance = render(createElement(App, {
-    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+    client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true,
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   const lastFrame = () => completeFrame(painted);
   const started = () => requests.filter((request) => request.method === 'run.start').length;
   // 去除光标反色对应的 ANSI 样式码后，再检查草稿文本。
   const shown = () => plainOutput(lastFrame());
   // 只从完整输出帧读取草稿，避免将分段到达的输出误判为空。
-  const paintedText = async (text, note) => {
+  const paintedText = async (text: string, note: string) => {
     await waitFor(() => shown().includes(text), { read: shown });
     assert.ok(shown().includes(text), note);
   };
@@ -1627,33 +1641,33 @@ test('/policy changes the session setting and updates the bottom configuration l
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
   const { App } = await import('../dist/tui/app.js');
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 120;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
   const instance = render(createElement(App, {
-    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+    client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true,
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   // 终端可能折行；比较前去除控制序列和换行，按完整文本检查提示。
-  const strip = (text) => text.replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '').replace(/[\r\n]+/g, '');
+  const strip = (text: string) => text.replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '').replace(/[\r\n]+/g, '');
   const lastFrame = () => completeFrame(painted);
-  const spoken = (text) => strip(painted).includes(text);
-  const type = async (line) => {
+  const spoken = (text: string) => strip(painted).includes(text);
+  const type = async (line: string) => {
     stdin.write(line);
     await waitFor(() => lastFrame().includes(`› ${line}`), { within: 10_000, read: lastFrame });
     stdin.write('\r');
   };
-  const configDefault = (await client.request('status.get', { sessionId })).policy;
+  const configDefault = (await (client as TuiClient).request('status.get', { sessionId })).policy;
   const other = configDefault === 'ask' ? 'auto' : 'ask';
-  const policyLabel = (policy) => policy === 'auto' ? '自动判定' : '逐次审批';
+  const policyLabel = (policy: string) => policy === 'auto' ? '自动判定' : '逐次审批';
   try {
     await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
     await type(`/policy ${other}`);
     await waitFor(() => requests.some((request) => request.method === 'policy.set'), { read: () => strip(painted).slice(-700) });
     await waitFor(() => spoken(`当前会话审批方式：${other}`), { read: () => strip(painted).slice(-700) });
-    assert.equal((await client.request('status.get', { sessionId })).policySource, 'session');
+    assert.equal((await (client as TuiClient).request('status.get', { sessionId })).policySource, 'session');
     await waitFor(() => lastFrame().includes(`审批 ${policyLabel(other)}`), { read: lastFrame });
 
     await type('/policy sometimes');
@@ -1661,7 +1675,7 @@ test('/policy changes the session setting and updates the bottom configuration l
 
     await type('/policy reset');
     await waitFor(() => spoken(`已恢复默认审批方式：${configDefault}`), { read: () => painted });
-    assert.equal((await client.request('status.get', { sessionId })).policySource, 'config');
+    assert.equal((await (client as TuiClient).request('status.get', { sessionId })).policySource, 'config');
     await waitFor(() => lastFrame().includes(`审批 ${policyLabel(configDefault)}`), { read: lastFrame });
   } finally {
     instance.unmount();
@@ -1673,19 +1687,19 @@ test('/control creates a project-bound grant through the interactive wizard', op
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
   const { App } = await import('../dist/tui/app.js');
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 120;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
   const instance = render(createElement(App, {
-    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+    client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true,
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   const lastFrame = () => completeFrame(painted);
-  const strip = (text) => plainOutput(text).replace(/[\r\n]+/g, '');
+  const strip = (text: string) => plainOutput(text).replace(/[\r\n]+/g, '');
   const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
-  const answer = async (value, nextPrompt) => {
+  const answer = async (value: string, nextPrompt?: string) => {
     stdin.write(value);
     await waitFor(() => lastFrame().includes(`› ${value}`), { within: 10_000, read: lastFrame });
     stdin.write('\r');
@@ -1714,7 +1728,7 @@ test('/control creates a project-bound grant through the interactive wizard', op
       const output = strip(painted);
       return output.includes('外控授权 Codex test grant 已创建') || output.includes('Grant Codex test grant created');
     }, { within: 10_000, read: () => strip(painted).slice(-1_000) });
-    const saved = await client.request('agent-control.list', {});
+    const saved = await (client as TuiClient).request('agent-control.list', {});
     assert.equal(saved.grants.length, 1);
     assert.equal(saved.grants[0].name, 'Codex test grant');
     assert.equal(saved.grants[0].projectRoot, projectDirectory);
@@ -1728,8 +1742,8 @@ test('/control creates a project-bound grant through the interactive wizard', op
     assert.deepEqual(saved.grants[0].allowedMcpServers, []);
     assert.deepEqual(saved.grants[0].allowedMcpTools, []);
     assert.equal(saved.grants[0].confirmedPartialWorkspaceWrite, true);
-    assert.equal(saved.grants[0].confirmedFullAccess, true);
-    assert.equal(saved.grants[0].confirmedUnrestrictedNetwork, true);
+    assert.equal((saved.grants[0] as unknown as { confirmedFullAccess: boolean }).confirmedFullAccess, true);
+    assert.equal((saved.grants[0] as unknown as { confirmedUnrestrictedNetwork: boolean }).confirmedUnrestrictedNetwork, true);
     assert.equal(saved.grants[0].expiresAt, expiresAt);
     assert.match(strip(painted), new RegExp(saved.grants[0].id));
 
@@ -1743,7 +1757,7 @@ test('/control creates a project-bound grant through the interactive wizard', op
         && output.includes(projectDirectory);
     }, { within: 10_000, read: () => strip(painted).slice(-1_200) });
 
-    const listed = await client.request('agent-control.list', {});
+    const listed = await (client as TuiClient).request('agent-control.list', {});
     await client.request('agent-control.revoke', { grantId: saved.grants[0].id, version: listed.version });
     await answer('/control list');
     await waitFor(() => {
@@ -1761,7 +1775,7 @@ test('cancelling the grant wizard while it lists trusted MCP tools keeps it clos
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
   const { App } = await import('../dist/tui/app.js');
-  const serverTrust = await client.request('mcp.trust.list', { projectRoot: projectDirectory });
+  const serverTrust = await (client as TuiClient).request('mcp.trust.list', { projectRoot: projectDirectory });
   const server = serverTrust.servers.find((item) => item.name === 'probe');
   assert.ok(server, 'the project config exposes the real local MCP fixture');
   await client.request('mcp.trust.set', {
@@ -1777,15 +1791,15 @@ test('cancelling the grant wizard while it lists trusted MCP tools keeps it clos
 
   let toolsRequestStarted = false;
   let toolsRequestSettled = false;
-  let toolsRequestFailure;
-  let toolsRequestResult;
+  let toolsRequestFailure: unknown;
+  let toolsRequestResult: { tools: { name: string }[] } | undefined;
   const request = client.request.bind(client);
   client.request = (method, params) => {
     const pending = request(method, params);
     if (method !== 'mcp.trust.tools') return pending;
     toolsRequestStarted = true;
     return pending.then((result) => {
-      toolsRequestResult = result;
+      toolsRequestResult = result as { tools: { name: string }[] };
       toolsRequestSettled = true;
       return result;
     }, (error) => {
@@ -1797,17 +1811,17 @@ test('cancelling the grant wizard while it lists trusted MCP tools keeps it clos
 
   const toolsStartedPath = join(projectDirectory, 'mcp-started.pid');
   const toolsReturnedPath = join(projectDirectory, 'mcp-tools-returned');
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 120;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
   const instance = render(createElement(App, {
-    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+    client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true,
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   const lastFrame = () => completeFrame(painted);
-  const answer = async (value, nextPrompt) => {
+  const answer = async (value: string, nextPrompt?: string) => {
     stdin.write(value);
     await waitFor(() => lastFrame().includes(`› ${value}`), { within: 10_000, read: lastFrame });
     stdin.write('\r');
@@ -1840,7 +1854,7 @@ test('cancelling the grant wizard while it lists trusted MCP tools keeps it clos
     await waitFor(() => lastFrame().includes('› after-cancel'), { within: 5_000, read: lastFrame });
 
     assert.equal(toolsRequestFailure, undefined);
-    assert.deepEqual(toolsRequestResult.tools.map((tool) => tool.name), ['echo']);
+    assert.deepEqual(toolsRequestResult!.tools.map((tool) => tool.name), ['echo']);
     assert.match(plainOutput(painted), /已取消外控授权创建/);
     assert.doesNotMatch(lastFrame(), /允许外控调用哪些工具|可授权的 MCP 工具|Which tools may the controller call/u);
   } finally {
@@ -1865,7 +1879,7 @@ test('a submitted grant cannot be canceled or submitted again while the Host res
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
   const { App } = await import('../dist/tui/app.js');
-  let releaseCreateResponse = () => {};
+  let releaseCreateResponse: (value?: unknown) => void = () => {};
   const createResponseGate = new Promise((resolve) => { releaseCreateResponse = resolve; });
   let createResponseReceived = false;
   const originalRequest = client.request.bind(client);
@@ -1879,18 +1893,18 @@ test('a submitted grant cannot be canceled or submitted again while the Host res
     });
   };
 
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 120;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
   const instance = render(createElement(App, {
-    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+    client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true,
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   const lastFrame = () => completeFrame(painted);
   const inputLine = () => lastFrame().split(/\r?\n/u).map((line) => line.trim()).find((line) => line.startsWith('›')) ?? '';
-  const answer = async (value, nextPrompt) => {
+  const answer = async (value: string, nextPrompt?: string) => {
     stdin.write(value);
     await waitFor(() => lastFrame().includes(`› ${value}`), { within: 10_000, read: lastFrame });
     stdin.write('\r');
@@ -1933,7 +1947,7 @@ test('a submitted grant cannot be canceled or submitted again while the Host res
 
     releaseCreateResponse();
     await waitFor(() => lastFrame().includes('外控授权 pending grant 已创建'), { within: 5_000, read: lastFrame });
-    const saved = await originalRequest('agent-control.list', {});
+    const saved = await originalRequest('agent-control.list', {}) as { grants: readonly { name: string }[]; version: string };
     assert.equal(saved.grants.length, 1);
     assert.equal(saved.grants[0].name, 'pending grant');
   } finally {
@@ -1947,7 +1961,7 @@ test('a pending grant setup does not open after the user starts a new conversati
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
   const { App } = await import('../dist/tui/app.js');
-  let releaseTrustResponse = () => {};
+  let releaseTrustResponse: (value?: unknown) => void = () => {};
   const trustResponseGate = new Promise((resolve) => { releaseTrustResponse = resolve; });
   let trustResponseReceived = false;
   let trustResponseDelivered = false;
@@ -1963,14 +1977,14 @@ test('a pending grant setup does not open after the user starts a new conversati
     });
   };
 
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 120;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
   const instance = render(createElement(App, {
-    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+    client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true,
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   const lastFrame = () => completeFrame(painted);
 
@@ -2012,7 +2026,7 @@ test('opening a settings picker supersedes a pending grant setup request', optio
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
   const { App } = await import('../dist/tui/app.js');
-  let releaseTrustResponse = () => {};
+  let releaseTrustResponse: (value?: unknown) => void = () => {};
   const trustResponseGate = new Promise((resolve) => { releaseTrustResponse = resolve; });
   let trustResponseReceived = false;
   let trustResponseDelivered = false;
@@ -2028,14 +2042,14 @@ test('opening a settings picker supersedes a pending grant setup request', optio
     });
   };
 
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 120;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
   const instance = render(createElement(App, {
-    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+    client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true,
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
   const lastFrame = () => completeFrame(painted);
 
@@ -2076,19 +2090,19 @@ test('/think applies a thinking level the model declares and resets to the model
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
   const { App } = await import('../dist/tui/app.js');
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 120;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
   const instance = render(createElement(App, {
-    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+    client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true,
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
-  const strip = (text) => text.replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '').replace(/[\r\n]+/g, '');
+  const strip = (text: string) => text.replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '').replace(/[\r\n]+/g, '');
   const lastFrame = () => completeFrame(painted);
-  const spoken = (text) => strip(painted).includes(text);
-  const type = async (line) => {
+  const spoken = (text: string) => strip(painted).includes(text);
+  const type = async (line: string) => {
     stdin.write(line);
     await waitFor(() => lastFrame().includes(`› ${line}`), { within: 10_000, read: lastFrame });
     stdin.write('\r');
@@ -2105,15 +2119,15 @@ test('/think applies a thinking level the model declares and resets to the model
     await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
     await type('/think high');
     await waitFor(() => requests.some((request) => request.method === 'session.configure'
-      && request.params?.thinkingEffort === 'high'), { read: () => strip(painted).slice(-700) });
+      && (request.params as { thinkingEffort?: string } | undefined)?.thinkingEffort === 'high'), { read: () => strip(painted).slice(-700) });
     await waitFor(() => spoken('思考档：高'), { read: () => strip(painted).slice(-700) });
-    assert.equal((await client.request('status.get', { sessionId })).thinking.effective, 'high');
+    assert.equal((await (client as TuiClient).request('status.get', { sessionId })).thinking!.effective, 'high');
     await waitFor(() => lastFrame().includes('思考 高'), { read: lastFrame });
 
     await type('/think default');
     await waitFor(() => requests.some((request) => request.method === 'session.configure'
-      && request.params?.resetThinking === true), { read: () => strip(painted).slice(-700) });
-    await waitFor(async () => (await client.request('status.get', { sessionId })).thinking.effective === 'default', { read: () => strip(painted).slice(-700) });
+      && (request.params as { resetThinking?: boolean } | undefined)?.resetThinking === true), { read: () => strip(painted).slice(-700) });
+    await waitFor(async () => (await (client as TuiClient).request('status.get', { sessionId })).thinking!.effective === 'default', { read: () => strip(painted).slice(-700) });
   } finally {
     instance.unmount();
   }
@@ -2133,18 +2147,18 @@ test('/think explains when the selected model declares no thinking levels', opti
   const { render } = await import('ink');
   const { PassThrough } = await import('node:stream');
   const { App } = await import('../dist/tui/app.js');
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as unknown as FakeOutput;
   stdout.columns = 120;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
   const instance = render(createElement(App, {
-    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+    client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true,
   }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
-  const strip = (text) => text.replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '').replace(/[\r\n]+/g, '');
+  const strip = (text: string) => text.replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '').replace(/[\r\n]+/g, '');
   const lastFrame = () => completeFrame(painted);
-  const type = async (line) => {
+  const type = async (line: string) => {
     stdin.write(line);
     await waitFor(() => lastFrame().includes(`› ${line}`), { within: 10_000, read: lastFrame });
     stdin.write('\r');
@@ -2168,18 +2182,18 @@ test('a narrow terminal keeps a pending approval operable when the settings line
     const { PassThrough } = await import('node:stream');
     const { App } = await import('../dist/tui/app.js');
 
-    const stdout = new PassThrough();
+    const stdout = new PassThrough() as unknown as FakeOutput;
     // 80x12 比 80x24 更紧：设置行与欢迎区都放不下，审批卡必须自己撑住可用性。
     stdout.columns = 80;
     stdout.rows = 12;
     stdout.isTTY = true;
     let painted = '';
     stdout.on('data', (chunk) => { painted += chunk; });
-    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
-    const instance = render(createElement(App, { client, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
-    let decision;
+    const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
+    const instance = render(createElement(App, { client: client as TuiClient, sessionId, info: {}, interactive: true }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+    let decision: { text: string } | undefined;
     try {
-      const run = client.request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'git --version' } }) });
+      const run = (client as TuiClient).request('run.start', { sessionId, input: JSON.stringify({ tool: 'exec', args: { command: 'git --version' } }) });
       await waitFor(() => /允许执行 exec？/.test(painted), { read: () => painted });
       stdin.write('1');
       decision = await run;
@@ -2189,6 +2203,6 @@ test('a narrow terminal keeps a pending approval operable when the settings line
     assert.match(painted, /允许执行 exec？/);
     assert.match(painted, /git --version/);
     // 允许一次后命令应真的执行：decision.text 是工具结果，而不是取消标记。
-    assert.match(decision.text, /git version/);
+    assert.match(decision!.text, /git version/);
   }, { permission });
 });

@@ -1,11 +1,14 @@
 // 这些测试会替换模块级键位配置，因此放在独立文件中，避免并行测试互相影响。
 import test from 'node:test';
-import { completeFrame } from './helpers/frames.js';
+import { completeFrame } from './helpers/frames.ts';
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { waitFor, withTuiHost } from '../../core/tests/helpers/tui-host.ts';
+import type { PassThrough as PassThroughStream } from 'node:stream';
+import type { TerminalAction } from '../dist/tui/keymap.js';
+import type { TuiClient } from '../dist/tui/app.js';
+import { waitFor, withTuiHost } from './helpers/tui-host.ts';
 
 let rows = {};
 let missing = '';
@@ -14,14 +17,15 @@ process.env.FORCE_COLOR = '1';
 try {
   rows = await import('../dist/tui/app.js');
 } catch (error) {
-  missing = error.code === 'ERR_MODULE_NOT_FOUND' ? 'the terminal UI dependencies are not installed' : error.message;
+  const code = (error as { code?: string }).code;
+  missing = code === 'ERR_MODULE_NOT_FOUND' ? 'the terminal UI dependencies are not installed' : (error as Error).message;
 } finally {
   if (previousForceColor === undefined) delete process.env.FORCE_COLOR;
   else process.env.FORCE_COLOR = previousForceColor;
 }
 
 const options = { skip: missing === '' ? false : missing };
-const { KEYMAP, CURRENT, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec, specOf } = rows;
+const { KEYMAP, CURRENT, applyOverrides, conflictsIn, defaultSpecs, formatKeys, hit, keyHint, parseSpec, specOf } = rows as typeof import('../dist/tui/app.js');
 
 test('the key table is the one place both the dispatch and the names on screen read', () => {
   assert.equal(specOf('', { return: true }), 'enter');
@@ -40,8 +44,8 @@ test('the key table is the one place both the dispatch and the names on screen r
     assert.deepEqual(conflictsIn(view, CURRENT), [], `${view} 里那几记键不撞`);
   }
   for (const [action, binding] of Object.entries(KEYMAP)) {
-    assert.ok(binding.label !== '' && binding.view !== '', `${action} 要说得出做什么与落在哪一个范围`);
-    assert.equal(CURRENT[action], binding.spec, `${action} 的默认键读得回来`);
+    assert.ok(binding.label !== '' && (binding.view as string) !== '', `${action} 要说得出做什么与落在哪一个范围`);
+    assert.equal(CURRENT[action as TerminalAction], binding.spec, `${action} 的默认键读得回来`);
   }
 });
 
@@ -85,21 +89,21 @@ test('/bind changes what a key does and what the screen says about it', options,
   const { setTimeout: delay } = await import('node:timers/promises');
   const { App } = await import('../dist/tui/app.js');
 
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as PassThroughStream & { columns: number; isTTY: boolean };
   stdout.columns = 120;
   stdout.isTTY = true;
   let painted = '';
   stdout.on('data', (chunk) => { painted += chunk; });
   const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} });
-  const written = [];
+  const written: Record<string, string>[] = [];
   const started = () => requests.filter((request) => request.method === 'run.start').length;
   const instance = render(createElement(App, {
-    client, sessionId, info: { boundary: projectDirectory }, interactive: true,
+    client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true,
     keys: { read: async () => ({ overrides: {}, refused: [] }), write: async (next) => { written.push(next); } },
-  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  }), { stdout: stdout as unknown as NodeJS.WriteStream, stdin: stdin as unknown as NodeJS.ReadStream, exitOnCtrlC: false, patchConsole: false, interactive: true });
   const lastFrame = () => completeFrame(painted);
   // 已发送的消息由 `Static` 只渲染一次，因此检查完整输出流。
-  const spoken = (text) => painted.includes(text);
+  const spoken = (text: string) => painted.includes(text);
   try {
     await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
     stdin.write('/bind newline ctrl+x');
@@ -131,7 +135,7 @@ test('/bind changes what a key does and what the screen says about it', options,
     stdin.write('甲');
     await delay(40);
     stdin.write('\x18');
-    await waitFor(() => started() === 1, { read: () => requests });
+    await waitFor(() => started() === 1, { read: () => JSON.stringify(requests) });
     stdin.write('乙');
     await delay(40);
     stdin.write('\r');

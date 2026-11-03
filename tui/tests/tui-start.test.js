@@ -12,7 +12,7 @@ import { createSessionLog } from '../../core/dist/session/session.js';
 import { runTui } from '../dist/tui/start.js';
 import { readInput } from '../dist/tui/input-store.js';
 import { completeFrame } from './helpers/frames.js';
-import { waitFor, withTuiHost } from '../../core/tests/helpers/tui-host.ts';
+import { waitFor, withTuiHost } from './helpers/tui-host.ts';
 
 async function createTerminal() {
   const stdout = Object.assign(new PassThrough(), { columns: 120, rows: 30, isTTY: true });

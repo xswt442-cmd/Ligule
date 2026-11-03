@@ -6,8 +6,9 @@ import { createElement } from 'react';
 import { render } from 'ink';
 import { modeDirectories } from '../../core/dist/kernel/modes.js';
 import { modeOptions } from '../dist/tui/mode-options.js';
-import { completeFrame } from './helpers/frames.js';
-import { waitFor, withTuiHost } from '../../core/tests/helpers/tui-host.ts';
+import type { TuiClient } from '../dist/tui/app.js';
+import { completeFrame } from './helpers/frames.ts';
+import { waitFor, withTuiHost } from './helpers/tui-host.ts';
 
 const shippedModes = fileURLToPath(new URL('../../core/modes/', import.meta.url));
 const options = {
@@ -27,13 +28,16 @@ const options = {
   interactive: true,
 };
 
+type FakeInput = PassThrough & { isTTY: boolean; setRawMode(): unknown; ref(): void; unref(): void };
+type FakeOutput = PassThrough & { isTTY: boolean; columns: number; rows: number };
+
 function fakeTerminal() {
-  const stdin = new PassThrough();
+  const stdin = new PassThrough() as FakeInput;
   stdin.isTTY = true;
   stdin.setRawMode = () => stdin;
   stdin.ref = () => {};
   stdin.unref = () => {};
-  const stdout = new PassThrough();
+  const stdout = new PassThrough() as FakeOutput;
   stdout.isTTY = true;
   stdout.columns = 100;
   stdout.rows = 36;
@@ -42,7 +46,7 @@ function fakeTerminal() {
   return { stdin, stdout, frame: () => completeFrame(painted) };
 }
 
-async function until(terminal, condition) {
+async function until(terminal: ReturnType<typeof fakeTerminal>, condition: (frame: string) => boolean) {
   await waitFor(() => condition(terminal.frame()), {
     within: 10_000,
     every: 10,
@@ -54,9 +58,9 @@ test('TUI screen consent requires the explicit confirmation command and can be r
   await withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
     const { App } = await import('../dist/tui/app.js');
     const terminal = fakeTerminal();
-    const instance = render(createElement(App, { client, sessionId, info: { boundary: projectDirectory }, stdout: terminal.stdout, interactive: true }),
-      { stdin: terminal.stdin, stdout: terminal.stdout, exitOnCtrlC: false, patchConsole: false, interactive: true });
-    const submit = async text => {
+    const instance = render(createElement(App, { client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, stdout: terminal.stdout as unknown as NodeJS.WriteStream, interactive: true }),
+      { stdin: terminal.stdin as unknown as NodeJS.ReadStream, stdout: terminal.stdout as unknown as NodeJS.WriteStream, exitOnCtrlC: false, patchConsole: false, interactive: true });
+    const submit = async (text: string) => {
       terminal.stdin.write(text);
       await new Promise(resolve => setTimeout(resolve, 60));
       terminal.stdin.write('\r');
@@ -68,10 +72,10 @@ test('TUI screen consent requires the explicit confirmation command and can be r
       assert.equal(requests.some(request => request.method === 'screen-capture.set'), false);
       await submit('/screen on confirm');
       await until(terminal, frame => frame.includes('本会话截图已授权'));
-      assert.equal((await client.request('status.get', { sessionId })).screenCapture.enabled, true);
+      assert.equal((await (client as TuiClient).request('status.get', { sessionId })).screenCapture!.enabled, true);
       await submit('/screen off');
       await until(terminal, frame => frame.includes('本会话截图授权已撤销'));
-      assert.equal((await client.request('status.get', { sessionId })).screenCapture.enabled, false);
+      assert.equal((await (client as TuiClient).request('status.get', { sessionId })).screenCapture!.enabled, false);
       assert.equal(requests.some(request => request.method === 'run.start'), false);
     } finally { instance.unmount(); }
   }, { interactive: true, permissionControl: true });
@@ -86,15 +90,15 @@ test('TUI control panels select a model, mode, and policy without running a requ
       read: () => modeOptions(modeDirectories(projectDirectory, shippedModes, homeDirectory)),
     };
     const instance = render(createElement(App, {
-      client,
+      client: client as TuiClient,
       sessionId,
       info: { boundary: projectDirectory, model: 'first-model' },
       modes,
-      stdout: terminal.stdout,
+      stdout: terminal.stdout as unknown as NodeJS.WriteStream,
       interactive: true,
     }), {
-      stdin: terminal.stdin,
-      stdout: terminal.stdout,
+      stdin: terminal.stdin as unknown as NodeJS.ReadStream,
+      stdout: terminal.stdout as unknown as NodeJS.WriteStream,
       exitOnCtrlC: false,
       patchConsole: false,
       interactive: true,
@@ -110,10 +114,10 @@ test('TUI control panels select a model, mode, and policy without running a requ
       await until(terminal, (frame) => frame.includes('› Alpha / second-model'));
       terminal.stdin.write('\r');
       await until(terminal, () => requests.some((request) => request.method === 'model.select'));
-      const modelRequest = requests.find((request) => request.method === 'model.select');
+      const modelRequest = requests.find((request) => request.method === 'model.select')!;
       assert.deepEqual(modelRequest.params, { sessionId, provider: 'alpha', model: 'second-model' });
       await until(terminal, (frame) => frame.includes('模型 second-model'));
-      assert.equal((await client.request('status.get', { sessionId })).selectedModel, 'second-model');
+      assert.equal((await (client as TuiClient).request('status.get', { sessionId })).selectedModel, 'second-model');
       assert.equal(requests.filter((request) => request.method === 'run.start').length, 0);
       await until(terminal, (frame) => frame.includes('keep this draft'));
 
@@ -123,24 +127,24 @@ test('TUI control panels select a model, mode, and policy without running a requ
       await until(terminal, (frame) => frame.includes('› full'));
       terminal.stdin.write('\r');
       await until(terminal, () => requests.some((request) => request.method === 'mode.set'));
-      assert.equal(requests.find((request) => request.method === 'mode.set').params.name, 'full');
+      assert.equal((requests.find((request) => request.method === 'mode.set')!.params as { name: string }).name, 'full');
       await until(terminal, (frame) => frame.includes('工具模式 full'));
-      assert.equal((await client.request('status.get', { sessionId })).mode, 'full');
+      assert.equal((await (client as TuiClient).request('status.get', { sessionId })).mode, 'full');
 
-      const beforePolicy = await client.request('session.read', { sessionId });
+      const beforePolicy = await (client as TuiClient).request('session.read', { sessionId });
       terminal.stdin.write('\u0001');
       await until(terminal, (frame) => frame.includes('自动判定') || frame.includes('Automatic decisions'));
       terminal.stdin.write('\u001b[B');
       await until(terminal, (frame) => frame.includes('› 自动判定') || frame.includes('› Automatic decisions'));
       terminal.stdin.write('\r');
       await until(terminal, () => requests.some((request) => request.method === 'policy.set'));
-      assert.equal(requests.find((request) => request.method === 'policy.set').params.mode, 'auto');
+      assert.equal((requests.find((request) => request.method === 'policy.set')!.params as { mode: string }).mode, 'auto');
       await until(terminal, (frame) => frame.includes('审批 自动判定'));
-      const afterPolicy = await client.request('status.get', { sessionId });
-      const afterPolicyRecord = await client.request('session.read', { sessionId });
+      const afterPolicy = await (client as TuiClient).request('status.get', { sessionId });
+      const afterPolicyRecord = await (client as TuiClient).request('session.read', { sessionId });
       assert.equal(afterPolicy.policy, 'auto');
-      assert.equal(afterPolicyRecord.header.projectRoot, beforePolicy.header.projectRoot);
-      assert.equal(afterPolicyRecord.header.projectRoot, projectDirectory);
+      assert.equal(afterPolicyRecord.header!.projectRoot, beforePolicy.header!.projectRoot);
+      assert.equal(afterPolicyRecord.header!.projectRoot, projectDirectory);
       assert.match(terminal.frame(), /keep this draft/);
 
       terminal.stdin.write('\u0015');
@@ -154,7 +158,7 @@ test('TUI control panels select a model, mode, and policy without running a requ
       terminal.stdin.write('\u001b');
       await until(terminal, (frame) => !frame.includes('提示模板'));
       assert.equal(requests.filter((request) => request.method === 'run.start').length, 0);
-      const transcript = await client.request('session.read', { sessionId });
+      const transcript = await (client as TuiClient).request('session.read', { sessionId });
       assert.equal(transcript.events.some((event) => event.kind === 'user'), false);
     } finally {
       instance.unmount();
@@ -169,14 +173,14 @@ test('TUI requires separate confirmation for full-access and unrestricted networ
   const { App } = await import('../dist/tui/app.js');
   const terminal = fakeTerminal();
   const instance = render(createElement(App, {
-    client,
+    client: client as TuiClient,
     sessionId,
     info: { boundary: projectDirectory },
-    stdout: terminal.stdout,
+    stdout: terminal.stdout as unknown as NodeJS.WriteStream,
     interactive: true,
   }), {
-    stdin: terminal.stdin,
-    stdout: terminal.stdout,
+    stdin: terminal.stdin as unknown as NodeJS.ReadStream,
+    stdout: terminal.stdout as unknown as NodeJS.WriteStream,
     exitOnCtrlC: false,
     patchConsole: false,
     interactive: true,
@@ -190,11 +194,11 @@ test('TUI requires separate confirmation for full-access and unrestricted networ
     assert.equal(requests.some((request) => request.method === 'permission.set'), false);
     terminal.stdin.write('\r');
     await until(terminal, () => requests.some((request) => request.method === 'permission.set'));
-    const fullAccessRequest = requests.find((request) => request.method === 'permission.set');
-    assert.equal(fullAccessRequest.params.confirmFullAccess, true);
-    assert.equal(fullAccessRequest.params.permissionProfile, 'full-access');
+    const fullAccessRequest = requests.find((request) => request.method === 'permission.set')!;
+    assert.equal((fullAccessRequest.params as Record<string, unknown>).confirmFullAccess, true);
+    assert.equal((fullAccessRequest.params as Record<string, unknown>).permissionProfile, 'full-access');
     await until(terminal, (frame) => frame.includes('权限已更新：full-access'));
-    assert.equal((await client.request('status.get', { sessionId })).permission.profile, 'full-access');
+    assert.equal((await (client as TuiClient).request('status.get', { sessionId })).permission!.profile, 'full-access');
 
     const beforeNetwork = requests.filter((request) => request.method === 'permission.set').length;
     terminal.stdin.write('/permission network unrestricted');
@@ -204,13 +208,13 @@ test('TUI requires separate confirmation for full-access and unrestricted networ
     assert.equal(requests.filter((request) => request.method === 'permission.set').length, beforeNetwork);
     terminal.stdin.write('\r');
     await until(terminal, () => requests.filter((request) => request.method === 'permission.set').length === beforeNetwork + 1);
-    const networkRequest = requests.filter((request) => request.method === 'permission.set').at(-1);
-    assert.equal(networkRequest.params.confirmNetwork, true);
-    assert.equal(networkRequest.params.permissionNetwork, 'unrestricted');
+    const networkRequest = requests.filter((request) => request.method === 'permission.set').at(-1)!;
+    assert.equal((networkRequest.params as Record<string, unknown>).confirmNetwork, true);
+    assert.equal((networkRequest.params as Record<string, unknown>).permissionNetwork, 'unrestricted');
     await until(terminal, (frame) => frame.includes('权限已更新：full-access · 网络 unrestricted'));
-    assert.equal((await client.request('status.get', { sessionId })).permission.network, 'unrestricted');
+    assert.equal((await (client as TuiClient).request('status.get', { sessionId })).permission!.network, 'unrestricted');
     assert.equal(requests.filter((request) => request.method === 'run.start').length, 0);
   } finally {
     instance.unmount();
   }
-}, { interactive: true }));
+}, { interactive: true, permissionControl: true }));

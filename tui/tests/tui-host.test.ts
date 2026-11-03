@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
-import { withTuiHost } from '../../core/tests/helpers/tui-host.ts';
+import { withTuiHost } from './helpers/tui-host.ts';
 
 test('the TUI host helper runs a real Chat Completions HTTP round and records its files and frames', async () => {
   await withTuiHost(async ({ client, config, directory, sessionDirectory, sessionId, requests, notifications, providerRequests }) => {
