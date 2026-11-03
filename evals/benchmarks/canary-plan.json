@@ -1,0 +1,30 @@
+{
+  "schema_version": "ligule.agent-benchmark-plan.v1",
+  "dataset": {
+    "name": "ligule-canary",
+    "version": "1.0",
+    "source": "local fixture"
+  },
+  "tasks": [
+    { "id": "canary", "category": "pipeline-canary", "covers": "file tool, Session execution, and independent verifier" }
+  ],
+  "attempts_per_task": 1,
+  "concurrency": 1,
+  "timeout_multipliers": {
+    "task": 1.0,
+    "agent": 1.0,
+    "agent_setup": 4.0,
+    "environment_build": 2.0
+  },
+  "model": {
+    "api": "chat-completions",
+    "model_calls": 8,
+    "timeout_ms": 600000,
+    "request_timeout_ms": 120000
+  },
+  "verifier": {
+    "reward_key": "reward",
+    "pass_threshold": 1.0,
+    "authority": "local Harbor task verifier"
+  }
+}
