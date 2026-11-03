@@ -8,6 +8,10 @@ import { execTool } from '../dist/capability/exec.js';
 import { resolveShell } from '../dist/capability/shell.js';
 import { bindScript, commandUsesNodeRuntime, readBoundScript, requiresManualApprovalForProjectCommand, requiresTrustedWorkspaceCommand } from '../dist/capability/script-binding.js';
 import { boundaryOf, workingDirectoryOf } from '../dist/capability/limits.js';
+import type { ScriptBinding } from '../dist/capability/script-binding.js';
+import type { PermissionContext } from '../dist/kernel/permission.js';
+import type { LoggerBackend } from '../dist/kernel/log.js';
+import type { PolicyAsk, PolicyMode, PolicyQuestion } from '../dist/kernel/policy.js';
 import { setTrusted } from '../dist/kernel/workspace-trust.js';
 
 const permission = createPermissionContext('full-access', 'unrestricted', {
@@ -23,7 +27,18 @@ test('Node and package-manager commands select the pinned sandbox runtime', asyn
   assert.equal(await commandUsesNodeRuntime('git status --short', shell), false);
 });
 
-function kernelFor(root, ask, permissionForCall = () => permission, workspaceRoot = root, log = { debug() {}, log() {} }, mode = 'ask') {
+function hasCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
+}
+
+function kernelFor(
+  root: string,
+  ask: PolicyAsk,
+  permissionForCall: () => PermissionContext = () => permission,
+  workspaceRoot: string = root,
+  log: LoggerBackend = { debug() {}, log() {} },
+  mode: PolicyMode = 'ask',
+) {
   const kernel = createKernel({
     config: createConfig({ user: { boundary: root, workspaceRoot } }),
     permissionForCall,
@@ -43,7 +58,7 @@ test('script approvals bind the canonical path, content digest, interpreter, wor
   await writeFile(join(root, 'payload.txt'), 'relative import survived');
   await writeFile(script, `import { readFileSync, writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(target)}, readFileSync(new URL('./payload.txt', import.meta.url), 'utf8'));\n`);
   const command = `node "${script.replaceAll('\\', '/')}"`;
-  let approval;
+  let approval: PolicyQuestion | undefined;
   const kernel = kernelFor(root, (question) => { approval = question; return true; });
   await kernel.call('exec', { command });
   const binding = approval?.scriptBinding;
@@ -71,7 +86,7 @@ test('full-access approval can bind a script outside the workspace while keeping
   const script = join(external, 'approved.js');
   await writeFile(script, `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(marker)}, 'ran');\n`);
   const command = `node "${script.replaceAll('\\', '/')}"`;
-  let binding;
+  let binding: ScriptBinding | undefined;
   const kernel = kernelFor(workspace, (question) => { binding = question.scriptBinding; return true; });
   await kernel.call('exec', { command });
   assert.ok(binding);
@@ -84,7 +99,7 @@ test('inline interpreter code is bound to its exact text and interpreter executa
   t.after(() => rm(root, { recursive: true, force: true }));
   await setTrusted(root, true);
   const command = 'node -e "console.log(42)"';
-  let approval;
+  let approval: PolicyQuestion | undefined;
   const kernel = kernelFor(root, (question) => { approval = question; return true; });
   const result = await kernel.call('exec', { command });
   const binding = approval?.scriptBinding;
@@ -92,7 +107,7 @@ test('inline interpreter code is bound to its exact text and interpreter executa
   assert.equal(binding.sourceKind, 'inline');
   assert.equal(binding.path, '[inline code]');
   assert.equal(binding.inlineSource, 'console.log(42)');
-  assert.match(result.text, /42/u);
+  assert.match((result as { text: string }).text, /42/u);
 });
 
 test('script content changes after approval are refused before the target starts', async (t) => {
@@ -171,7 +186,7 @@ test('replacing a script path symlink after approval is refused before either ta
   try {
     await symlink(first, alias, 'junction');
   } catch (error) {
-    if (error.code === 'EPERM' || error.code === 'EACCES') return t.skip('the platform does not permit creating a temporary directory link');
+    if (hasCode(error, 'EPERM') || hasCode(error, 'EACCES')) return t.skip('the platform does not permit creating a temporary directory link');
     throw error;
   }
   const command = `node "${join(alias, 'approved.js').replaceAll('\\', '/')}"`;
@@ -199,11 +214,11 @@ test('replacing the resolved script file with an outside link is refused before 
   await rename(script, join(boundary, 'original.js'));
   try { await symlink(outside, script, 'file'); }
   catch (error) {
-    if (error.code === 'EPERM' || error.code === 'EACCES') return t.skip('the platform does not permit creating a temporary file link');
+    if (hasCode(error, 'EPERM') || hasCode(error, 'EACCES')) return t.skip('the platform does not permit creating a temporary file link');
     throw error;
   }
   await assert.rejects(readBoundScript(boundary, canonical), (error) =>
-    error.code === 'exec_script_binding_changed' || error.code === 'exec_script_binding_unavailable');
+    hasCode(error, 'exec_script_binding_changed') || hasCode(error, 'exec_script_binding_unavailable'));
 });
 
 test('changing the workspace target while approval is pending refuses execution', async (t) => {
@@ -219,7 +234,7 @@ test('changing the workspace target while approval is pending refuses execution'
   await writeFile(join(second, 'approved.js'), `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(secondMarker)}, 'ran');\n`);
   try { await symlink(first, workspace, 'junction'); }
   catch (error) {
-    if (error.code === 'EPERM' || error.code === 'EACCES') return t.skip('the platform does not permit creating a temporary directory link');
+    if (hasCode(error, 'EPERM') || hasCode(error, 'EACCES')) return t.skip('the platform does not permit creating a temporary directory link');
     throw error;
   }
   await setTrusted(workspace, true);
@@ -229,18 +244,18 @@ test('changing the workspace target while approval is pending refuses execution'
   const workspaceRoot = workingDirectoryOf(config);
   assert.ok(await bindScript({ command, shell: resolveShell({}), boundary, workspaceRoot, cwd: workspaceRoot, permission }));
   let asked = false;
-  const denied = [];
-  const log = { debug() {}, log(_message, fields) { if (typeof fields?.reason === 'string') denied.push(fields.reason); } };
+  const denied: string[] = [];
+  const log: LoggerBackend = { debug() {}, log(_message, fields) { if (typeof fields?.reason === 'string') denied.push(fields.reason as string); } };
   const kernel = kernelFor(workspace, async () => {
     asked = true;
     await unlink(workspace);
     await symlink(second, workspace, 'junction');
     return true;
   }, () => permission, workspace, log);
-  let failure;
-  try { await kernel.call('exec', { command }); } catch (error) { failure = error; }
+  let failure: { code?: string } | undefined;
+  try { await kernel.call('exec', { command }); } catch (error) { failure = error as { code?: string }; }
   assert.equal(asked, true, `the call failed before approval with ${failure?.code ?? 'no error'}: ${denied.at(-1) ?? ''}`);
-  assert.ok(['exec_script_binding_changed', 'exec_workspace_untrusted'].includes(failure?.code), failure?.code);
+  assert.ok(['exec_script_binding_changed', 'exec_workspace_untrusted'].includes(failure?.code as string), failure?.code);
   assert.equal(asked, true);
   await assert.rejects(readFile(firstMarker), { code: 'ENOENT' });
   await assert.rejects(readFile(secondMarker), { code: 'ENOENT' });
@@ -266,7 +281,7 @@ test('read-only approval refuses file scripts without writing a snapshot into th
 test('simple interpreter version queries remain ordinary approval-gated commands', async (t) => {
   const root = await mkdtemp(join(tmpdir(), 'ligule-script-binding-version-'));
   t.after(() => rm(root, { recursive: true, force: true }));
-  let asked;
+  let asked: PolicyQuestion | undefined;
   const kernel = kernelFor(root, (question) => { asked = question; return false; });
   await assert.rejects(kernel.call('exec', { command: 'node --version' }), { code: 'ask_declined' });
   assert.equal(asked?.scriptBinding, undefined);
@@ -316,7 +331,7 @@ test('untrusted project code is rejected while ignored-script installs still req
   const untrusted = createPermissionContext('workspace-write', 'unrestricted', {
     filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
   });
-  const asked = [];
+  const asked: (string | undefined)[] = [];
   const kernel = kernelFor(root, (question) => { asked.push(question.command); return false; }, () => untrusted, root, undefined, 'auto');
 
   await assert.rejects(kernel.call('exec', { command: 'node -e "console.log(1)"' }), { code: 'exec_workspace_untrusted' });
@@ -357,7 +372,7 @@ test('trusted Git hook operations still need a per-call approval under automatic
   const trusted = createPermissionContext('workspace-write', 'unrestricted', {
     filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
   }, { workspaceTrusted: true });
-  const asked = [];
+  const asked: (string | undefined)[] = [];
   const kernel = kernelFor(root, (question) => { asked.push(question.command); return false; }, () => trusted, root, undefined, 'auto');
   await assert.rejects(kernel.call('exec', { command: 'git add file.txt' }), { code: 'ask_declined' });
   assert.deepEqual(asked, ['git add file.txt']);
@@ -369,7 +384,7 @@ test('revoking partial-sandbox confirmation while approval is pending prevents e
   await setTrusted(root, true);
   const target = join(root, 'marker');
   const capabilities = { filesystemRead: 'partial', filesystemWrite: 'partial', network: 'partial', process: 'full' };
-  const permissionWithConfirmation = (confirmed) => createPermissionContext('workspace-write', 'unrestricted', capabilities, {
+  const permissionWithConfirmation = (confirmed: boolean) => createPermissionContext('workspace-write', 'unrestricted', capabilities, {
     profiles: { readOnly: 'partial', workspaceWrite: 'partial' },
     partialWorkspaceWriteConfirmationRequired: true,
     partialWorkspaceWriteConfirmed: confirmed,
@@ -377,17 +392,17 @@ test('revoking partial-sandbox confirmation while approval is pending prevents e
   });
   let currentPermission = permissionWithConfirmation(true);
   let asked = false;
-  const logs = [];
+  const logs: (Readonly<Record<string, unknown>> | undefined)[] = [];
   const source = `require('fs').writeFileSync('${target.replaceAll('\\', '/').replaceAll("'", "\\'")}', 'ran');`;
   const kernel = kernelFor(root, async () => {
     asked = true;
     currentPermission = permissionWithConfirmation(false);
     return true;
-  }, () => currentPermission, root, { debug() {}, log(_message, fields) { logs.push(fields); } });
+  }, () => currentPermission, root, { debug() {}, log(_message: string, fields?: Readonly<Record<string, unknown>>) { logs.push(fields); } });
 
-  let failure;
+  let failure: { code?: string; detail?: unknown } | undefined;
   try { await kernel.call('exec', { command: `node -e "${source}"` }); }
-  catch (error) { failure = error; }
+  catch (error) { failure = error as { code?: string; detail?: unknown }; }
   assert.equal(failure?.code, 'exec_script_binding_changed', JSON.stringify({ failureCode: failure?.code, detail: failure?.detail, logs }));
   assert.equal(asked, true);
   await assert.rejects(readFile(target), { code: 'ENOENT' });
@@ -407,9 +422,9 @@ test('a workspace cwd escape keeps its Kernel error and records failure before a
   kernel.register(execTool);
   await assert.rejects(kernel.call('exec', { command: 'node --version', cwd: '..' }), { code: 'path_escapes_boundary' });
   assert.equal(asked, false);
-  const event = (await session.read()).find((item) => item.kind === 'tool');
-  assert.equal(event.result.kind, 'failure');
-  assert.equal(event.result.code, 'path_escapes_boundary');
+  const event = (await session.read()).find((item) => item.kind === 'tool')!;
+  assert.equal((event.result as { kind?: string }).kind, 'failure');
+  assert.equal((event.result as { code?: string }).code, 'path_escapes_boundary');
 });
 
 test('shell scripts that stream their source are refused before the target starts', async (t) => {

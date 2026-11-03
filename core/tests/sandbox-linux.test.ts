@@ -1,23 +1,29 @@
 import test, { after } from 'node:test';
+import type { TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, lstatSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
+import type { AddressInfo } from 'node:net';
 import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildLinuxSandbox } from '../dist/capability/sandbox-linux.js';
+import type { LinuxSandboxRequest, LinuxSandboxResult } from '../dist/capability/sandbox-linux.js';
+
+type SandboxFixture = { root: string; workspace: string; privateTempDir: string };
+type AvailableSandbox = Extract<LinuxSandboxResult, { available: true }>;
 
 const linux = process.platform === 'linux';
 const testDirectory = fileURLToPath(new URL('../../testplace/tmp/', import.meta.url));
-const temporaryDirectories = new Set();
+const temporaryDirectories = new Set<string>();
 
 after(() => {
   for (const directory of temporaryDirectories) rmSync(directory, { recursive: true, force: true });
 });
 
-function fixture(t) {
+function fixture(t: TestContext): SandboxFixture | undefined {
   if (!linux) return undefined;
   mkdirSync(testDirectory, { recursive: true });
   const root = mkdtempSync(join(testDirectory, 'sandbox-linux-'));
@@ -36,7 +42,7 @@ function fixture(t) {
   return { root, workspace, privateTempDir };
 }
 
-function request(paths, overrides = {}) {
+function request(paths: SandboxFixture, overrides: Partial<LinuxSandboxRequest> = {}): LinuxSandboxRequest {
   return {
     profile: 'workspace-write',
     network: 'disabled',
@@ -50,9 +56,10 @@ function request(paths, overrides = {}) {
   };
 }
 
-function run(result) {
+function run(result: LinuxSandboxResult) {
   assert.equal(result.available, true, result.available ? '' : result.reason);
-  const child = spawnSync(result.executable, result.argv, {
+  const sandbox = result as AvailableSandbox;
+  const child = spawnSync(sandbox.executable, sandbox.argv, {
     encoding: 'utf8',
     timeout: 5000,
     maxBuffer: 64 * 1024,
@@ -62,8 +69,12 @@ function run(result) {
   return child;
 }
 
+function hasCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
+}
+
 test('the actual WSL bubblewrap command limits writable paths and clears inherited credentials', { skip: !linux }, async (t) => {
-  const paths = fixture(t);
+  const paths = fixture(t)!;
   const result = await buildLinuxSandbox(request(paths, {
     argv: ['-c', 'touch /run/ligule/workspace/workspace-file; touch /run/ligule/tmp/temp-file; test -z "$(ls -A /home)"; test -z "$(ls -A /root)"; test -z "$(ls -A /mnt)"; test -z "$(ls -A /dev/shm)"; test ! -e /mnt/c/Windows; if touch /run/other 2>/dev/null; then exit 45; fi; if touch /etc/ligule-probe 2>/dev/null; then exit 46; fi; if env | cut -d= -f1 | grep -Eq "(_KEY|_TOKEN|_SECRET|CREDENTIAL)"; then exit 47; fi; echo isolated'],
   }));
@@ -82,7 +93,7 @@ test('the actual WSL bubblewrap command limits writable paths and clears inherit
 });
 
 test('read-only profile blocks workspace writes but keeps its private temporary directory writable', { skip: !linux }, async (t) => {
-  const paths = fixture(t);
+  const paths = fixture(t)!;
   const result = await buildLinuxSandbox(request(paths, {
     profile: 'read-only',
     argv: ['-c', 'if touch /run/ligule/workspace/denied 2>/dev/null; then exit 31; fi; touch /run/ligule/tmp/allowed; echo read-only'],
@@ -96,7 +107,7 @@ test('read-only profile blocks workspace writes but keeps its private temporary 
 });
 
 test('the selected Node runtime stays usable through a read-only mount while Home remains hidden', { skip: !linux }, async (t) => {
-  const paths = fixture(t);
+  const paths = fixture(t)!;
   const nodeMajor = Number(process.versions.node.split('.')[0]);
   assert.ok(Number.isInteger(nodeMajor) && nodeMajor >= 24, 'the Linux sandbox acceptance requires Node 24 or newer');
   const nodeExecutable = realpathSync(process.execPath);
@@ -147,7 +158,7 @@ test('the selected Node runtime stays usable through a read-only mount while Hom
 });
 
 test('workspace links cannot use hidden host paths and existing hard links fail closed', { skip: !linux }, async (t) => {
-  const paths = fixture(t);
+  const paths = fixture(t)!;
   const outside = join(paths.root, 'outside-secret');
   writeFileSync(outside, 'must stay outside the sandbox workspace');
   symlinkSync(outside, join(paths.workspace, 'outside-link'));
@@ -163,17 +174,18 @@ test('workspace links cannot use hidden host paths and existing hard links fail 
   try {
     linkSync(outside, hardlink);
   } catch (error) {
-    return t.skip(`this filesystem cannot create the hard-link fixture: ${error.code ?? error.message}`);
+    const failure = error as { code?: string; message: string };
+    return t.skip(`this filesystem cannot create the hard-link fixture: ${failure.code ?? failure.message}`);
   }
   assert.equal(lstatSync(outside).nlink, 2, 'the fixture must be a real hard link before checking the sandbox');
-  const refused = await buildLinuxSandbox(request(paths));
+  const refused = await buildLinuxSandbox(request(paths)) as Extract<LinuxSandboxResult, { available: false }>;
   assert.equal(refused.available, false);
   assert.equal(refused.code, 'sandbox_unavailable');
   assert.match(refused.reason, /multiply-linked file/);
 });
 
 test('the PID namespace hides host processes while allowing child processes', { skip: !linux }, async (t) => {
-  const paths = fixture(t);
+  const paths = fixture(t)!;
   const hostProcess = spawn('/bin/sleep', ['30'], { stdio: 'ignore' });
   t.after(() => hostProcess.kill('SIGKILL'));
   await once(hostProcess, 'spawn');
@@ -187,12 +199,12 @@ test('the PID namespace hides host processes while allowing child processes', { 
 });
 
 test('network stays isolated by default and is shared only when explicitly requested', { skip: !linux }, async (t) => {
-  const paths = fixture(t);
+  const paths = fixture(t)!;
   const server = createServer((socket) => socket.end('connected'));
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   t.after(() => server.close());
-  const address = server.address();
+  const address = server.address() as AddressInfo;
   assert.notEqual(address, null);
   const script = 'import socket,sys\ns=socket.socket()\ns.settimeout(0.7)\ntry:\n s.connect(("127.0.0.1",int(sys.argv[1])))\n print("connected")\nexcept OSError:\n print("blocked")\n';
 
@@ -214,12 +226,12 @@ test('network stays isolated by default and is shared only when explicitly reque
 });
 
 test('network isolation also applies to subprocesses started inside the sandbox', { skip: !linux }, async (t) => {
-  const paths = fixture(t);
+  const paths = fixture(t)!;
   const server = createServer((socket) => socket.end('connected'));
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   t.after(() => server.close());
-  const address = server.address();
+  const address = server.address() as AddressInfo;
   assert.notEqual(address, null);
   const childScript = [
     'import socket,sys',
@@ -249,17 +261,17 @@ test('network isolation also applies to subprocesses started inside the sandbox'
 });
 
 test('invalid workspace boundaries and unapproved environment variables are rejected', { skip: !linux }, async (t) => {
-  const paths = fixture(t);
+  const paths = fixture(t)!;
   await assert.rejects(
     () => buildLinuxSandbox(request(paths, { cwd: resolve(paths.workspace, '..') })),
-    (error) => error.code === 'sandbox_request_invalid',
+    (error) => hasCode(error, 'sandbox_request_invalid'),
   );
   await assert.rejects(
     () => buildLinuxSandbox(request(paths, { environment: { ANTHROPIC_API_KEY: 'must-not-enter' } })),
-    (error) => error.code === 'sandbox_request_invalid',
+    (error) => hasCode(error, 'sandbox_request_invalid'),
   );
   await assert.rejects(
     () => buildLinuxSandbox(request(paths, { privateTempDir: paths.workspace })),
-    (error) => error.code === 'sandbox_request_invalid',
+    (error) => hasCode(error, 'sandbox_request_invalid'),
   );
 });

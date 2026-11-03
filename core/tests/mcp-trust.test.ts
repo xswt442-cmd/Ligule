@@ -6,30 +6,42 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { listMcpTrust, mcpServerTrust, setMcpServerTrust } from '../dist/host/mcp-trust.js';
 import { createHost } from '../dist/host/host.js';
+import type { HostProvider } from '../dist/host/provider.js';
 import { createConfig } from '../dist/kernel/config.js';
 import { MESSAGES_CAPABILITIES } from '../dist/index.js';
+
+type McpTrustView = {
+  version: string;
+  servers: { identityDigest: string; trust: { scope: string; trusted: boolean } | null }[];
+};
+
+type McpToolsView = { tools: { name: string }[] };
 
 const minimalServer = fileURLToPath(new URL('../../tests/fixtures/mcp-minimal.mjs', import.meta.url));
 const cancellableServer = fileURLToPath(new URL('./fixtures/mcp-cancellable.mjs', import.meta.url));
 
-async function waitForProcessExit(pid) {
+async function waitForProcessExit(pid: number) {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     try { process.kill(pid, 0); }
-    catch (error) { if (error.code === 'ESRCH') return; throw error; }
+    catch (error) { if (error instanceof Error && (error as { code?: string }).code === 'ESRCH') return; throw error; }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error('mcp_fixture_process_still_running');
 }
 
-async function waitForFile(path) {
+async function waitForFile(path: string) {
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     try { await access(path); return; }
-    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    catch (error) { if (!(error instanceof Error && (error as { code?: string }).code === 'ENOENT')) throw error; }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error(`mcp_fixture_marker_missing: ${path}`);
+}
+
+function hasCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
 }
 
 test('user trust applies across projects, project denial masks it, and a changed server identity is untrusted', async () => {
@@ -77,11 +89,11 @@ test('stale trust writes and malformed trust files fail closed', async () => {
       () => setMcpServerTrust(storePath, {
         scope: 'project', projectRoot, server: 'playwright', identityDigest: 'b'.repeat(64), trusted: true,
       }, first.version),
-      (error) => error.code === 'mcp_trust_version_stale',
+      (error) => hasCode(error, 'mcp_trust_version_stale'),
     );
 
     await writeFile(storePath, '{ invalid json');
-    await assert.rejects(() => listMcpTrust(storePath), (error) => error.code === 'mcp_trust_store_invalid');
+    await assert.rejects(() => listMcpTrust(storePath), (error) => hasCode(error, 'mcp_trust_store_invalid'));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -100,7 +112,7 @@ test('the Host trusts only the current server identity and starts it only after 
   const previousHome = process.env.LIGULE_HOME;
   process.env.LIGULE_HOME = home;
   const serverSettings = { command: process.execPath, args: [minimalServer, schemaPath, marker] };
-  const writeProjectConfig = async (markerPath) => writeFile(projectConfig, [
+  const writeProjectConfig = async (markerPath: string) => writeFile(projectConfig, [
     '[mcp.servers.probe]',
     'command = ' + JSON.stringify(process.execPath),
     'args = [' + [minimalServer, schemaPath, markerPath].map((value) => JSON.stringify(value)).join(', ') + ']',
@@ -111,7 +123,7 @@ test('the Host trusts only the current server identity and starts it only after 
     capabilities: MESSAGES_CAPABILITIES,
     model: 'trust-test',
     async *stream() { yield { type: 'text', text: 'ready' }; },
-  };
+  } as unknown as HostProvider;
   const config = createConfig({ user: {
     boundary: projectRoot, workspaceRoot: projectRoot,
     mcp: { servers: { probe: serverSettings } },
@@ -126,14 +138,14 @@ test('the Host trusts only the current server identity and starts it only after 
     try {
       await assert.rejects(
         () => untrustedHost.handle({ method: 'mcp.trust.list', params: {} }, connection),
-        (error) => error.code === 'mcp_trust_trusted_ui_required',
+        (error) => hasCode(error, 'mcp_trust_trusted_ui_required'),
       );
       await assert.rejects(
         () => untrustedHost.handle({ method: 'mcp.trust.set', params: {
           server: 'probe', identityDigest: 'a'.repeat(64), scope: 'project', trusted: true,
           confirmTrust: true, confirmExternalAccess: true, version: 'empty',
         } }, connection),
-        (error) => error.code === 'mcp_trust_trusted_ui_required',
+        (error) => hasCode(error, 'mcp_trust_trusted_ui_required'),
       );
     } finally {
       await untrustedHost.release();
@@ -141,26 +153,26 @@ test('the Host trusts only the current server identity and starts it only after 
 
     const host = createHost(hostOptions);
     try {
-      const listed = await host.handle({ method: 'mcp.trust.list', params: {} }, connection);
+      const listed = await host.handle({ method: 'mcp.trust.list', params: {} }, connection) as McpTrustView;
       assert.equal(listed.servers[0].trust, null);
       await assert.rejects(
         () => host.handle({ method: 'mcp.trust.tools', params: { server: 'probe' } }, connection),
-        (error) => error.code === 'mcp_server_untrusted',
+        (error) => hasCode(error, 'mcp_server_untrusted'),
       );
-      await assert.rejects(() => access(marker), (error) => error.code === 'ENOENT');
+      await assert.rejects(() => access(marker), (error) => hasCode(error, 'ENOENT'));
 
       await assert.rejects(() => host.handle({ method: 'mcp.trust.set', params: {
         server: 'probe', identityDigest: listed.servers[0].identityDigest,
         scope: 'project', trusted: true, version: listed.version,
-      } }, connection), (error) => error.code === 'mcp_trust_confirmation_required');
-      await assert.rejects(() => access(marker), (error) => error.code === 'ENOENT');
+      } }, connection), (error) => hasCode(error, 'mcp_trust_confirmation_required'));
+      await assert.rejects(() => access(marker), (error) => hasCode(error, 'ENOENT'));
 
       const trusted = await host.handle({ method: 'mcp.trust.set', params: {
         server: 'probe', identityDigest: listed.servers[0].identityDigest,
         scope: 'project', trusted: true, confirmTrust: true, confirmExternalAccess: true, version: listed.version,
-      } }, connection);
+      } }, connection) as { trusted: boolean };
       assert.equal(trusted.trusted, true);
-      const tools = await host.handle({ method: 'mcp.trust.tools', params: { server: 'probe' } }, connection);
+      const tools = await host.handle({ method: 'mcp.trust.tools', params: { server: 'probe' } }, connection) as McpToolsView;
       assert.deepEqual(tools.tools.map((tool) => tool.name), ['echo']);
       await waitForProcessExit(Number(await readFile(marker, 'utf8')));
     } finally {
@@ -169,26 +181,26 @@ test('the Host trusts only the current server identity and starts it only after 
 
     const restartedHost = createHost(hostOptions);
     try {
-      const { sessionId } = await restartedHost.handle({ method: 'session.create', params: { projectRoot } }, connection);
-      const restarted = await restartedHost.handle({ method: 'mcp.trust.list', params: { projectRoot, sessionId } }, connection);
+      const { sessionId } = await restartedHost.handle({ method: 'session.create', params: { projectRoot } }, connection) as { sessionId: string };
+      const restarted = await restartedHost.handle({ method: 'mcp.trust.list', params: { projectRoot, sessionId } }, connection) as McpTrustView;
       assert.equal(restarted.servers[0].trust?.scope, 'project');
       assert.equal(restarted.servers[0].trust?.trusted, true);
-      const restartedTools = await restartedHost.handle({ method: 'mcp.trust.tools', params: { projectRoot, sessionId, server: 'probe' } }, connection);
+      const restartedTools = await restartedHost.handle({ method: 'mcp.trust.tools', params: { projectRoot, sessionId, server: 'probe' } }, connection) as McpToolsView;
       assert.deepEqual(restartedTools.tools.map((tool) => tool.name), ['echo']);
       await waitForProcessExit(Number(await readFile(marker, 'utf8')));
 
-      const current = await restartedHost.handle({ method: 'mcp.trust.list', params: { projectRoot, sessionId } }, connection);
-      assert.equal(current.servers[0].trust.scope, 'project');
-      assert.equal(current.servers[0].trust.trusted, true);
+      const current = await restartedHost.handle({ method: 'mcp.trust.list', params: { projectRoot, sessionId } }, connection) as McpTrustView;
+      assert.equal(current.servers[0].trust!.scope, 'project');
+      assert.equal(current.servers[0].trust!.trusted, true);
       await writeProjectConfig(join(root, 'changed.pid'));
-      const changed = await restartedHost.handle({ method: 'mcp.trust.list', params: { projectRoot, sessionId } }, connection);
+      const changed = await restartedHost.handle({ method: 'mcp.trust.list', params: { projectRoot, sessionId } }, connection) as McpTrustView;
       assert.notEqual(changed.servers[0].identityDigest, current.servers[0].identityDigest);
       assert.equal(changed.servers[0].trust, null);
       await assert.rejects(
         () => restartedHost.handle({ method: 'mcp.trust.tools', params: { projectRoot, server: 'probe' } }, connection),
-      (error) => error.code === 'mcp_server_untrusted',
+      (error) => hasCode(error, 'mcp_server_untrusted'),
     );
-      await assert.rejects(() => access(join(root, 'changed.pid')), (error) => error.code === 'ENOENT');
+      await assert.rejects(() => access(join(root, 'changed.pid')), (error) => hasCode(error, 'ENOENT'));
     } finally {
       await restartedHost.release();
     }
@@ -225,7 +237,7 @@ test('mcp.trust.tools times out a stalled tools/list request and closes its temp
     capabilities: MESSAGES_CAPABILITIES,
     model: 'trust-timeout-test',
     async *stream() { yield { type: 'text', text: 'ready' }; },
-  };
+  } as unknown as HostProvider;
   const config = createConfig({ user: {
     boundary: projectRoot,
     workspaceRoot: projectRoot,
@@ -239,7 +251,7 @@ test('mcp.trust.tools times out a stalled tools/list request and closes its temp
   });
   const connection = { notify() {}, async request() { return { decision: 'deny' }; } };
   try {
-    const listed = await host.handle({ method: 'mcp.trust.list', params: {} }, connection);
+    const listed = await host.handle({ method: 'mcp.trust.list', params: {} }, connection) as McpTrustView;
     await host.handle({ method: 'mcp.trust.set', params: {
       server: 'probe',
       identityDigest: listed.servers[0].identityDigest,

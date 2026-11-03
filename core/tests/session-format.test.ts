@@ -6,9 +6,10 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createSessionLog } from '../dist/index.js';
 import { parseSessionEvents } from '../dist/session/format.js';
+import type { SessionEvent } from '../dist/session/format.js';
 import { estimateRequest, usageEvent } from '../dist/session/usage.js';
 
-async function withDirectory(run) {
+async function withDirectory<TResult>(run: (directory: string) => TResult | Promise<TResult>): Promise<TResult> {
   const root = await mkdtemp(join(process.cwd(), 'testplace', 'format-'));
   try {
     return await run(root);
@@ -17,7 +18,7 @@ async function withDirectory(run) {
   }
 }
 
-const tool = (seq, content) => JSON.stringify({ seq, kind: 'tool', tool: 'read', args: {}, result: { content } });
+const tool = (seq: number, content: string) => JSON.stringify({ seq, kind: 'tool', tool: 'read', args: {}, result: { content } });
 
 test('a new record starts with a line that names the format, the project and the mode it opened under', async () => {
   await withDirectory(async (directory) => {
@@ -29,7 +30,7 @@ test('a new record starts with a line that names the format, the project and the
     const first = await session.append({ kind: 'user', text: 'go' });
     assert.equal(first.seq, 0, '首行不占事件的序号');
 
-    const lines = (await readFile(session.path, 'utf8')).split('\n').filter((line) => line !== '').map(JSON.parse);
+    const lines = (await readFile(session.path, 'utf8')).split('\n').filter((line) => line !== '').map((line) => JSON.parse(line) as Record<string, unknown>);
     assert.deepEqual(lines[0], {
       kind: 'session',
       formatVersion: 2,
@@ -48,15 +49,15 @@ test('session policy events must be ignorable and contain a valid restore snapsh
   assert.throws(() => parseSessionEvents([
     header,
     { seq: 0, kind: 'sessionPolicy', override: null, consecutive: 0, total: 0, forcedToAsk: false },
-  ]), { code: 'session_policy_ignorable_required' });
+  ] as unknown as SessionEvent[]), { code: 'session_policy_ignorable_required' });
   assert.throws(() => parseSessionEvents([
     header,
     { seq: 0, kind: 'sessionPolicy', ignorable: true, override: 'never', consecutive: 3, total: 2, forcedToAsk: true },
-  ]), { code: 'session_policy_event_invalid' });
+  ] as unknown as SessionEvent[]), { code: 'session_policy_event_invalid' });
   const none = { seq: 0, kind: 'sessionPolicy', ignorable: true, override: 'none', consecutive: 0, total: 0, forcedToAsk: false };
   const legacyNever = { seq: 0, kind: 'sessionPolicy', ignorable: true, override: 'never', consecutive: 3, total: 3, forcedToAsk: true };
-  assert.equal(parseSessionEvents([header, none]).events[0].override, 'none');
-  assert.equal(parseSessionEvents([header, legacyNever]).events[0].override, 'never', 'stored legacy never keeps its old identity');
+  assert.equal(parseSessionEvents([header, none] as unknown as SessionEvent[]).events[0].override, 'none');
+  assert.equal(parseSessionEvents([header, legacyNever] as unknown as SessionEvent[]).events[0].override, 'never', 'stored legacy never keeps its old identity');
 });
 
 test('session MCP trust events are ignorable and validate the server identity', () => {
@@ -65,14 +66,14 @@ test('session MCP trust events are ignorable and validate the server identity', 
     seq: 0, kind: 'sessionMcpTrust', ignorable: true, source: 'trusted-ui', server: 'playwright', identityDigest: 'a'.repeat(64), trusted: true,
     updatedAt: new Date().toISOString(),
   };
-  assert.equal(parseSessionEvents([header, trust]).events[0].kind, 'sessionMcpTrust');
-  assert.throws(() => parseSessionEvents([header, { ...trust, identityDigest: 'invalid' }]), { code: 'session_mcp_trust_event_invalid' });
+  assert.equal(parseSessionEvents([header, trust] as unknown as SessionEvent[]).events[0].kind, 'sessionMcpTrust');
+  assert.throws(() => parseSessionEvents([header, { ...trust, identityDigest: 'invalid' }] as unknown as SessionEvent[]), { code: 'session_mcp_trust_event_invalid' });
 });
 
 test('compaction events are ignorable and carry the block identity, range and reason', () => {
   const header = { kind: 'session', formatVersion: 2, sessionId: 'compaction', projectRoot: '' };
   const written = { seq: 0, kind: 'compaction', ignorable: true, reason: 'auto', blockId: 1, fromSeq: 0, toSeq: 8, tokensBefore: 3000, tokensAfter: 900 };
-  assert.equal(parseSessionEvents([header, written]).events[0].kind, 'compaction');
+  assert.equal(parseSessionEvents([header, written] as unknown as SessionEvent[]).events[0].kind, 'compaction');
   for (const broken of [
     { ...written, ignorable: false },
     { ...written, reason: 'spontaneous' },
@@ -80,18 +81,18 @@ test('compaction events are ignorable and carry the block identity, range and re
     { ...written, toSeq: -1 },
     { ...written, tokensBefore: 'many' },
   ]) {
-    assert.throws(() => parseSessionEvents([header, broken]), { code: 'session_compaction_event_invalid' }, JSON.stringify(broken));
+    assert.throws(() => parseSessionEvents([header, broken] as unknown as SessionEvent[]), { code: 'session_compaction_event_invalid' }, JSON.stringify(broken));
   }
 });
 
 test('session approval memory events are ignorable and validate the saved rule', () => {
   const header = { kind: 'session', formatVersion: 2, sessionId: 'policy-rule', projectRoot: '' };
   const saved = { seq: 0, kind: 'sessionPolicyRule', ignorable: true, updatedAt: new Date().toISOString(), rule: { tool: 'mcp:playwright/browser_click', decision: 'allow' } };
-  assert.equal(parseSessionEvents([header, saved]).events[0].kind, 'sessionPolicyRule');
+  assert.equal(parseSessionEvents([header, saved] as unknown as SessionEvent[]).events[0].kind, 'sessionPolicyRule');
   const fileRule = { ...saved, rule: { tool: 'create', decision: 'allow', target: 'file', path: join(process.cwd(), 'testplace', 'app.js') } };
-  assert.equal(parseSessionEvents([header, fileRule]).events[0].kind, 'sessionPolicyRule');
-  assert.throws(() => parseSessionEvents([header, { ...saved, rule: { tool: 'create', decision: 'allow', target: 'file', path: 'app.js' } }]), { code: 'session_policy_rule_event_invalid' });
-  assert.throws(() => parseSessionEvents([header, { ...saved, rule: { tool: '', decision: 'allow' } }]), { code: 'session_policy_rule_event_invalid' });
+  assert.equal(parseSessionEvents([header, fileRule] as unknown as SessionEvent[]).events[0].kind, 'sessionPolicyRule');
+  assert.throws(() => parseSessionEvents([header, { ...saved, rule: { tool: 'create', decision: 'allow', target: 'file', path: 'app.js' } }] as unknown as SessionEvent[]), { code: 'session_policy_rule_event_invalid' });
+  assert.throws(() => parseSessionEvents([header, { ...saved, rule: { tool: '', decision: 'allow' } }] as unknown as SessionEvent[]), { code: 'session_policy_rule_event_invalid' });
 });
 
 // 开局还没选过模式时那一格就是不写，而不是写一个空名字或写一份假的默认。
@@ -99,7 +100,7 @@ test('a record that never picked a mode says so by leaving the field out', async
   await withDirectory(async (directory) => {
     const session = createSessionLog({ directory, id: 'run-2', meta: { projectRoot: '/repo' } });
     await session.append({ kind: 'user', text: 'go' });
-    assert.equal('mode' in await session.header(), false);
+    assert.equal('mode' in (await session.header())!, false);
   });
 });
 
@@ -109,7 +110,7 @@ test('a record read before its first write still gets its first line', async () 
     const session = createSessionLog({ directory, id: 'read-first', meta: { projectRoot: '/repo' } });
     assert.deepEqual(await session.read(), [], '读一份还不存在的记录不是错误');
     await session.append({ kind: 'user', text: 'go' });
-    const lines = (await readFile(session.path, 'utf8')).trim().split('\n').map(JSON.parse);
+    const lines = (await readFile(session.path, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
     assert.equal(lines[0].kind, 'session');
     assert.equal(lines[1].seq, 0, '首行不占事件的序号');
   });
@@ -137,8 +138,9 @@ test('a record from a newer format is refused instead of half read', async () =>
     const path = join(directory, 'future.jsonl');
     await writeFile(path, `${JSON.stringify({ kind: 'session', formatVersion: 3, sessionId: 'future', projectRoot: '/repo', createdAt: 'x' })}\n${tool(0, 'one')}\n`);
     await assert.rejects(() => createSessionLog({ directory, id: 'future' }).read(), (error) => {
-      assert.equal(error.code, 'session_version_unsupported');
-      assert.match(error.detail, /record is version 3/);
+      const failure = error as { code?: string; detail: string };
+      assert.equal(failure.code, 'session_version_unsupported');
+      assert.match(failure.detail, /record is version 3/);
       return true;
     });
   });
@@ -149,8 +151,9 @@ test('an event kind this build does not know is refused unless the record says i
     const path = join(directory, 'kind.jsonl');
     await writeFile(path, `${tool(0, 'one')}\n${JSON.stringify({ seq: 1, kind: 'plan/step', text: 'x' })}\n`);
     await assert.rejects(() => createSessionLog({ directory, id: 'kind' }).read(), (error) => {
-      assert.equal(error.code, 'session_event_unsupported');
-      assert.equal(error.detail, 'plan/step');
+      const failure = error as { code?: string; detail: string };
+      assert.equal(failure.code, 'session_event_unsupported');
+      assert.equal(failure.detail, 'plan/step');
       return true;
     });
 
@@ -172,8 +175,9 @@ test('session Permission events require format 2 and remain in the canonical rec
 
     await writeFile(path, `${JSON.stringify({ kind: 'session', formatVersion: 1, sessionId: 'permission', projectRoot: '/repo', createdAt: '2026-01-01T00:00:00.000Z' })}\n${JSON.stringify({ seq: 0, kind: 'sessionPermission', profile: 'full-access', network: 'unrestricted' })}\n`);
     await assert.rejects(() => createSessionLog({ directory, id: 'permission' }).read(), (error) => {
-      assert.equal(error.code, 'session_event_version_unsupported');
-      assert.match(error.detail, /format version 2/);
+      const failure = error as { code?: string; detail: string };
+      assert.equal(failure.code, 'session_event_version_unsupported');
+      assert.match(failure.detail, /format version 2/);
       return true;
     });
   });
@@ -186,7 +190,8 @@ test('a second header line is a refusal, not a second session', async () => {
     const header = JSON.stringify({ kind: 'session', formatVersion: 1, sessionId: 'spliced', projectRoot: '/repo', createdAt: '2026-01-01T00:00:00.000Z' });
     await writeFile(path, `${header}\n${tool(0, 'one')}\n${header}\n`);
     await assert.rejects(() => createSessionLog({ directory, id: 'spliced' }).read(), (error) => {
-      assert.equal(error.code, 'session_header_position');
+      const failure = error as { code?: string };
+      assert.equal(failure.code, 'session_header_position');
       return true;
     });
   });
@@ -211,7 +216,7 @@ test('the usage event this build writes comes back out of a record', async () =>
         hitInputTokens: 20, missInputTokens: 30, creationInputTokens: null, uncachedInputTokens: null,
         providerInputIncludesCache: true, consistent: null },
     }, 'nullable cache-aware records survive while old usage rows remain readable');
-    assert.deepEqual((await session.modelView()).map((entry) => entry.role), ['user'], '用量那一格不进投影');
+    assert.deepEqual((await session.modelView() as { role?: string }[]).map((entry) => entry.role), ['user'], '用量那一格不进投影');
   });
 });
 
@@ -231,5 +236,5 @@ test('a usage event keeps unknown totals null instead of coercing null or absenc
     },
   });
   assert.equal(usageEvent(request, [{ type: 'usage', input: null, output: null }]), null);
-  assert.equal(usageEvent(request, [{ type: 'usage', input: 0, output: 0 }]).input, 0, 'an explicitly reported zero remains distinct from missing usage');
+  assert.equal(usageEvent(request, [{ type: 'usage', input: 0, output: 0 }])!.input, 0, 'an explicitly reported zero remains distinct from missing usage');
 });

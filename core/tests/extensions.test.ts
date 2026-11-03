@@ -9,6 +9,15 @@ import { fileURLToPath } from 'node:url';
 import {
   createConfig, createKernel, createPermissionContext, extensionSources, loadAssembly, loadExtensions, minimalPlugin,
 } from '../dist/index.js';
+import type { ToolDefinition } from '../dist/kernel/kernel.js';
+import type { Connection } from '../dist/host/connection.js';
+import type { Host } from '../dist/host/host.js';
+import type { HostProvider } from '../dist/host/provider.js';
+import type { ModelRequest } from '../dist/kernel/loop.js';
+import type { PolicyMode } from '../dist/kernel/policy.js';
+
+type ExtensionFragment = { name: string; text: string; source: string };
+type ExtensionLoadOptions = Parameters<typeof loadExtensions>[1] & { config?: Record<string, never> };
 
 const shippedModes = fileURLToPath(new URL('../modes/', import.meta.url));
 const fullAccess = createPermissionContext('full-access', 'unrestricted', {
@@ -16,8 +25,8 @@ const fullAccess = createPermissionContext('full-access', 'unrestricted', {
 });
 
 // 每一条测试都要一份真的临时目录（扩展文件是被真动态 import 的），跑完一起收掉。
-const created = [];
-async function directoryWith(files) {
+const created: string[] = [];
+async function directoryWith(files: Record<string, string>): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'ligule-extensions-'));
   created.push(root);
   for (const [name, text] of Object.entries(files)) await writeFile(join(root, name), text);
@@ -28,7 +37,7 @@ after(() => Promise.all(created.map((root) => rm(root, { recursive: true, force:
 test('sources come from the install directory, the user layer and the command line, not from the repository', async () => {
   const root = await directoryWith({ 'b.js': '', 'a.js': '', 'notes.txt': '' });
   const installedDirectory = join(root, '.ligule', 'extensions');
-  const readDirectory = (path) => (path === installedDirectory
+  const readDirectory = (path: string) => (path === installedDirectory
     ? Promise.resolve(['b.js', 'a.js', 'notes.txt'])
     : Promise.reject(Object.assign(new Error('not a directory'), { code: 'ENOTDIR' })));
   const listed = await extensionSources(
@@ -53,7 +62,7 @@ test('sources come from the install directory, the user layer and the command li
 test('directory packages load through index.js and the disable registry filters installed entries only', async () => {
   const root = await directoryWith({});
   const installedDirectory = join(root, '.ligule', 'extensions');
-  const readDirectory = (path) => {
+  const readDirectory = (path: string) => {
     if (path === installedDirectory) return Promise.resolve(['solo.js', 'pack', 'half-pack', 'state.json']);
     if (path === join(installedDirectory, 'pack')) return Promise.resolve(['index.js', 'notes.md']);
     if (path === join(installedDirectory, 'half-pack')) return Promise.resolve([' readme.md ']);
@@ -87,7 +96,7 @@ test('the extension state registry round-trips and treats unreadable documents a
   // extensions.set 中止写入而不是以空名单覆盖。
   assert.ok(broken.unavailable, '损坏时名单不可信');
   const installedDirectory = join(root, '.ligule', 'extensions');
-  const readDirectory = (path) => (path === installedDirectory
+  const readDirectory = (path: string) => (path === installedDirectory
     ? Promise.resolve(['pack.js'])
     : Promise.reject(Object.assign(new Error('not a directory'), { code: 'ENOTDIR' })));
   const blocked = await extensionSources({}, { projectRoot: root, userHome: root, readDirectory, disabled: null });
@@ -110,19 +119,20 @@ test('the narrow interface is the four things the contract names, and registrati
 }`,
   });
   const kernel = createKernel({ config: createConfig({ user: { boundary: root } }) });
-  const fragments = [];
-  const loaded = await loadExtensions([join(root, 'one.js')], {
+  const fragments: ExtensionFragment[] = [];
+  const options: ExtensionLoadOptions = {
     config: {},
-    registerTool: (tool) => kernel.register(tool),
+    registerTool: (tool) => kernel.register(tool as ToolDefinition),
     registerFragment: (fragment) => {
       fragments.push(fragment);
       return () => fragments.splice(fragments.indexOf(fragment), 1);
     },
     addEventListener: () => () => {},
     request: (name, args) => kernel.call(name, args),
-  });
+  };
+  const loaded = await loadExtensions([join(root, 'one.js')], options);
   assert.deepEqual(loaded.loaded.map((entry) => entry.name), ['one']);
-  assert.equal(globalThis.__seen, 'onEvent,registerPrompt,registerTool,request');
+  assert.equal((globalThis as { __seen?: string }).__seen, 'onEvent,registerPrompt,registerTool,request');
   assert.deepEqual(kernel.list(), ['extra']);
   assert.equal(fragments[0].text, 'what the extension wants said');
   loaded.dispose();
@@ -137,15 +147,16 @@ test('a broken extension takes back its own registrations and leaves the others 
     'throws.js': 'export default function throws(host) { host.registerTool({ name: "half", description: "must not stay", access: "read", parameters: { type: "object", properties: {} }, run: async () => ({ text: "ok" }) }); throw new Error("boom in setup"); }',
   });
   const kernel = createKernel({ config: createConfig({ user: { boundary: root } }) });
+  const options: ExtensionLoadOptions = {
+    config: {},
+    registerTool: (tool) => kernel.register(tool as ToolDefinition),
+    registerFragment: () => () => {},
+    addEventListener: () => () => {},
+    request: (name, args) => kernel.call(name, args),
+  };
   const loaded = await loadExtensions(
     [join(root, 'good.js'), join(root, 'no-default.js'), join(root, 'throws.js')],
-    {
-      config: {},
-      registerTool: (tool) => kernel.register(tool),
-      registerFragment: () => () => {},
-      addEventListener: () => () => {},
-      request: (name, args) => kernel.call(name, args),
-    },
+    options,
   );
   assert.deepEqual(loaded.diagnostics.map((entry) => entry.code), ['extension_shape_invalid', 'extension_load_failed']);
   assert.match(loaded.diagnostics[1].detail, /boom in setup/);
@@ -163,10 +174,10 @@ test('extension disposal attempts all owned cleanups in reverse order and only o
 }`,
   });
   const kernel = createKernel({ config: createConfig({ user: { boundary: root } }) });
-  const fragments = new Map();
-  const listeners = new Set();
+  const fragments = new Map<string, ExtensionFragment>();
+  const listeners = new Set<(event: unknown) => void>();
   const loaded = await loadExtensions([join(root, 'cleanup.js')], {
-    registerTool: (tool) => kernel.register(tool),
+    registerTool: (tool) => kernel.register(tool as ToolDefinition),
     registerFragment: (fragment) => { fragments.set(fragment.name, fragment); return () => fragments.delete(fragment.name); },
     addEventListener: (handler) => { listeners.add(handler); return () => listeners.delete(handler); },
     request: (name, args) => kernel.call(name, args),
@@ -188,9 +199,9 @@ test('extension setup failure keeps its error visible when owned cleanup also fa
 }`,
   });
   const kernel = createKernel({ config: createConfig({ user: { boundary: root } }) });
-  const fragments = new Map();
+  const fragments = new Map<string, ExtensionFragment>();
   const loaded = await loadExtensions([join(root, 'broken-cleanup.js')], {
-    registerTool: (tool) => kernel.register(tool),
+    registerTool: (tool) => kernel.register(tool as ToolDefinition),
     registerFragment: (fragment) => { fragments.set(fragment.name, fragment); return () => { fragments.delete(fragment.name); throw new Error('fragment cleanup failed'); }; },
     addEventListener: () => () => {},
     request: (name, args) => kernel.call(name, args),
@@ -210,17 +221,18 @@ test('what an extension asks for still passes the decision chain and the record'
   });
   const kernel = createKernel({ config: createConfig({ user: { boundary: root } }) });
   loadAssembly(kernel, [minimalPlugin]);
-  const loaded = await loadExtensions([join(root, 'calls.js')], {
+  const options: ExtensionLoadOptions = {
     config: {},
-    registerTool: (tool) => kernel.register(tool),
+    registerTool: (tool) => kernel.register(tool as ToolDefinition),
     registerFragment: () => () => {},
     addEventListener: () => () => {},
     request: (name, args) => kernel.call(name, args),
-  });
+  };
+  const loaded = await loadExtensions([join(root, 'calls.js')], options);
   loaded.dispose();
   await assert.rejects(
-    () => globalThis.__request(),
-    (error) => error.code === 'path_escapes_boundary',
+    () => (globalThis as unknown as { __request: () => Promise<unknown> }).__request(),
+    (error) => error instanceof Error && (error as { code?: string }).code === 'path_escapes_boundary',
     'the boundary is not something an extension can step around by asking',
   );
 });
@@ -228,7 +240,10 @@ test('what an extension asks for still passes the decision chain and the record'
 // 判据那一条：一份扩展装上一件工具与一段提示词片段，选它的模式看得见这两样；名字写错在装载那一刻就报。
 const { createConnection, createMemoryConnectionPair, MESSAGES_CAPABILITIES, modeDirectories, serveHost } = await import('../dist/index.js');
 
-async function withSession(modePrompt, run) {
+async function withSession<TResult>(
+  modePrompt: readonly string[],
+  run: (connection: Connection, requests: ModelRequest[], host: Host) => TResult | Promise<TResult>,
+): Promise<TResult> {
   const root = await directoryWith({
     'one.js': 'export default function one(host) { host.registerTool({ name: "extra", description: "from the extension", access: "read", parameters: { type: "object", properties: {} }, run: async () => ({ text: "ran" }) }); host.registerPrompt({ name: "notes", text: "what the extension wants said" }); }',
   });
@@ -237,22 +252,22 @@ async function withSession(modePrompt, run) {
   await mkdir(directories.user, { recursive: true });
   await writeFile(join(directories.user, 'picked.toml'), `tools = "*"\nprompt = ${JSON.stringify(modePrompt)}\n`);
   const config = createConfig({ user: { boundary: root, model: { api: 'messages', baseURL: 'http://127.0.0.1:1', model: 'm' }, policy: { mode: 'ask' } } });
-  const requests = [];
+  const requests: ModelRequest[] = [];
   const provider = {
     capabilities: MESSAGES_CAPABILITIES,
     model: 'm',
-    async *stream(request) {
+    async *stream(request: ModelRequest) {
       requests.push(request);
       yield { type: 'text', text: 'ok' };
     },
-  };
+  } as unknown as HostProvider;
   const pair = createMemoryConnectionPair();
   const host = serveHost({
     input: pair.host.input,
     output: pair.host.output,
     config,
     provider,
-    policy: config.policy,
+    policy: config.policy as { mode?: PolicyMode },
     permission: fullAccess,
     modeName: 'picked',
     modePaths: directories,
@@ -269,7 +284,7 @@ async function withSession(modePrompt, run) {
 
 test('a mode that picks an extension fragment hands the tool and the text to the model', async () => {
   await withSession(['notes'], async (connection, requests) => {
-    const { sessionId } = await connection.request('session.create', {});
+    const { sessionId } = await connection.request('session.create', {}) as { sessionId: string };
     await connection.request('run.start', { sessionId, input: 'say ok' });
     assert.equal(requests.length, 1);
     assert.ok(requests[0].tools.map((entry) => entry.name).includes('extra'), 'the extension tool reaches the manifest');
@@ -279,7 +294,7 @@ test('a mode that picks an extension fragment hands the tool and the text to the
 
 test('a mode naming a fragment nobody registered fails at the request, not silently', async () => {
   const failure = await withSession(['absent'], (connection) =>
-    connection.request('session.create', {}).catch((error) => error));
+    connection.request('session.create', {}).catch((error: unknown) => error)) as { code: string; detail: string };
   assert.equal(failure.code, 'mode_prompt_unavailable');
   assert.match(failure.detail, /absent/);
 });

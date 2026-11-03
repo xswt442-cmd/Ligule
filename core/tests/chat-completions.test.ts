@@ -5,24 +5,47 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
+import type { IncomingHttpHeaders, ServerResponse } from 'node:http';
 import {
   CHAT_COMPLETIONS_CAPABILITIES, chatCompletionsCapabilities, createChatCompletionsProvider, readTool,
 } from '../dist/index.js';
+import type { ModelRequest, ProviderEvent } from '../dist/kernel/loop.js';
 import { listenFetchable } from './helpers/port.ts';
 
 const API_KEY_ENV = 'LIGULE_TEST_API_KEY';
 
-function sseBody(chunks) {
+type ProviderOptions = NonNullable<Parameters<typeof createChatCompletionsProvider>[0]>;
+
+type WireCall = { function: { name: string } };
+
+type WireMessage = { role?: string; content?: unknown; tool_calls?: WireCall[] };
+
+type WireBody = {
+  model?: unknown;
+  stream?: unknown;
+  max_tokens?: unknown;
+  parallel_tool_calls?: unknown;
+  stream_options?: unknown;
+  messages: WireMessage[];
+  tools: WireCall[];
+};
+
+type ObservedRequest = { url: string | undefined; headers: IncomingHttpHeaders; body: WireBody };
+
+function sseBody(chunks: unknown[]): string {
   return `${chunks.map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join('')}data: [DONE]\n\n`;
 }
 
-async function withEndpoint(respond, run) {
-  const requests = [];
+async function withEndpoint<TResult>(
+  respond: (response: ServerResponse, observed: ObservedRequest) => void | Promise<void>,
+  run: (baseUrl: string, requests: ObservedRequest[]) => TResult | Promise<TResult>,
+): Promise<TResult> {
+  const requests: ObservedRequest[] = [];
   const server = createServer(async (request, response) => {
     const body = [];
     for await (const chunk of request) body.push(chunk);
     const text = Buffer.concat(body).toString('utf8');
-    const observed = { url: request.url, headers: request.headers, body: text === '' ? undefined : JSON.parse(text) };
+    const observed = { url: request.url, headers: request.headers, body: text === '' ? undefined : JSON.parse(text) } as unknown as ObservedRequest;
     requests.push(observed);
     await respond(response, observed);
   });
@@ -37,13 +60,13 @@ async function withEndpoint(respond, run) {
   }
 }
 
-async function collect(stream) {
-  const events = [];
+async function collect(stream: AsyncIterable<ProviderEvent>): Promise<ProviderEvent[]> {
+  const events: ProviderEvent[] = [];
   for await (const event of stream) events.push(event);
   return events;
 }
 
-function provider(baseUrl, extra = {}) {
+function provider(baseUrl: string, extra: ProviderOptions = {}) {
   return createChatCompletionsProvider({ baseUrl, model: 'test-model', apiKeyEnv: API_KEY_ENV, ...extra });
 }
 
@@ -146,7 +169,7 @@ test('invalid tool names use collision-free wire aliases in tools, history, and 
   const longUnicodeName = `读取${'项目文件'.repeat(30)}`;
   const inspectAlias = `ligule_${createHash('sha256').update('mcp.inspect').digest('hex').slice(0, 48)}`;
   const historyAlias = `ligule_${createHash('sha256').update('mcp.call').digest('hex').slice(0, 48)}`;
-  const calls = [];
+  const calls: { toolNames: string[]; historyNames: string[] }[] = [];
   await withEndpoint(async (response, request) => {
     const toolNames = (request.body.tools ?? []).map((tool) => tool.function.name);
     const historyNames = (request.body.messages ?? []).flatMap((message) =>
@@ -229,8 +252,8 @@ test('an assistant round with an unanswered call is refused before the request g
       collect(provider(baseUrl).stream({
         system: '',
         messages: [{ role: 'assistant', text: '', toolCalls: [{ id: 'call_x', name: 'read', args: {} }] }],
-      })),
-      (error) => error.code === 'provider_unanswered_call' && /call_x/.test(error.detail),
+      } as unknown as ModelRequest)),
+      (error) => error instanceof Error && (error as { code?: string }).code === 'provider_unanswered_call' && /call_x/.test((error as { detail?: string }).detail ?? ''),
     );
   });
 });
@@ -244,7 +267,7 @@ test('the declared limits of this form can be lowered by config but not raised',
     CHAT_COMPLETIONS_CAPABILITIES.maxOutputTokens,
     'a config value cannot raise a declared limit',
   );
-  assert.throws(() => chatCompletionsCapabilities({ vision: true }), (error) => error.code === 'provider_capability_unknown');
+  assert.throws(() => chatCompletionsCapabilities({ vision: true }), (error) => error instanceof Error && (error as { code?: string }).code === 'provider_capability_unknown');
 });
 
 // 流式响应中的用量会用于校准上下文长度估算：
@@ -280,9 +303,9 @@ test('a cancel that lands while the stream is still open reports provider_cancel
     await new Promise(() => {});
   }, async (baseUrl) => {
     const controller = new AbortController();
-    const stream = provider(baseUrl).stream({ system: '', tools: [], messages: [{ role: 'user', content: 'x' }] }, { signal: controller.signal });
+    const stream = provider(baseUrl).stream({ system: '', tools: [], messages: [{ role: 'user', content: 'x' }] as unknown as ModelRequest['messages'] }, { signal: controller.signal });
     assert.deepEqual((await stream.next()).value, { type: 'text', text: '第一段' });
     controller.abort();
-    await assert.rejects(() => stream.next(), (error) => error.code === 'provider_cancelled');
+    await assert.rejects(() => stream.next(), (error) => error instanceof Error && (error as { code?: string }).code === 'provider_cancelled');
   });
 });

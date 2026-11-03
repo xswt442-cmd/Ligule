@@ -14,17 +14,29 @@ import {
   loadCheckpointFile,
 } from '../dist/index.js';
 
+function hasCode(error: unknown, code: string): error is { code: string; detail: string } {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
+}
+
 const limits = { contextTokens: 100_000, compactThresholdRatio: 0.8, compactRetainRatio: 0.16, resultBytes: 16_000 };
 const fakeProvider = {
   model: 'fake',
   capabilities: {},
   async *stream() {
-    yield { type: 'text', text: 'unused' };
+    yield { type: 'text' as const, text: 'unused' };
   },
 };
 
 // 一段带完整轮次的历史：0 用户提问，1 助手发起两次调用，2-3 结果，4 助手收尾，5 轮次完成，6 当前轮输入。
-async function seededSession(run) {
+type SeededContext = {
+  directory: string;
+  id: string;
+  session: ReturnType<typeof createSessionLog>;
+  compaction: ReturnType<typeof createCompaction>;
+  tool: ReturnType<typeof createCompactTool>;
+};
+
+async function seededSession<TResult>(run: (context: SeededContext) => TResult | Promise<TResult>): Promise<TResult> {
   const directory = await mkdtemp(join(tmpdir(), 'ligule-compact-tool-'));
   const id = 'compact-tool-session';
   const session = createSessionLog({ directory, id });
@@ -67,14 +79,14 @@ test('compress takes the range and the summary the model wrote and replaces the 
     const read = await loadCheckpointFile({ directory, id, events: await session.read() });
     assert.equal(read.blocks.length, 1);
     assert.equal(read.blocks[0].toSeq, 4);
-    assert.equal((await session.modelView())[0].text, '第一轮问过 note.txt，读过 a 与 b，结论保留', '投影里摘要顶替了被压区间');
+    assert.equal((await session.modelView() as { text?: string }[])[0].text, '第一轮问过 note.txt，读过 a 与 b，结论保留', '投影里摘要顶替了被压区间');
     const written = (await session.read()).filter((event) => event.kind === 'compaction');
     assert.deepEqual(written.map((event) => [event.reason, event.blockId]), [['model', 1]], '压缩事件记录模型来源');
 
     const again = tool.run({ action: 'compress', fromSeq: 0, toSeq: 4, summary: '再来一次' }, { config: {} });
     await assert.rejects(
       again,
-      (error) => error.code === 'compact_range_invalid' && /already covered/.test(error.detail),
+      (error) => hasCode(error, 'compact_range_invalid') && /already covered/.test(error.detail),
       '与已有块重叠的范围要被拒绝',
     );
   });
@@ -83,17 +95,17 @@ test('compress takes the range and the summary the model wrote and replaces the 
 test('ranges that would break the record are refused with actionable errors', async () => {
   await seededSession(async ({ tool }) => {
     await assert.rejects(tool.run({ action: 'compress', toSeq: 6, summary: 's' }, { config: {} }),
-      (error) => error.code === 'compact_range_invalid' && /up to event 5/.test(error.detail), '不能压进当前轮');
+      (error) => hasCode(error, 'compact_range_invalid') && /up to event 5/.test(error.detail), '不能压进当前轮');
     await assert.rejects(tool.run({ action: 'compress', toSeq: 5, summary: 's' }, { config: {} }),
-      (error) => error.code === 'compact_range_invalid' && /user or assistant/.test(error.detail), '结束边界要落在消息上');
+      (error) => hasCode(error, 'compact_range_invalid') && /user or assistant/.test(error.detail), '结束边界要落在消息上');
     await assert.rejects(tool.run({ action: 'compress', toSeq: 1, summary: 's' }, { config: {} }),
-      (error) => error.code === 'compact_range_invalid' && /pair/.test(error.detail), '不能把调用和结果拆开');
+      (error) => hasCode(error, 'compact_range_invalid') && /pair/.test(error.detail), '不能把调用和结果拆开');
     await assert.rejects(tool.run({ action: 'compress', toSeq: 3, summary: 's' }, { config: {} }),
-      (error) => error.code === 'compact_range_invalid' && /user or assistant/.test(error.detail), '停在工具结果上同样不行');
+      (error) => hasCode(error, 'compact_range_invalid') && /user or assistant/.test(error.detail), '停在工具结果上同样不行');
     await assert.rejects(tool.run({ action: 'compress', toSeq: 4, summary: '   ' }, { config: {} }),
-      (error) => error.code === 'compact_summary_required', '摘要为空要说清');
+      (error) => hasCode(error, 'compact_summary_required'), '摘要为空要说清');
     await assert.rejects(tool.run({ action: 'warp' }, { config: {} }),
-      (error) => error.code === 'compact_action_invalid', '未知动作点名拒绝');
+      (error) => hasCode(error, 'compact_action_invalid'), '未知动作点名拒绝');
   });
 });
 
@@ -119,18 +131,18 @@ test('blocks lists summaries with their reasons and read returns the original tr
     assert.match(read, /tool read: 甲的结果/);
     assert.match(read, /assistant: 第一轮答完/);
     await assert.rejects(tool.run({ action: 'read', blockId: 9 }, { config: {} }),
-      (error) => error.code === 'compact_block_unknown', '块号不存在给指引');
+      (error) => hasCode(error, 'compact_block_unknown'), '块号不存在给指引');
     await assert.rejects(tool.run({ action: 'read' }, { config: {} }),
-      (error) => error.code === 'compact_block_required', '缺块号直接说');
+      (error) => hasCode(error, 'compact_block_required'), '缺块号直接说');
   });
 });
 
 test('spill returns referenced overflow files and refuses any other name', async () => {
   await seededSession(async ({ tool }) => {
     await assert.rejects(tool.run({ action: 'spill', name: '../config.toml' }, { config: {} }),
-      (error) => error.code === 'compact_spill_name_invalid', '目录外路径一律拒绝');
+      (error) => hasCode(error, 'compact_spill_name_invalid'), '目录外路径一律拒绝');
     await assert.rejects(tool.run({ action: 'spill', name: 'summary-0-5.txt' }, { config: {} }),
-      (error) => error.code === 'compact_spill_missing', '命名合规但不存在也说清');
+      (error) => hasCode(error, 'compact_spill_missing'), '命名合规但不存在也说清');
   });
 });
 
@@ -142,14 +154,14 @@ test('a spilled tool result identifies compact and can be read in pages', async 
     kernel.register({ name: 'chatty', description: 'Produces a large result', access: 'read',
       parameters: { type: 'object', properties: {} }, run: async () => original });
     await kernel.call('chatty', {});
-    const event = (await session.read()).findLast(item => item.kind === 'tool' && item.tool === 'chatty');
+    const event = (await session.read()).findLast(item => item.kind === 'tool' && item.tool === 'chatty') as unknown as { result: { content: string; spilled: string } };
     assert.match(event.result.content, /read via compact: action=spill/);
     assert.match(event.result.content, new RegExp(event.result.spilled));
     let offsetBytes = 0;
     let recovered = '';
     for (;;) {
-      const page = (await kernel.call('compact', { action: 'spill', name: event.result.spilled, offsetBytes })).text;
-      const recorded = (await session.read()).findLast(item => item.kind === 'tool' && item.tool === 'compact');
+      const page = (await kernel.call('compact', { action: 'spill', name: event.result.spilled, offsetBytes }) as { text: string }).text;
+      const recorded = (await session.read()).findLast(item => item.kind === 'tool' && item.tool === 'compact') as unknown as { result: { spilled?: string; content: unknown } };
       assert.equal(recorded.result.spilled, undefined, 'a page must not spill again');
       assert.deepEqual(recorded.result.content, { text: page });
       const marker = /\n\[truncated:.*continue with offsetBytes=(\d+)\]$/u.exec(page);
@@ -160,7 +172,7 @@ test('a spilled tool result identifies compact and can be read in pages', async 
     assert.equal(recovered, original);
     assert.equal((await tool.run({ action: 'spill', name: event.result.spilled, offsetBytes: 100_000 }, { config: {} })).text, '');
     await assert.rejects(tool.run({ action: 'spill', name: event.result.spilled, offsetBytes: 1 }, { config: {} }),
-      error => error.code === 'compact_offset_invalid');
+      (error) => hasCode(error, 'compact_offset_invalid'));
   });
 });
 
@@ -183,14 +195,14 @@ test('a summary over the byte cap spills to a file the spill action can return',
     // 哈希段是内容摘要，伪造的哈希名指向不存在的文件并被点名拒绝。
     await assert.rejects(
       local.run({ action: 'spill', name: 'summary-0-6-abcdef01.txt' }, { config: { limits: { resultBytes: 2_000 } } }),
-      (error) => error.code === 'compact_spill_missing', '不存在的哈希名被拒绝',
+      (error) => hasCode(error, 'compact_spill_missing'), '不存在的哈希名被拒绝',
     );
     await assert.rejects(
       local.run({ action: 'spill', name: 'summary-0-6-zzz.txt' }, { config: { limits: { resultBytes: 2_000 } } }),
-      (error) => error.code === 'compact_spill_name_invalid', '非哈希段的名字不通过白名单',
+      (error) => hasCode(error, 'compact_spill_name_invalid'), '非哈希段的名字不通过白名单',
     );
     // 从块文件直接取引用，验证完整链路：块 -> 引用 -> 溢出内容。
-    const raw = JSON.parse(await readFile(join(directory, `${id}.checkpoint.json`), 'utf8'));
+    const raw = JSON.parse(await readFile(join(directory, `${id}.checkpoint.json`), 'utf8')) as { blocks: { text: string }[] };
     const reference = /kept in (summary-\d+-\d+-[a-f0-9]{8}\.txt)\]/u.exec(raw.blocks[0].text);
     assert.ok(reference, `块摘要引用溢出文件: ${raw.blocks[0].text.slice(-120)}`);
     const back = (await local.run({ action: 'spill', name: reference[1] }, { config: { limits: { resultBytes: 2_000 } } })).text;

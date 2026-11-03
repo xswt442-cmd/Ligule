@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createKernel, createPermissionContext, KernelError, loadAssembly, minimalPlugin } from '../dist/index.js';
+import type { Kernel, ToolDefinition } from '../dist/kernel/kernel.js';
+import type { Plugin } from '../dist/kernel/assembly.js';
 
 const manifestPermission = createPermissionContext('workspace-write', 'policy', {
   filesystemRead: 'partial', filesystemWrite: 'partial', network: 'full', process: 'full',
 });
 
-function tool(name) {
+function tool(name: string): ToolDefinition {
   return {
     name,
     description: `the ${name} tool`,
@@ -16,7 +18,7 @@ function tool(name) {
   };
 }
 
-function plugin(name, registered, disposed) {
+function plugin(name: string, registered: readonly string[], disposed: string[]): Plugin<Kernel> {
   return {
     name,
     setup(kernel) {
@@ -29,6 +31,10 @@ function plugin(name, registered, disposed) {
   };
 }
 
+function hasCode(error: unknown, code: string): boolean {
+  return typeof error === 'object' && error !== null && (error as { code?: unknown }).code === code;
+}
+
 test('an empty manifest leaves the kernel with nothing and the assembly list empty', () => {
   const instance = createKernel();
   const assembly = loadAssembly(instance, []);
@@ -38,7 +44,7 @@ test('an empty manifest leaves the kernel with nothing and the assembly list emp
 
 test('the manifest reads back which plugins this run installed', () => {
   const instance = createKernel();
-  const disposed = [];
+  const disposed: string[] = [];
   const assembly = loadAssembly(instance, [
     plugin('files', ['read'], disposed),
     plugin('shell', ['exec'], disposed),
@@ -53,7 +59,7 @@ test('the manifest reads back which plugins this run installed', () => {
 
 test('two plugins declaring the same tool name fail the whole load and leave nothing installed', () => {
   const instance = createKernel();
-  const disposed = [];
+  const disposed: string[] = [];
   assert.throws(
     () => loadAssembly(instance, [
       plugin('files', ['read'], disposed),
@@ -67,13 +73,13 @@ test('two plugins declaring the same tool name fail the whole load and leave not
 
 test('a plugin that does not hand back a dispose action is rejected and the earlier ones are unwound', () => {
   const instance = createKernel();
-  const disposed = [];
+  const disposed: string[] = [];
   assert.throws(
     () => loadAssembly(instance, [
       plugin('files', ['read'], disposed),
       { name: 'forgetful', setup: () => undefined },
     ]),
-    (error) => error.code === 'plugin_dispose_required',
+    (error) => hasCode(error, 'plugin_dispose_required'),
   );
   assert.deepEqual(instance.list(), []);
   assert.deepEqual(disposed, ['files']);
@@ -81,7 +87,7 @@ test('a plugin that does not hand back a dispose action is rejected and the earl
 
 test('a plugin whose setup throws is unwound the same way', () => {
   const instance = createKernel();
-  const disposed = [];
+  const disposed: string[] = [];
   assert.throws(
     () => loadAssembly(instance, [
       plugin('files', ['read'], disposed),
@@ -92,7 +98,7 @@ test('a plugin whose setup throws is unwound the same way', () => {
         },
       },
     ]),
-    (error) => error.message === 'boom',
+    (error) => error instanceof Error && error.message === 'boom',
   );
   assert.deepEqual(instance.list(), []);
   assert.deepEqual(disposed, ['files']);
@@ -111,20 +117,20 @@ test('the minimal manifest is exactly the eight tools decided in D3 and unloads 
 
 test('the manifest rejects a duplicate plugin name and a malformed entry', () => {
   const instance = createKernel();
-  const disposed = [];
+  const disposed: string[] = [];
   assert.throws(
     () => loadAssembly(instance, [plugin('files', ['read'], disposed), plugin('files', ['search'], disposed)]),
-    (error) => error.code === 'plugin_name_duplicate',
+    (error) => hasCode(error, 'plugin_name_duplicate'),
   );
-  assert.throws(() => loadAssembly(instance, [{ setup: () => () => {} }]), (error) => error.code === 'plugin_name_required');
-  assert.throws(() => loadAssembly(instance, [{ name: 'x' }]), (error) => error.code === 'plugin_setup_required');
-  assert.throws(() => loadAssembly(instance, 'files'), (error) => error.code === 'assembly_manifest_must_be_array');
+  assert.throws(() => loadAssembly(instance, [{ setup: () => () => {} }] as unknown as Plugin<Kernel>[]), (error) => hasCode(error, 'plugin_name_required'));
+  assert.throws(() => loadAssembly(instance, [{ name: 'x' }] as unknown as Plugin<Kernel>[]), (error) => hasCode(error, 'plugin_setup_required'));
+  assert.throws(() => loadAssembly(instance, 'files' as unknown as Plugin<Kernel>[]), (error) => hasCode(error, 'assembly_manifest_must_be_array'));
   assert.deepEqual(instance.list(), []);
 });
 
 test('assembly disposal attempts every cleanup in reverse order and can be repeated', () => {
   const instance = createKernel();
-  const calls = [];
+  const calls: string[] = [];
   const failure = new Error('second cleanup failed');
   const thirdFailure = new Error('third cleanup failed');
   const assembly = loadAssembly(instance, [

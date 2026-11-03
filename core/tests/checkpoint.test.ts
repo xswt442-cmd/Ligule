@@ -17,8 +17,20 @@ import {
   usableCheckpointFile,
   writeCheckpointFile,
 } from '../dist/index.js';
+import type { CheckpointFile } from '../dist/session/checkpoint.js';
+import type { SessionEvent } from '../dist/session/format.js';
 
-const EVENTS = [
+type CheckpointFixtureEvent = {
+  kind: string;
+  text?: string;
+  toolCalls?: { id: string; name: string; args: { path: string } }[];
+  tool?: string;
+  callId?: string;
+  args?: { path: string };
+  result?: { kind: string; failed: boolean; content: { text: string } };
+};
+
+const EVENTS: CheckpointFixtureEvent[] = [
   { kind: 'user', text: '第一个问题' },
   { kind: 'assistant', text: '', toolCalls: [{ id: 'call_1', name: 'read', args: { path: 'note.txt' } }] },
   { kind: 'tool', tool: 'read', callId: 'call_1', args: { path: 'note.txt' }, result: { kind: 'result', failed: false, content: { text: 'the body' } } },
@@ -26,7 +38,12 @@ const EVENTS = [
   { kind: 'assistant', text: '答完了' },
 ];
 
-async function withRecord(run) {
+async function withRecord<TResult>(run: (context: {
+  directory: string;
+  id: string;
+  session: ReturnType<typeof createSessionLog>;
+  path: string;
+}) => TResult | Promise<TResult>): Promise<TResult> {
   const directory = await mkdtemp(join(tmpdir(), 'ligule-checkpoint-'));
   const id = 'session-under-test';
   const session = createSessionLog({ directory, id });
@@ -38,7 +55,7 @@ async function withRecord(run) {
   }
 }
 
-const blockOver = (events, text, blockId, fromSeq, toSeq) => createBlock({
+const blockOver = (events: SessionEvent[], text: string, blockId: number, fromSeq: number, toSeq: number) => createBlock({
   events: events.filter((event) => event.seq >= fromSeq && event.seq <= toSeq),
   text,
   fromSeq,
@@ -46,7 +63,7 @@ const blockOver = (events, text, blockId, fromSeq, toSeq) => createBlock({
   blockId,
 });
 
-const write = (directory, id, file) => writeCheckpointFile(directory, id, file);
+const write = (directory: string, id: string, file: CheckpointFile) => writeCheckpointFile(directory, id, file);
 
 test('a block whose range and hash match takes that range out of the model view', async () => {
   await withRecord(async ({ directory, id, session, path }) => {
@@ -54,7 +71,7 @@ test('a block whose range and hash match takes that range out of the model view'
     const before = await readFile(path, 'utf8');
     await write(directory, id, createCheckpointFile({ id, blocks: [blockOver(events, '前几轮的话', 1, 0, 2)] }));
 
-    const view = await session.modelView();
+    const view = await session.modelView() as { role?: string; text?: string }[];
     assert.deepEqual(view[0], { role: 'user', text: '前几轮的话' }, 'the summary speaks for the covered range');
     assert.deepEqual(view.slice(1).map((row) => row.role), ['user', 'assistant'], 'events after the range stay as they are');
     assert.equal(await readFile(path, 'utf8'), before, 'the event log is not touched by the block file');
@@ -69,7 +86,7 @@ test('each block projects its own summary and the gap between blocks stays raw',
     const blocks = [blockOver(events, '第一段的摘要', 1, 0, 1), blockOver(events, '第二段的摘要', 2, 3, 3)];
     await write(directory, id, createCheckpointFile({ id, blocks }));
 
-    const view = await session.modelView();
+    const view = await session.modelView() as { role?: string; text?: string }[];
     assert.deepEqual(view.map((row) => row.role), ['user', 'tool', 'user', 'assistant']);
     assert.deepEqual(view[0], { role: 'user', text: '第一段的摘要' });
     assert.deepEqual(view[1], { role: 'tool', id: 'call_1', tool: 'read', content: { text: 'the body' }, failed: false, code: undefined });
@@ -97,14 +114,14 @@ test('a version 1 file still works as a single block', async () => {
     const read = await loadCheckpointFile({ directory, id, events });
     assert.equal(read.reason, '');
     assert.deepEqual(read.blocks, [{ blockId: 1, fromSeq: 0, toSeq: 2, digest: legacy.digest, text: '旧版那一份摘要' }]);
-    assert.equal((await session.modelView())[0].text, '旧版那一份摘要');
+    assert.equal((await session.modelView() as { text?: string }[])[0].text, '旧版那一份摘要');
   });
 });
 
 // 每种校验失败都应说明原因，并使用原始日志生成投影。
 test('a block file that does not line up is void and the raw log projects as if it were never there', async () => {
-  const file = (id, blocks) => ({ formatVersion: CHECKPOINT_FORMAT_VERSION, inputVersion: CHECKPOINT_INPUT_VERSION, sessionId: id, blocks });
-  const cases = [
+  const file = (id: string, blocks: CheckpointFile['blocks']) => ({ formatVersion: CHECKPOINT_FORMAT_VERSION, inputVersion: CHECKPOINT_INPUT_VERSION, sessionId: id, blocks });
+  const cases: [string, (base: ReturnType<typeof file>) => ReturnType<typeof file>][] = [
     ['checkpoint_blocks_empty', (base) => ({ ...base, blocks: [] })],
     ['checkpoint_range_shape', (base) => ({ ...base, blocks: [{ ...base.blocks[0], fromSeq: 3, toSeq: 1 }] })],
     ['checkpoint_range_missing', (base) => ({ ...base, blocks: [{ ...base.blocks[0], toSeq: 40 }] })],
@@ -140,7 +157,7 @@ test('a block file that does not line up is void and the raw log projects as if 
     await writeFile(path, bytes.replace('第一个问题', '第一个问题改过'));
     const edited = await session.read();
     assert.equal((await loadCheckpointFile({ directory, id, events: edited })).reason, 'checkpoint_digest_mismatch');
-    assert.ok(!(await session.modelView()).some((row) => row.text === '前几轮的话'), 'the void blocks are not projected');
+    assert.ok(!(await session.modelView() as { text?: string }[]).some((row) => row.text === '前几轮的话'), 'the void blocks are not projected');
   });
 });
 
@@ -159,13 +176,13 @@ test('rewriting the block file replaces it without leftovers', async () => {
 
 // 哈希只覆盖重建投影所需的数据，不包含调用 ID、溢出文件名等传输字段。
 test('the hash input leaves out transport identity and fields this build does not know', () => {
-  const decorated = (token) => EVENTS.slice(0, 3).map((event, index) => ({
+  const decorated = (token: string) => EVENTS.slice(0, 3).map((event, index) => ({
     ...event,
     hostNote: token,
     ...(index === 2 ? { result: { ...event.result, spilled: `result-${token}-abcdef01.json` } } : {}),
     ...(event.toolCalls === undefined ? {} : { toolCalls: event.toolCalls.map((call) => ({ ...call, id: `call-${token}` })) }),
   }));
-  assert.equal(prefixDigest(decorated('one')), prefixDigest(decorated('two')), 'a different call id is the same history');
+  assert.equal(prefixDigest(decorated('one') as unknown as SessionEvent[]), prefixDigest(decorated('two') as unknown as SessionEvent[]), 'a different call id is the same history');
 
   // 添加未知外层字段后，块仍然有效，因为哈希只覆盖固定字段。
   const events = [
