@@ -138,7 +138,16 @@ function codeOf(result: unknown) {
 
 // SDK 的结果只给出宽泛的 content/structuredContent；测试按自己读取的字段声明形状，窄转换只在这里做一次。
 async function callTool(client: Client, name: string, args: Record<string, unknown>): Promise<ToolReply> {
-  return await client.callTool({ name, arguments: args }) as unknown as ToolReply;
+  const result = await client.callTool({ name, arguments: args }) as {
+    content?: unknown;
+    structuredContent?: unknown;
+    isError?: unknown;
+  };
+  if (typeof result !== 'object' || result === null
+    || (result.isError !== true && result.structuredContent === undefined && !Array.isArray(result.content))) {
+    throw new Error('unexpected_mcp_tool_result_shape');
+  }
+  return result as unknown as ToolReply;
 }
 
 test('a real stdio MCP process uses its grant ceiling and detects revocation', async () => {
