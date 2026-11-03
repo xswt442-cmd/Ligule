@@ -407,9 +407,11 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       if (askedRule !== undefined) effective = 'ask';
       // 在结果中包含解析分段，便于从记录中还原命令如何被解释。
       // 无命令文本或无法解析时不返回分段字段。
+      // 放行结果一律带回脚本绑定，让执行前的重绑定校验对规则、自动与 never 三条路径同样生效。
       const answer = (via: string, rule?: PolicyRule) => judged('allow', via, {
         ...(segments === undefined ? {} : { segments }),
         ...(rule?.match === undefined ? {} : { rule: rule.match }),
+        ...(scriptBinding === undefined ? {} : { scriptBinding }),
       });
 
       const refuse = (code: string, via: string, reason: string, rule?: string, reply?: string, countsAsDenial = true): PolicyVerdict => {
