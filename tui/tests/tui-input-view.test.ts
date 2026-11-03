@@ -9,7 +9,7 @@ test('long pasted drafts keep a bounded viewport around the current caret', () =
   assert.equal(view.lines.length, 3);
   assert.equal(view.total, 40);
   assert.equal(view.offset, 37);
-  assert.equal(view.lines.at(-1).text, '第39行');
+  assert.equal(view.lines.at(-1)!.text, '第39行');
   assert.equal(draftViewport(draft, 0, 20, 3).offset, 0);
 });
 

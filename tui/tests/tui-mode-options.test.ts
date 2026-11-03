@@ -6,7 +6,7 @@ import { modeOptions } from '../dist/tui/mode-options.js';
 
 const testRoot = resolve('testplace/tmp');
 
-async function withSandbox(run) {
+async function withSandbox(run: (root: string) => Promise<unknown>): Promise<unknown> {
   await mkdir(testRoot, { recursive: true });
   const root = await mkdtemp(join(testRoot, 'tui-mode-options-'));
   try {
@@ -16,7 +16,7 @@ async function withSandbox(run) {
   }
 }
 
-async function addFile(directory, filename, contents = 'invalid TOML is still listed') {
+async function addFile(directory: string, filename: string, contents = 'invalid TOML is still listed') {
   const path = join(directory, filename);
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, contents, 'utf8');
@@ -59,6 +59,6 @@ test('a mode directory path that is a file fails with mode_list_failed', async (
     const file = join(root, 'not-a-directory');
     await writeFile(file, 'file');
     await assert.rejects(modeOptions({ shipped: file, user: join(root, 'user'), project: join(root, 'project') }),
-      (error) => error.code === 'mode_list_failed');
+      (error) => (error as { code?: string }).code === 'mode_list_failed');
   });
 });

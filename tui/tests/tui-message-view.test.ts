@@ -8,18 +8,21 @@ import { foldText, foldTextForColumns, toolCallSummary } from '../dist/tui/messa
 import { displayWidth } from '../dist/tui/commands.js';
 import { wrapLine } from '../dist/tui/viewport.js';
 import { projectRecord } from '../dist/tui/transcript.js';
+import type { TranscriptItem } from '../dist/tui/transcript.js';
 
-const stripAnsi = (value) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
+const stripAnsi = (value: string) => value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
 
-async function paint(rows, columns, expanded = false) {
+type FakeInput = PassThrough & { isTTY: boolean; setRawMode(): unknown; ref(): void; unref(): void };
+
+async function paint(rows: readonly TranscriptItem[], columns: number, expanded = false): Promise<string> {
   const stdout = Object.assign(new PassThrough(), { columns, rows: 30, isTTY: true });
   let output = '';
   stdout.on('data', (chunk) => { output += chunk; });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref() {}, unref() {} });
+  const stdin: FakeInput = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref() {}, unref() {} });
   const { render } = await import('ink');
   const instance = render(createElement(Box, { flexDirection: 'column' }, ...rows.map((row, index) => createElement(MessageRow, {
     key: index, row, expanded, columns,
-  }))), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  }))), { stdout: stdout as unknown as NodeJS.WriteStream, stdin: stdin as unknown as NodeJS.ReadStream, exitOnCtrlC: false, patchConsole: false, interactive: true });
   await new Promise((resolve) => setTimeout(resolve, 20));
   instance.unmount();
   return output;
@@ -102,7 +105,7 @@ test('NO_COLOR keeps tool outcome symbols and labels readable without color SGR'
   }
 });
 
-function paintedLines(output) {
+function paintedLines(output: string): string[] {
   return stripAnsi(output).split('\n').map((line) => line.trimEnd()).filter((line) => line !== '');
 }
 

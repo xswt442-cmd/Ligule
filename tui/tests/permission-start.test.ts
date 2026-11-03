@@ -10,10 +10,12 @@ import { hostProviderFromConfig } from '../../core/dist/host/host.js';
 import { runTui } from '../dist/tui/start.js';
 import { waitFor } from '../../core/tests/helpers/tui-host.ts';
 
+type FakeInput = PassThrough & { isTTY: boolean; setRawMode(): unknown; ref(): void; unref(): void };
+
 function createTerminal() {
   const stdout = Object.assign(new PassThrough(), { columns: 180, rows: 30, isTTY: true });
   const stderr = new PassThrough();
-  const stdin = Object.assign(new PassThrough(), {
+  const stdin: FakeInput = Object.assign(new PassThrough(), {
     isTTY: true,
     setRawMode: () => stdin,
     ref: () => {},
@@ -24,7 +26,7 @@ function createTerminal() {
   return { stdin, stdout, stderr, output: () => output };
 }
 
-function plainOutput(value) {
+function plainOutput(value: string): string {
   return value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
 }
 
@@ -41,16 +43,16 @@ test('runTui reports the platform capability snapshot supplied to its Host', { t
     host: { sessionDirectory },
   } });
   const terminal = createTerminal();
-  const snapshot = await detectPermissionCapabilities({ shellConfig: config, workspaceRoot: projectDirectory });
+  const snapshot = await detectPermissionCapabilities({ shellConfig: config as { exec?: { shell?: unknown } }, workspaceRoot: projectDirectory });
   let finished = false;
-  let runError;
+  let runError: unknown;
   const running = runTui({
     config,
     provider: hostProviderFromConfig(config),
     locale: 'en',
-    stdout: terminal.stdout,
-    stdin: terminal.stdin,
-    stderr: terminal.stderr,
+    stdout: terminal.stdout as unknown as NodeJS.WriteStream,
+    stdin: terminal.stdin as unknown as NodeJS.ReadStream,
+    stderr: terminal.stderr as unknown as NodeJS.WriteStream,
     historyFile: join(directory, 'history.jsonl'),
     inputFile: join(directory, 'inputs.jsonl'),
     keyFile: join(directory, 'keys.json'),

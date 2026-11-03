@@ -2,17 +2,20 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { PassThrough } from 'node:stream';
 import { createElement } from 'react';
+import type { ReactElement } from 'react';
 import { render } from 'ink';
 import { configurationText, ProgressLine, Welcome } from '../dist/tui/chrome.js';
 import { displayWidth } from '../dist/tui/commands.js';
-import { completeFrame } from './helpers/frames.js';
+import { completeFrame } from './helpers/frames.ts';
 
-async function paint(component, columns) {
+type FakeInput = PassThrough & { isTTY: boolean; setRawMode(): unknown; ref(): void; unref(): void };
+
+async function paint(component: ReactElement, columns: number): Promise<string> {
   const stdout = Object.assign(new PassThrough(), { columns, rows: 24, isTTY: true });
-  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref() {}, unref() {} });
+  const stdin: FakeInput = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref() {}, unref() {} });
   let output = '';
   stdout.on('data', chunk => { output += chunk; });
-  const instance = render(component, { stdout, stdin, patchConsole: false, exitOnCtrlC: false, interactive: true });
+  const instance = render(component, { stdout: stdout as unknown as NodeJS.WriteStream, stdin: stdin as unknown as NodeJS.ReadStream, patchConsole: false, exitOnCtrlC: false, interactive: true });
   await new Promise(resolve => setTimeout(resolve, 30));
   const frame = completeFrame(output);
   instance.unmount();
@@ -21,7 +24,7 @@ async function paint(component, columns) {
 
 test('configuration keeps approval visible and stays within narrow display widths', () => {
   for (const columns of [32, 50, 80, 120]) {
-    for (const locale of ['zh', 'en']) {
+    for (const locale of ['zh', 'en'] as const) {
       for (const mode of ['minimal', 'very-long-mode-中文😀'.repeat(5)]) {
         const text = configurationText({ model: 'very-long-model-中文😀'.repeat(5), mode, policy: 'none', columns, locale });
         assert.ok(displayWidth(text) <= columns, text);
@@ -41,7 +44,7 @@ test('the configuration line shows a thinking override and hides the default', (
 });
 
 test('the configuration line keeps a two-column safety margin at console edges', () => {
-  for (const locale of ['zh', 'en']) {
+  for (const locale of ['zh', 'en'] as const) {
     for (const columns of [80, 60, 40]) {
       const line = configurationText({ model: 'deepseek-flash', mode: 'minimal', policy: 'ask', permission: 'read-only', thinking: 'high', columns, locale });
       assert.ok(displayWidth(line) <= Math.max(8, columns - 2), `${locale}/${columns}: width ${displayWidth(line)} of ${line}`);
@@ -50,7 +53,7 @@ test('the configuration line keeps a two-column safety margin at console edges',
 });
 
 test('a narrow configuration line keeps the approval value readable', () => {
-  for (const locale of ['zh', 'en']) {
+  for (const locale of ['zh', 'en'] as const) {
     for (const columns of [8, 10, 12, 16, 20]) {
       const line = configurationText({ model: 'long-model-name', mode: 'full', policy: 'ask', permission: 'read-only', columns, locale });
       assert.ok(displayWidth(line) <= Math.max(8, columns - 2), `${locale}/${columns}: ${line}`);

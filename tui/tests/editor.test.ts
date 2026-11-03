@@ -9,7 +9,7 @@ const testplace = resolve(dirname(fileURLToPath(import.meta.url)), '../testplace
 const editorFixture = fileURLToPath(new URL('./fixtures/editor.mjs', import.meta.url));
 const commandFixture = fileURLToPath(new URL('./fixtures/editor.cmd', import.meta.url));
 
-async function withDirectory(run) {
+async function withDirectory(run: (directory: string) => Promise<void>) {
   await mkdir(testplace, { recursive: true });
   const directory = await mkdtemp(join(testplace, 'editor test-'));
   try {
@@ -32,7 +32,7 @@ async function withDirectory(run) {
   }
 }
 
-function quoted(value) {
+function quoted(value: string) {
   return `"${value.replaceAll('"', '\\"')}"`;
 }
 
@@ -52,16 +52,16 @@ test('external editor returns an explicit failure and the child exit code', asyn
   await withDirectory(async (directory) => {
     const marker = join(directory, 'marker.txt');
     const command = `${quoted(process.execPath)} ${quoted(editorFixture)} exit ${quoted(marker)} value 17`;
-    const result = await editInExternalEditor(command, 'draft');
+    const result = await editInExternalEditor(command, 'draft') as { code: string; detail: string };
     assert.equal(result.code, 'tui_editor_failed');
     assert.match(result.detail, /17/);
   });
 });
 
 test('external editor rejects empty and unbalanced command text with enumerable details', async () => {
-  const empty = await editInExternalEditor('   ', 'draft');
+  const empty = await editInExternalEditor('   ', 'draft') as { code: string; detail: string };
   assert.deepEqual(empty, { code: 'tui_editor_command_invalid', detail: 'EDITOR must contain a program name' });
-  const unbalanced = await editInExternalEditor('"unfinished', 'draft');
+  const unbalanced = await editInExternalEditor('"unfinished', 'draft') as { code: string; detail: string };
   assert.equal(unbalanced.code, 'tui_editor_command_unbalanced');
   assert.match(unbalanced.detail, /quote open/);
   assert.ok(Object.keys(unbalanced).includes('detail'));
@@ -83,7 +83,7 @@ test('external editor reports a missing readback file', async () => {
   await withDirectory(async (directory) => {
     const marker = join(directory, 'marker.txt');
     const command = `${quoted(process.execPath)} ${quoted(editorFixture)} remove ${quoted(marker)} value -`;
-    const result = await editInExternalEditor(command, 'draft');
+    const result = await editInExternalEditor(command, 'draft') as { code: string; detail: string };
     assert.equal(result.code, 'tui_editor_file_read_failed');
     assert.match(result.detail, /draft\.md/);
   });

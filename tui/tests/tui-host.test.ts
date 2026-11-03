@@ -8,18 +8,21 @@ test('the TUI host helper runs a real Chat Completions HTTP round and records it
   await withTuiHost(async ({ client, config, directory, sessionDirectory, sessionId, requests, notifications, providerRequests }) => {
     assert.equal(config.boundary.startsWith(join(directory, 'project')), true);
     const input = 'Explain this local harness';
-    const result = await client.request('run.start', { sessionId, input });
+    const result = await client.request('run.start', { sessionId, input }) as { iterations: number };
     assert.equal(result.iterations, 1);
     assert.deepEqual(providerRequests[0].messages.at(-1), { role: 'user', content: input });
-    assert.equal(providerRequests[0].stream, true);
-    assert.equal(providerRequests[0].stream_options.include_usage, true);
+    const payload = providerRequests[0] as (typeof providerRequests)[number] & { stream: boolean; stream_options: { include_usage: boolean } };
+    assert.equal(payload.stream, true);
+    assert.equal(payload.stream_options.include_usage, true);
     assert.ok(requests.some((request) => request.method === 'session.create'));
-    assert.ok(requests.some((request) => request.method === 'run.start' && request.params.input === input));
-    assert.ok(notifications.some((message) => message.event?.kind === 'assistant'));
+    assert.ok(requests.some((request) => request.method === 'run.start' && (request.params as { input?: string }).input === input));
+    assert.ok(notifications.some((message) => (message.event as { kind?: string } | undefined)?.kind === 'assistant'));
 
-    const { events } = await client.request('session.read', { sessionId });
-    const answer = events.find((event) => event.kind === 'assistant');
-    const usage = events.find((event) => event.kind === 'usage');
+    const { events } = await client.request('session.read', { sessionId }) as {
+      events: { kind: string; text: string; input: number; output: number }[];
+    };
+    const answer = events.find((event) => event.kind === 'assistant')!;
+    const usage = events.find((event) => event.kind === 'usage')!;
     assert.equal(answer.text, `Local response: ${input}`);
     assert.equal(usage.input, Buffer.byteLength(JSON.stringify(providerRequests[0])));
     assert.equal(usage.output, Buffer.byteLength(answer.text));

@@ -10,8 +10,8 @@ test('markdown preserves literal code and reads both kinds of fences', () => {
   const source = '# 中文注释\nconst text = "阶段";   ';
   const lines = markdownLines(`~~~js\n${source}\n~~~`);
   assert.equal(lines.map((line) => line.text).join('\n'), source);
-  assert.ok(lines[1].spans.some((span) => span.scope === 'keyword'));
-  assert.ok(lines[1].spans.some((span) => span.scope === 'string'));
+  assert.ok(lines[1].spans!.some((span) => span.scope === 'keyword'));
+  assert.ok(lines[1].spans!.some((span) => span.scope === 'string'));
   assert.equal(markdownLines('3. 第三项')[0].text, '3. 第三项');
 });
 

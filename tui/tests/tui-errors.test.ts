@@ -44,8 +44,8 @@ test('known runtime failures give next steps in Chinese and English', () => {
 });
 
 test('credential and response failures avoid exposing secret or response details', () => {
-  const credential = runtimeFailureText('provider_credential_missing');
-  const response = runtimeFailureText('provider_http_error');
+  const credential = runtimeFailureText('provider_credential_missing')!;
+  const response = runtimeFailureText('provider_http_error')!;
   assert.match(credential, /\/credentials/u);
   assert.match(credential, /环境变量/u);
   assert.match(credential, /桌面/u);
@@ -63,8 +63,8 @@ test('provider diagnostics show safe, actionable metadata in both locales', () =
     responseReceived: true, streamReceived: false, recoverable: true,
     url: 'https://user:secret@example.invalid/?key=private',
   };
-  const chinese = providerDiagnosticText(diagnostic);
-  const english = providerDiagnosticText(diagnostic, 'en');
+  const chinese = providerDiagnosticText(diagnostic)!;
+  const english = providerDiagnosticText(diagnostic, 'en')!;
   assert.match(chinese, /HTTP 429.*请求限流.*尝试 3 次.*收到响应.*未收到响应流.*可恢复/u);
   assert.match(english, /HTTP 429.*rate limit.*3 attempts.*response received.*no stream data.*recoverable/u);
   assert.doesNotMatch(chinese + english, /secret|private|example\.invalid/u);
