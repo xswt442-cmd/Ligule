@@ -8,15 +8,15 @@ import { SPILL_NAME } from '@ligule/core/kernel/result.js';
 import { sessionTurnToAtif } from '@ligule/core/session/atif.js';
 import { setTrusted } from '@ligule/core/kernel/workspace-trust.js';
 
+import { BENCHMARK_POLICY_MODE } from './policy-mode.mjs';
+
+export { BENCHMARK_POLICY_MODE };
+
 const MAX_SESSION_BYTES = 256 * 1024 * 1024;
 const MAX_SPILL_BYTES = 64 * 1024 * 1024;
 const MAX_TASK_TIMEOUT_MS = 86_400_000;
 const MAX_REQUEST_TIMEOUT_MS = 3_600_000;
 const RUN_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u;
-// 基准任务里没有人可以回答审批：`ask` 会在第一次需要放行时以 ask_unavailable 结束，
-// 于是被测的是审批通道而不是 Agent 能力。基准固定用 `never`，并在运行前显式信任任务目录——
-// 这两项都是评测声明，不是给产品用的默认值。
-export const BENCHMARK_POLICY_MODE = 'never';
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 const CLI_ENV_ALLOWLIST = [
   'PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',

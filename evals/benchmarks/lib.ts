@@ -156,6 +156,11 @@ export async function runProcess(
       exitSignal = signal;
       // 进程已经退出，别再让它去 taskkill 一个可能被系统复用的 PID。
       clearTimeout(timer);
+      // 父进程退出不代表后代退出：它们仍持有管道，可能继续消耗模型额度。
+      // 在 POSIX 上父进程是这个进程组的组长，按组收掉；Windows 上 PID 已失效，只能靠排空兜底。
+      if (process.platform !== 'win32' && child.pid !== undefined && isProcessGroupAlive(child.pid)) {
+        try { process.kill(-child.pid, 'SIGKILL'); } catch { /* the group is already gone */ }
+      }
       // 进程已退出但管道可能仍被后代持有，close 因而永不触发：留一点排空时间后强制收口。
       drainTimer = setTimeout(() => {
         child.stdout?.destroy();

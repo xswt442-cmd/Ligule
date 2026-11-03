@@ -58,6 +58,8 @@ async function packagedHelper(root) {
   }
   const helperPath = join(packageRoot, 'export_session.mjs');
   await writeFile(helperPath, await readFile(helperSource));
+  // 导出器从同目录的 policy-mode.mjs 读取基准审批档位，容器里也要一起上传。
+  await writeFile(join(packageRoot, 'policy-mode.mjs'), await readFile(fileURLToPath(new URL('./policy-mode.mjs', import.meta.url))));
   return import(pathToFileURL(helperPath).href);
 }
 

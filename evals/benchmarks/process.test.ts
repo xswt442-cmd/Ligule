@@ -30,17 +30,19 @@ test('a process that exits while a descendant holds the pipes still settles', as
   const root = await mkdtemp(join(tmpdir(), 'ligule-process-drain-'));
   try {
     const child = join(root, 'child.cjs');
+    const marker = join(root, 'heartbeat.txt');
     // 子进程立刻退出，但后代继承 stdio 并一直活着：结果必须按真实退出码收口，
-    // 不能因为 close 迟迟不来就把整次评测挂住（POSIX 上由 2 秒排空兜底）。
+    // 不能因为 close 迟迟不来就把整次评测挂住，也不能把后代留在后台继续跑。
     await writeFile(child, [
       "const { spawn } = require('node:child_process');",
-      "spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'inherit'] });",
+      "const marker = process.argv[2];",
+      "spawn(process.execPath, ['-e', \"const fs=require('node:fs');let n=0;setInterval(()=>fs.writeFileSync(process.argv[1],String(n++)),50)\", marker], { stdio: ['ignore', 'inherit', 'inherit'] });",
       'process.stdout.write("bye");',
-      'process.exit(3);',
+      'setTimeout(() => process.exit(3), 150);',
       '',
     ].join('\n'), 'utf8');
     const started = Date.now();
-    const result = await runProcess(process.execPath, [child], {
+    const result = await runProcess(process.execPath, [child, marker], {
       cwd: root, env: process.env, timeoutMs: 60_000,
     });
     assert.equal(result.status, 3);
@@ -48,6 +50,11 @@ test('a process that exits while a descendant holds the pipes still settles', as
     assert.equal(result.terminationPending, false);
     assert.equal(result.stdout, 'bye');
     assert.ok(Date.now() - started < 30_000, 'the runner waited for a leaked pipe instead of settling');
+    // 后代若还活着会继续写 marker：收口之后数值必须停住。
+    const first = await markerValue(marker);
+    assert.notEqual(first, '');
+    await delay(500);
+    assert.equal(await markerValue(marker), first, 'a descendant kept running after the parent exited');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

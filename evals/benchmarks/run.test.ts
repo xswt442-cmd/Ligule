@@ -308,7 +308,8 @@ test('the manifest records attempts without inventing task outcomes', async () =
       attempts: Record<string, unknown>[];
     };
     assert.equal(manifest.experiment.git_sha, IDENTITY.gitSha);
-    assert.equal(manifest.experiment.policy_mode, 'auto');
+    // 评测固定用 never 跑：容器里没人能回答审批，manifest 必须记下真实档位。
+  assert.equal(manifest.experiment.policy_mode, 'never');
     assert.equal(manifest.attempts.length, 4);
     const passAttempt = manifest.attempts.find((attempt) => attempt.task_id === 'pass-task');
     assert.equal(passAttempt?.result_file, 'harbor/job-1/pass-task__1/result.json');

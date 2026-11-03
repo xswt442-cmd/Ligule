@@ -3,6 +3,8 @@ import { existsSync } from 'node:fs';
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, join, relative, sep } from 'node:path';
 
+import { BENCHMARK_POLICY_MODE } from '../harbor/policy-mode.mjs';
+
 export type PlanTask = { id: string; category: string; covers: string };
 
 export type ManifestPlan = {
@@ -153,7 +155,7 @@ export async function writeManifest({
       provider: baseUrl === undefined ? null : new URL(baseUrl).hostname,
       config_sha256: createHash('sha256').update(configBytes).digest('hex'),
       tool_mode: 'default',
-      policy_mode: 'auto',
+      policy_mode: BENCHMARK_POLICY_MODE,
       permissions: { profile: 'full-access', network: 'unrestricted', container: 'harbor-task' },
       limits: {
         attempts_per_task: plan.attempts_per_task,

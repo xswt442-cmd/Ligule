@@ -27,6 +27,7 @@ NODE_RUNTIME_TARBALL_TARGET = f"{NODE_RUNTIME_DIRECTORY}/node-runtime.tar.gz"
 NODE_RUNTIME_BIN = f"{NODE_RUNTIME_DIRECTORY}/bin"
 APT_SOURCES_TARGET = f"{INSTALL_PREFIX}/apt-sources.list"
 REMOTE_EXPORTER = f"{PACKAGE_ROOT}/export_session.mjs"
+REMOTE_POLICY_MODE = f"{PACKAGE_ROOT}/policy-mode.mjs"
 MAX_MODEL_CALLS = 64
 MAX_TASK_TIMEOUT_MS = 86_400_000
 MAX_REQUEST_TIMEOUT_MS = 3_600_000
@@ -387,12 +388,14 @@ class LiguleAgent(BaseInstalledAgent):
         with environment.scoped_exec_env({self.ligule_api_key_env: ""}):
             await super().setup(environment)
             source = Path(__file__).with_name("export_session.mjs")
+            policy_source = Path(__file__).with_name("policy-mode.mjs")
             await self.exec_as_agent(
                 environment,
                 command=f"test ! -e {shlex.quote(REMOTE_EXPORTER)}",
                 timeout_sec=30,
             )
             await self._upload_agent_owned_file(environment, source, REMOTE_EXPORTER)
+            await self._upload_agent_owned_file(environment, policy_source, REMOTE_POLICY_MODE)
 
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
         api_key = self.extra_env.get(self.ligule_api_key_env)
