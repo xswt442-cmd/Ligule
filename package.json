@@ -14,7 +14,7 @@
     "test": "pnpm run build && pnpm run test:core && pnpm run test:tui && pnpm run test:integration && pnpm run test:engineering",
     "bench:perf": "pnpm run build && node --experimental-strip-types benchmarks/run.ts",
     "bench:agent": "node --experimental-strip-types evals/benchmarks/run.ts",
-    "eval:smoke": "node scripts/eval-smoke.mjs",
+    "eval:smoke": "node scripts/eval-smoke.ts",
     "check-pack": "pnpm --filter ligule run check-pack",
     "verify-install": "pnpm --filter ligule run verify-install",
     "check:dependencies": "node scripts/check-dependencies.mjs",

@@ -7,7 +7,7 @@ const repository = dirname(dirname(fileURLToPath(import.meta.url)));
 const testplaceTemp = join(repository, '..', 'testplace', 'tmp');
 const harborVersion = '0.25.0';
 
-function run(command, args, { label, env }) {
+function run(command: string, args: readonly string[], { label, env }: { label: string; env: NodeJS.ProcessEnv }): void {
   process.stdout.write(`\n[eval:smoke] ${label}\n`);
   const result = spawnSync(command, args, {
     cwd: repository,
@@ -21,7 +21,7 @@ function run(command, args, { label, env }) {
   }
 }
 
-function runPinnedPnpm(args, options) {
+function runPinnedPnpm(args: readonly string[], options: { label: string; env: NodeJS.ProcessEnv }): void {
   const pnpmCli = process.env.npm_execpath;
   if (typeof pnpmCli !== 'string' || !pnpmCli.toLowerCase().includes('pnpm')) {
     throw new Error('run this smoke check through the pinned `pnpm run eval:smoke` command');
@@ -31,7 +31,7 @@ function runPinnedPnpm(args, options) {
     isJavaScriptCli ? [pnpmCli, ...args] : args, options);
 }
 
-async function createRunDirectory() {
+async function createRunDirectory(): Promise<{ parent: string; path: string }> {
   await mkdir(testplaceTemp, { recursive: true });
   const parent = await realpath(testplaceTemp);
   const path = await mkdtemp(join(parent, 'ligule-eval-smoke-'));
@@ -43,7 +43,7 @@ async function createRunDirectory() {
   return { parent, path: realPath };
 }
 
-async function removeRunDirectory(parent, path) {
+async function removeRunDirectory(parent: string, path: string): Promise<void> {
   const realParent = await realpath(parent);
   const realPath = await realpath(path);
   const relativePath = relative(realParent, realPath);
@@ -55,9 +55,9 @@ async function removeRunDirectory(parent, path) {
   await rm(realPath, { recursive: true });
 }
 
-async function main() {
+async function main(): Promise<void> {
   const { parent, path } = await createRunDirectory();
-  let failure;
+  let failure: unknown;
   try {
     const pythonTemp = join(path, 'python-fixtures');
     const nodeTemp = join(path, 'node-fixtures');
@@ -68,7 +68,7 @@ async function main() {
       await mkdir(directory, { recursive: true });
     }
 
-    const env = {
+    const env: NodeJS.ProcessEnv = {
       ...process.env,
       PYTHONDONTWRITEBYTECODE: '1',
       UV_CACHE_DIR: uvCache,

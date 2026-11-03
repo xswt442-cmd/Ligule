@@ -4,5 +4,5 @@
     "composite": true,
     "noEmit": true
   },
-  "include": ["desktop-release-manifest.ts", "check-js-syntax.ts"]
+  "include": ["desktop-release-manifest.ts", "check-js-syntax.ts", "eval-smoke.ts"]
 }
