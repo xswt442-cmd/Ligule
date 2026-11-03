@@ -82,7 +82,7 @@ interface ControlOptions {
 
 export interface McpInitialSettings {
   readonly mode?: string;
-  readonly policy?: 'ask' | 'auto' | 'none' | 'never';
+  readonly policy?: 'always' | 'ask' | 'auto' | 'never';
   readonly model?: { readonly provider: string; readonly model: string };
   readonly thinking?: { readonly effort: 'none' | 'low' | 'high' | 'max' | 'default' } | null;
   readonly outputTokens?: number | null;
@@ -92,7 +92,8 @@ export interface McpInitialSettings {
 
 export interface McpSessionChanges {
   readonly mode?: string;
-  readonly policy?: 'ask' | 'auto' | 'none' | 'never' | 'default';
+  // 'none' 只是旧客户端的字面值，Host 侧按 ask 读取。
+  readonly policy?: 'always' | 'ask' | 'auto' | 'never' | 'none' | 'default';
   readonly model?: { readonly provider: string; readonly model: string } | null;
   readonly thinking?: { readonly effort: 'none' | 'low' | 'high' | 'max' | 'default' } | null;
   readonly outputTokens?: number | null;

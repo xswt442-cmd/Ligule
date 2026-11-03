@@ -167,8 +167,11 @@ test('a key with the same name in another table is not the one being changed', (
 test('each field only takes a value of its own shape', () => {
   assert.equal(encodeValue(field('model.api'), 'chat-completions').literal, '"chat-completions"');
   assert.throws(() => encodeValue(field('model.api'), 'openai'), (error: unknown) => (error as { code?: string }).code === 'config_field_value');
-  assert.equal(encodeValue(field('policy.mode'), 'none').literal, '"none"');
-  assert.equal(encodeValue(field('policy.mode'), 'never').literal, '"never"');
+  for (const mode of ['always', 'ask', 'auto', 'never']) {
+    assert.equal(encodeValue(field('policy.mode'), mode).literal, `"${mode}"`);
+  }
+  // `none` 与旧 `never` 不再是可写入的档位；历史值只在读取时降级。
+  assert.throws(() => encodeValue(field('policy.mode'), 'none'), (error: unknown) => (error as { code?: string }).code === 'config_field_value');
   assert.throws(() => encodeValue(field('policy.mode'), 'yolo'), (error: unknown) => (error as { code?: string }).code === 'config_field_value');
   // 允许端点地址包含查询参数，但不允许在地址中写入凭据。
   assert.equal(encodeValue(field('model.baseURL'), 'https://a.example.com:443/v1?api=k').value, 'https://a.example.com:443/v1?api=k');
@@ -215,6 +218,8 @@ test('the write needs the version it read, lands atomically and reports the new 
     const tier = await writeConfigField(file, { field: 'policy.mode', value: 'auto', version: configVersion(await readFile(file, 'utf8')) });
     assert.equal(tier.created, true, '那一份文件里原来没有 [policy]，补一张表');
     assert.equal(readToml(await readFile(file, 'utf8')).policy.mode, 'auto');
+    // 新四档写入时必须带上语义标记，读取方才能把新 `never` 和旧 `never` 分开。
+    assert.equal(readToml(await readFile(file, 'utf8')).policy.semantics, 2);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { homedir } from 'node:os';
 import { createDecisionChain, createKernel, KernelError } from '../dist/index.js';
-import { policyArgsHash } from '../dist/kernel/policy.js';
+import { policyArgsHash, readPolicyMode } from '../dist/kernel/policy.js';
 import type { DecisionChain, PolicyCall, PolicyMode, PolicyQuestion } from '../dist/kernel/policy.js';
 import { createPermissionContext } from '../dist/kernel/permission.js';
 import { classifyDangerousCommand } from '../dist/capability/dangerous-command.js';
@@ -131,42 +131,42 @@ test('a later guard cannot undo an earlier denial', async () => {  const chain =
   });
 });
 
-test('no-approval mode skips ordinary approval while deny rules, guards, and unsafe targets remain closed', async () => {
+test('never skips the whole policy layer while guards and unusable network targets stay closed', async () => {
   let asked = 0;
   const chain = createDecisionChain({
-    mode: 'none',
+    mode: 'never',
     ask: async () => { asked += 1; return true; },
     rules: [{ tool: 'exec', decision: 'deny', match: 'rm *', reason: 'blocked by rule' }],
   });
   chain.guard(({ command }) => command?.startsWith('curl ') === true ? 'blocked by guard' : undefined);
 
-  assert.equal((await chain.evaluate({ tool: 'read', input: { path: 'README.md' } })).via, 'none');
-  assert.equal((await chain.evaluate({ tool: 'create', input: { path: 'new.txt', content: 'ok' } })).via, 'none');
-  assert.equal((await chain.evaluate({ tool: 'exec', input: { command: 'git status --short' } })).via, 'none');
-  assert.equal((await chain.evaluate({ tool: 'exec', input: { command: 'rm -rf target' } })).code, 'policy_denied');
+  assert.equal((await chain.evaluate({ tool: 'read', input: { path: 'README.md' } })).via, 'never');
+  assert.equal((await chain.evaluate({ tool: 'create', input: { path: 'new.txt', content: 'ok' } })).via, 'never');
+  assert.equal((await chain.evaluate({ tool: 'exec', input: { command: 'git status --short' } })).via, 'never');
+  // 策略层被整层跳过：规则表里的拒绝也不再参与判定，只有独立的安全校验还拦人。
+  assert.equal((await chain.evaluate({ tool: 'exec', input: { command: 'rm -rf target' } })).via, 'never');
   assert.equal((await chain.evaluate({ tool: 'exec', input: { command: 'curl https://example.com' } })).code, 'guard_denied');
-  assert.equal((await chain.evaluate({ tool: 'read', input: { path: 'x' }, target: { class: 'private', addresses: ['10.0.0.2'] } as unknown as NetworkTarget })).code, 'policy_manual_approval_disabled');
+  assert.equal((await chain.evaluate({ tool: 'read', input: { path: 'x' }, target: { class: 'link-local', addresses: ['169.254.169.254'] } as unknown as NetworkTarget })).code, 'policy_denied');
   assert.equal(asked, 0);
 });
 
-test('no-approval mode does not turn repeated denials into approval prompts', async () => {
+test('never does not turn repeated denials into approval prompts', async () => {
   let asked = 0;
-  const chain = createDecisionChain({ mode: 'none', thresholds: { consecutive: 1, total: 1 }, ask: async () => { asked += 1; return true; } });
+  const chain = createDecisionChain({ mode: 'never', thresholds: { consecutive: 1, total: 1 }, ask: async () => { asked += 1; return true; } });
   chain.guard(({ command }) => command === 'blocked' ? 'blocked by guard' : undefined);
   assert.equal((await chain.evaluate({ tool: 'exec', input: { command: 'blocked' } })).decision, 'deny');
-  assert.equal(chain.mode, 'none');
-  assert.equal((await chain.evaluate({ tool: 'read', input: { path: 'README.md' } })).via, 'none');
+  assert.equal(chain.mode, 'never');
+  assert.equal((await chain.evaluate({ tool: 'read', input: { path: 'README.md' } })).via, 'never');
   assert.equal(asked, 0);
 });
 
-test('legacy never retains its refusal for file operations that require approval', async () => {
-  let asked = 0;
-  const chain = createDecisionChain({ mode: 'never', ask: async () => { asked += 1; return true; } });
-  const result = await chain.evaluate({ tool: 'create', input: { path: 'new.txt', content: 'blocked' } });
-  assert.equal(result.decision, 'deny');
-  assert.equal(result.code, 'policy_denied');
-  assert.equal(result.via, 'never');
-  assert.equal(asked, 0);
+test('legacy none and never are read as ask instead of granting the new never', () => {
+  assert.equal(readPolicyMode('none', true), 'ask', '旧 none 只降级到 ask');
+  assert.equal(readPolicyMode('never', true), 'ask', '旧 never 的字符串无法自证语义，一律降为 ask');
+  assert.equal(readPolicyMode('never', false), 'never', '新版写入的 never 才是跳过审批的那一档');
+  assert.equal(readPolicyMode('none', false), undefined, '新版不再接受 none');
+  assert.equal(readPolicyMode('always', true), undefined, '旧数据里不存在 always，无法自证时拒绝');
+  assert.equal(readPolicyMode('always', false), 'always');
 });
 
 test('auto policy requires manual approval for external and unclassified tools even when an allow rule matches', async () => {
@@ -189,9 +189,9 @@ test('auto policy requires manual approval for external and unclassified tools e
 
   let askedCount = 0;
   const never = createDecisionChain({ mode: 'never', ask: async () => { askedCount += 1; return true; } });
-  const refused = await never.evaluate({ tool: 'mcp.call', capability: 'mcp:fs/remove', access: 'external', input: {} });
-  assert.equal(refused.decision, 'deny');
-  assert.equal(refused.code, 'policy_denied');
+  const allowed = await never.evaluate({ tool: 'mcp.call', capability: 'mcp:fs/remove', access: 'external', input: {} });
+  assert.equal(allowed.decision, 'allow');
+  assert.equal(allowed.via, 'never');
   assert.equal(askedCount, 0);
 });
 
@@ -216,7 +216,7 @@ test('a deny rule wins over an allow rule written earlier in the table', async (
 test('a matching ask rule requires approval even when the session would otherwise auto-allow', async () => {
   const { calls, ask } = asked(true);
   const chain = createDecisionChain({
-    mode: 'never',
+    mode: 'auto',
     rules: [
       { tool: 'mcp:playwright/browser_navigate', decision: 'allow' },
       { tool: 'mcp:playwright/browser_navigate', decision: 'ask', reason: 'review browser navigation' },
@@ -444,7 +444,8 @@ test('scoped deletions and single-process termination require approval in automa
     for (const [kind, command] of commands) {
       const result = await chain.evaluate({ tool: 'exec', input: { command }, shell: { ...POWERSHELL, kind } });
       if (mode === 'never') {
-        assert.equal(result.decision, 'deny', `${command} must remain denied without an approval channel`);
+        // 跳过审批层的档位不再要求逐次批准，但仍然只在工具自己的边界里执行。
+        assert.equal(result.decision, 'allow', `${command} runs without a prompt`);
         assert.equal(result.via, 'never');
       } else {
         assert.equal(result.decision, 'allow', `${command} requires the affirmative per-call answer`);
@@ -689,42 +690,44 @@ test('the tier has two sources and the rule table can be replaced in place', asy
   assert.equal(denied.via, 'rule', '新表里那一条现在就在判');
 });
 
-test('none allows ordinary in-bound tools without asking and still applies explicit deny rules', async () => {
+test('never allows ordinary in-bound tools without asking and skips the rule table', async () => {
   let asks = 0;
   const chain = createDecisionChain({
-    mode: 'none',
+    mode: 'never',
     rules: [{ tool: 'delete', decision: 'deny', reason: 'keep this file' }],
     ask: async () => { asks += 1; return true; },
   });
   assert.deepEqual(await judged(chain, { tool: 'create', input: { path: 'app.js', content: 'demo' }, access: 'write' }), {
     decision: 'allow',
   });
+  // 规则表属于策略层，`never` 整层跳过；显式拒绝不能在这个档位里生效。
   assert.deepEqual(await judged(chain, { tool: 'delete', input: { path: 'app.js' }, access: 'write' }), {
-    decision: 'deny', code: 'policy_denied', reason: 'keep this file',
+    decision: 'allow',
   });
+  // 内容检查不属于策略层，识别出来的硬拒绝仍然生效。
   const hardDenied = await chain.evaluate({ tool: 'exec', input: { command: 'rm -rf /' } });
   assert.equal(hardDenied.code, 'policy_hard_denied');
+  // 环回与私有地址需要用审批作为边界，跳过审批后按调用方自己的权限边界执行。
   const privateTarget = await chain.evaluate({ tool: 'fetch', input: { url: 'http://10.0.0.2/' }, target: { class: 'private', addresses: ['10.0.0.2'] } as unknown as NetworkTarget });
-  assert.equal(privateTarget.code, 'policy_manual_approval_disabled');
+  assert.equal(privateTarget.decision, 'allow');
   assert.equal(asks, 0);
 });
 
-test('none does not turn operations that require a separate human boundary into ordinary calls', async () => {
+test('never does not let a manual-approval requirement become a prompt', async () => {
   let asks = 0;
-  const chain = createDecisionChain({ mode: 'none', ask: async () => { asks += 1; return true; } });
+  const chain = createDecisionChain({ mode: 'never', ask: async () => { asks += 1; return true; } });
   const result = await chain.evaluate({
     tool: 'exec', input: { command: 'git status' }, requiresManualApproval: true,
   });
-  assert.equal(result.decision, 'deny');
-  assert.equal(result.code, 'policy_manual_approval_disabled');
-  assert.equal(result.answer, 'unavailable');
+  assert.equal(result.decision, 'allow');
+  assert.equal(result.via, 'never');
   assert.equal(asks, 0);
 });
 
-test('none does not let forcedToAsk restore per-call prompts', async () => {
+test('never does not let forcedToAsk restore per-call prompts', async () => {
   let asks = 0;
   const chain = createDecisionChain({
-    mode: 'none', thresholds: { consecutive: 1, total: 1 },
+    mode: 'never', thresholds: { consecutive: 1, total: 1 },
     ask: async () => { asks += 1; return true; },
   });
   const removeGuard = chain.guard(({ command }) => command === 'blocked' ? 'blocked by a guard' : undefined);
@@ -735,11 +738,10 @@ test('none does not let forcedToAsk restore per-call prompts', async () => {
   assert.equal(asks, 0);
 });
 
-test('legacy never keeps its existing refusal behavior for calls requiring approval', async () => {
+test('never does not ask before an interpreter command', async () => {
   const chain = createDecisionChain({ mode: 'never', ask: async () => true });
   const result = await chain.evaluate({ tool: 'exec', input: { command: 'python -c "print(1)"' } });
-  assert.equal(result.decision, 'deny');
-  assert.equal(result.code, 'policy_denied');
+  assert.equal(result.decision, 'allow');
   assert.equal(result.via, 'never');
 });
 
@@ -781,7 +783,7 @@ test('an operator approval clears forced asking and restores the configured poli
 
 test('automatic and remembered allows do not reset denial history', async () => {
   const chain = createDecisionChain({
-    mode: 'never', thresholds: { consecutive: 3, total: 5 },
+    mode: 'auto', thresholds: { consecutive: 3, total: 5 },
     rules: [{ tool: 'read', decision: 'deny' }],
   });
   await chain.evaluate({ tool: 'read', input: { path: 'one.txt' } });
@@ -803,4 +805,65 @@ test('an unavailable approval channel is not reported or counted as a human deni
   assert.equal(result.answer, 'unavailable');
   assert.notEqual(result.reason, 'the user declined');
   assert.deepEqual(chain.denials(), { consecutive: 0, total: 0 });
+});
+
+test('always asks about every tool call even when a rule would allow it', async () => {
+  const { calls, ask } = asked(true, true);
+  const chain = createDecisionChain({
+    mode: 'always',
+    rules: [{ tool: 'read', decision: 'allow', match: '*' }],
+    ask,
+  });
+  const first = await chain.evaluate({ tool: 'read', input: { path: 'README.md' } });
+  const second = await chain.evaluate({ tool: 'exec', input: { command: 'git status --short' } });
+  assert.equal(first.decision, 'allow');
+  assert.equal(first.via, 'ask');
+  assert.equal(first.level, 'always');
+  assert.equal(second.decision, 'allow');
+  assert.equal(second.via, 'ask');
+  assert.equal(calls.length, 2, '两次调用都问了人');
+  assert.equal(calls[0].policy, 'always');
+  assert.equal(calls[0].rememberable, false, '这一档不提供记住批准');
+  assert.equal(calls[0].reason, 'Always mode asks about every tool call.');
+});
+
+test('always still applies deny rules before asking', async () => {
+  const { calls, ask } = asked(true);
+  const chain = createDecisionChain({
+    mode: 'always',
+    rules: [{ tool: 'exec', decision: 'deny', match: 'rm *', reason: 'no deletions here' }],
+    ask,
+  });
+  const result = await chain.evaluate({ tool: 'exec', input: { command: 'rm -rf target' } });
+  assert.equal(result.decision, 'deny');
+  assert.equal(result.via, 'rule');
+  assert.equal(calls.length, 0, '拒绝规则在询问之前就结束了这次调用');
+});
+
+test('ask lets a covering allow rule answer without prompting and asks otherwise', async () => {
+  const { calls, ask } = asked(true);
+  const chain = createDecisionChain({ mode: 'ask', rules: [{ tool: 'exec', decision: 'allow', match: 'git *' }], ask });
+  const covered = await chain.evaluate({ tool: 'exec', input: { command: 'git status --short' } });
+  assert.equal(covered.decision, 'allow');
+  assert.equal(covered.via, 'rules');
+  assert.equal(calls.length, 0);
+  const uncovered = await chain.evaluate({ tool: 'exec', input: { command: 'pnpm test' } });
+  assert.equal(uncovered.via, 'ask');
+  assert.equal(calls.length, 1);
+});
+
+test('auto keeps the rule table authoritative and falls back to deterministic analysis', async () => {
+  const { calls, ask } = asked(true);
+  const chain = createDecisionChain({
+    mode: 'auto',
+    rules: [{ tool: 'exec', decision: 'deny', match: 'rm *' }, { tool: 'read', decision: 'ask', reason: 'look first' }],
+    ask,
+  });
+  const denied = await chain.evaluate({ tool: 'exec', input: { command: 'rm -rf target' } });
+  assert.equal(denied.via, 'rule');
+  const plain = await chain.evaluate({ tool: 'exec', input: { command: 'git status --short' } });
+  assert.equal(plain.via, 'auto');
+  const askedByRule = await chain.evaluate({ tool: 'read', input: { path: 'README.md' } });
+  assert.equal(askedByRule.via, 'ask');
+  assert.equal(calls.length, 1, '只有规则要求的那一次问了人');
 });

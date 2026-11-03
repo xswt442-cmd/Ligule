@@ -546,11 +546,23 @@ test('approved explicit multi-process termination kills only its listed test pro
       return kernel;
     };
 
-    let noneRequests = 0;
-    const noneKernel = createApprovalKernel('none', async () => { noneRequests += 1; return true; });
-    await assert.rejects(() => noneKernel.call('exec', { command }), { code: 'policy_manual_approval_disabled' });
-    assert.equal(noneRequests, 0, 'Policy none cannot bypass required trusted approval');
-    for (const child of [...targets, ...monitors]) assertRunning(child, 'process after Policy none');
+    // 新四档里 `never` 明确跳过 Policy 层（包括必须人工批准的那一类），所以它既不弹窗也不拦命令；
+    // 为了不去动后面要用的目标进程，这里单独开一个可丢弃的进程验证。
+    const disposable = await startTestMonitor('disposable-under-never');
+    try {
+      let neverRequests = 0;
+      const neverKernel = createApprovalKernel('never', async () => { neverRequests += 1; return true; });
+      const neverCommand = process.platform === 'win32'
+        ? `Stop-Process -Id ${disposable.pid} -Force`
+        : `kill -KILL ${disposable.pid}`;
+      const neverOutcome = await neverKernel.call('exec', { command: neverCommand }) as ExecOutcome;
+      assert.equal(neverOutcome.exitCode, 0, neverOutcome.text);
+      assert.equal(neverRequests, 0, 'never mode does not consult the approval channel');
+      await assertStopped(disposable.pid!);
+      for (const child of [...targets, ...monitors]) assertRunning(child, 'process after Policy never');
+    } finally {
+      await stopTestMonitor(disposable);
+    }
 
     const declined: PolicyQuestion[] = [];
     const declineKernel = createApprovalKernel('ask', async (request) => {

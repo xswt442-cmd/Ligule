@@ -5,7 +5,7 @@ import { KernelError } from './error.js';
 import { createConfig, type ConfigSnapshot } from './config.js';
 import { createLogger, type Logger, type LoggerBackend } from './log.js';
 import { failureOf, refusalOf, resultLimit, resultOf, spillContent } from './result.js';
-import { VERDICT_FIELDS, type DecisionChain, type PolicyMode } from './policy.js';
+import { POLICY_SEMANTICS, VERDICT_FIELDS, type DecisionChain, type PolicyMode } from './policy.js';
 import { createObservationLog, type ObservationLog } from './observe.js';
 import { resolveTarget, type NetworkTarget } from '../capability/network.js';
 import { resolveShell, withNativeExitCode, type ShellKind, type ShellSelection } from '../capability/shell.js';
@@ -494,7 +494,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
             const snapshot = policy.snapshot();
             const sessionOverride = policyOverrideForSession?.();
             try { await session.append({ kind: 'sessionPolicy', ignorable: true, ...snapshot,
-              override: sessionOverride === undefined ? snapshot.override : sessionOverride,
+              override: sessionOverride === undefined ? snapshot.override : sessionOverride, semantics: POLICY_SEMANTICS,
             }); }
             catch (error) {
               await fail(entry, error instanceof KernelError ? error : new KernelError('session_write_failed', { cause: error }));

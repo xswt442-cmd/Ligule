@@ -159,7 +159,7 @@ test('a real stdio MCP process uses its grant ceiling and detects revocation', a
       name: 'stdio acceptance', projectRoot,
       defaultPermissionProfile: 'read-only', maxPermissionProfile: 'workspace-write',
       defaultNetwork: 'policy', maxNetwork: 'policy',
-      defaultPolicy: 'ask', allowedPolicies: ['ask', 'auto', 'none'], allowOperator: true,
+      defaultPolicy: 'ask', allowedPolicies: ['ask', 'auto', 'always'], allowOperator: true,
       confirmPartialWorkspaceWrite: true,
       confirmFullAccess: false, confirmUnrestrictedNetwork: false, expiresAt: null,
     };
@@ -194,12 +194,17 @@ test('a real stdio MCP process uses its grant ceiling and detects revocation', a
       assert.equal(config.structuredContent.effective.policy.mode, 'auto');
       assert.deepEqual(config.structuredContent.effective.search, { configured: false, available: false, code: 'search_not_configured' });
 
-      const noApproval = await callTool(client, 'ligule_session_configure', { sessionId, changes: { policy: 'none' } });
-      assert.equal(noApproval.isError, undefined, `${JSON.stringify(noApproval)}\n${stderr()}`);
-      assert.equal(noApproval.structuredContent.effective.policy.mode, 'none');
-      const legacyNever = await callTool(client, 'ligule_session_configure', { sessionId, changes: { policy: 'never' } });
-      assert.equal(legacyNever.isError, true);
-      assert.equal(codeOf(legacyNever), 'agent_control_policy_exceeds_grant');
+      const always = await callTool(client, 'ligule_session_configure', { sessionId, changes: { policy: 'always' } });
+      assert.equal(always.isError, undefined, `${JSON.stringify(always)}
+${stderr()}`);
+      assert.equal(always.structuredContent.effective.policy.mode, 'always');
+      const legacyNone = await callTool(client, 'ligule_session_configure', { sessionId, changes: { policy: 'none' } });
+      assert.equal(legacyNone.isError, undefined, `${JSON.stringify(legacyNone)}
+${stderr()}`);
+      assert.equal(legacyNone.structuredContent.effective.policy.mode, 'ask', '旧 none 只降级到 ask');
+      const beyondGrant = await callTool(client, 'ligule_session_configure', { sessionId, changes: { policy: 'never' } });
+      assert.equal(beyondGrant.isError, true);
+      assert.equal(codeOf(beyondGrant), 'agent_control_policy_exceeds_grant');
 
       const missingRun = await callTool(client, 'ligule_run_await', { operationId: 'missing', timeoutMs: 0 });
       assert.equal(missingRun.isError, true);

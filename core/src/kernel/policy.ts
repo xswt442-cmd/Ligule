@@ -15,9 +15,38 @@ import type { PolicyRule } from './config-edit.js';
 import type { PermissionAccess } from './permission.js';
 import type { ScriptBinding } from '../capability/script-binding.js';
 
-export type PolicyMode = 'ask' | 'auto' | 'none' | 'never';
-export type PolicySelection = 'ask' | 'auto' | 'none';
+// 四档审批策略只回答一个问题：这一次工具调用要不要问人。
+// `always` 每次都问，`ask` 规则优先、没有规则就问，`auto` 规则优先、其余按确定性分析自动放行，
+// `never` 跳过整个策略审批层，但硬性安全校验（目标类别、守卫、脚本绑定、Permission）仍然生效。
+export const POLICY_MODES = ['always', 'ask', 'auto', 'never'] as const;
+export type PolicyMode = (typeof POLICY_MODES)[number];
+export type PolicySelection = Exclude<PolicyMode, 'never'>;
 export type PolicyModeSource = 'config' | 'session';
+
+export function isPolicyMode(value: unknown): value is PolicyMode {
+  return typeof value === 'string' && (POLICY_MODES as readonly string[]).includes(value);
+}
+
+// 旧版本里的 `none` 与 `never` 都不能自行升级。`never` 的字符串无法区分新旧语义，
+// 因此按旧数据读取时一律降级为 `ask`，只有新版写入的显式标记才认作新的 `never`。
+export function readPolicyMode(value: unknown, legacy: boolean): PolicyMode | undefined {
+  // 旧语义数据里 `none`/`never` 都不代表“跳过审批”，按保守值 `ask` 读；
+  // 反过来，旧数据里的 `always` 不存在，无法自证时也不能当成新档位。
+  if (value === 'none') return legacy ? 'ask' : undefined;
+  if (value === 'never') return legacy ? 'ask' : 'never';
+  if (value === 'always') return legacy ? undefined : 'always';
+  return value === 'ask' || value === 'auto' ? value : undefined;
+}
+
+// 持久化记录（Session 事件、配置、授权文件）用它标记新四档语义。
+// 没有标记的历史值必须按旧语义读取：`none`/`never` 都降级为 `ask`，
+// 这样旧数据里的 `never`（旧含义是拒绝一切）永远不会被读成跳过审批。
+export const POLICY_SEMANTICS = 2;
+
+export function readPersistedPolicyMode(value: unknown, semantics: unknown): PolicyMode | undefined {
+  if (semantics !== undefined) return semantics === POLICY_SEMANTICS && isPolicyMode(value) ? value : undefined;
+  return readPolicyMode(value, true);
+}
 
 function isPortableAbsolutePath(value: string): boolean {
   return isAbsolute(value) || /^[A-Za-z]:[\\/]/u.test(value) || /^\\\\[^\\/]+[\\/]/u.test(value);
@@ -217,7 +246,7 @@ function askReason(parsed: ParsedCommand | undefined, target: NetworkTarget | un
 
 // `ask` 是 Host 注入的用户审批通道。未提供该通道时，所有需要审批的调用都会被拒绝。
 export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEFAULT_THRESHOLDS, ask }: DecisionChainOptions = {}): DecisionChain {
-  if (mode !== 'ask' && mode !== 'auto' && mode !== 'none' && mode !== 'never') throw new KernelError('policy_mode_unknown');
+  if (!isPolicyMode(mode)) throw new KernelError('policy_mode_unknown');
   if (!(thresholds.consecutive >= 1) || !(thresholds.total >= 1)) throw new KernelError('policy_thresholds_required');
 
   let current = mode;
@@ -252,7 +281,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
     },
 
     get mode() {
-      return forcedToAsk && current !== 'never' && current !== 'none' ? 'ask' : current;
+      return forcedToAsk && current !== 'never' ? 'ask' : current;
     },
 
     // 标明当前策略来自配置默认值还是会话覆盖；拒绝阈值触发的收紧状态单独记录在 `forced`。
@@ -271,14 +300,14 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
     },
 
     setMode(next: PolicyMode) {
-      if (next !== 'ask' && next !== 'auto' && next !== 'none' && next !== 'never') throw new KernelError('policy_mode_unknown');
+      if (!isPolicyMode(next)) throw new KernelError('policy_mode_unknown');
       current = next;
       source = 'session';
     },
 
     // 配置默认值变化时，只更新未设置会话覆盖的策略。
     setConfiguredMode(next: PolicyMode) {
-      if (next !== 'ask' && next !== 'auto' && next !== 'none' && next !== 'never') throw new KernelError('policy_mode_unknown');
+      if (!isPolicyMode(next)) throw new KernelError('policy_mode_unknown');
       configured = next;
       if (source === 'config') current = next;
     },
@@ -303,7 +332,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
 
     restore(snapshot: PolicyState) {
       if (snapshot === null || typeof snapshot !== 'object'
-        || (snapshot.override !== null && snapshot.override !== 'ask' && snapshot.override !== 'auto' && snapshot.override !== 'none' && snapshot.override !== 'never')
+        || (snapshot.override !== null && !isPolicyMode(snapshot.override))
         || !Number.isSafeInteger(snapshot.consecutive) || snapshot.consecutive < 0
         || !Number.isSafeInteger(snapshot.total) || snapshot.total < snapshot.consecutive
         || typeof snapshot.forcedToAsk !== 'boolean') {
@@ -333,7 +362,10 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       }
 
       const command = composedCommand ?? commandOf(input);
-      let effective = forcedToAsk && current !== 'never' && current !== 'none' ? 'ask' : current;
+      // `never` 跳过整个策略审批层：不应用规则、不因危险分析或脚本解释器升级为审批、也不询问。
+      // 硬性安全校验（网络目标类别、守卫、脚本绑定、Permission）在下面照常执行。
+      const applyRules = current !== 'never';
+      let effective: PolicyMode = forcedToAsk && current !== 'never' ? 'ask' : current;
       // 记录此次判定时的有效策略；拒绝阈值触发的收紧状态另行记录。
       const judged = (decision: PolicyVerdict['decision'], via: string, extra: Omit<PolicyVerdict, 'decision' | 'via' | 'capability' | 'level' | 'forced'>, hardDenied = false): PolicyVerdict => ({
         decision,
@@ -352,7 +384,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         catch { /* Invalid paths cannot match a remembered allow and remain subject to the tool's path check. */ }
       }
       const argsHash = policyArgsHash(input, identityDigest);
-      const candidates = currentRules.filter((item) => {
+      const candidates = !applyRules ? [] : currentRules.filter((item) => {
         if (item.tool !== named) return false;
         if (item.target !== undefined || item.path !== undefined) {
           if (currentFilePath === undefined || item.path === undefined || !isAbsolute(item.path)) return false;
@@ -372,7 +404,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       const parts = command === undefined ? [undefined] : segments;
       const askedRule = candidates.find((item) => item.decision === 'ask'
         && (matches(command, item.match) || (segments ?? []).some((segment) => matches(segment, item.match))));
-      if (askedRule !== undefined && effective !== 'none') effective = 'ask';
+      if (askedRule !== undefined) effective = 'ask';
       // 在结果中包含解析分段，便于从记录中还原命令如何被解释。
       // 无命令文本或无法解析时不返回分段字段。
       const answer = (via: string, rule?: PolicyRule) => judged('allow', via, {
@@ -396,7 +428,6 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       };
 
       let requiresManualApproval = manualApprovalRequired === true || access === 'external' || access === 'unknown';
-      let requiresTrustedApproval = requiresManualApproval;
       let rememberable = manualApprovalRequired !== true && access !== 'external' && access !== 'unknown';
       let manualApprovalReason = manualApprovalRequired === true
         ? 'Git may execute project hooks, helpers, or configured aliases; the user must approve each call.'
@@ -405,14 +436,13 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         : access === 'unknown'
           ? 'this tool has no permission classification and requires per-call approval'
           : undefined;
-      if (askedRule !== undefined && effective !== 'none') {
+      if (askedRule !== undefined) {
         requiresManualApproval = true;
         manualApprovalReason = askedRule.reason ?? `${named} requires approval by its policy rule`;
       }
       if (command !== undefined) {
         if (segments === undefined || !canAutoApprove(inspection)) {
           requiresManualApproval = true;
-          requiresTrustedApproval = true;
           rememberable = false;
           manualApprovalReason ??= askReason(parsed, target, shell) ?? '命令使用脚本解释器或包装器，需要逐次审批';
         }
@@ -420,7 +450,6 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         if (classified?.kind === 'hard-deny') return hardDeny(classified.reason);
         if (classified?.kind === 'approval') {
           requiresManualApproval = true;
-          requiresTrustedApproval = true;
           rememberable = false;
           manualApprovalReason ??= parsed?.kind === 'segments'
             ? classified.reason
@@ -438,7 +467,6 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       const loopOrPrivate = target?.class === 'loopback' || target?.class === 'private';
       if (loopOrPrivate) {
         rememberable = false;
-        requiresTrustedApproval = true;
         manualApprovalReason ??= askReason(parsed, target, shell);
       }
 
@@ -459,12 +487,14 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         return refuse(scriptBindingError.code, 'script-binding', scriptBindingError.detail);
       }
 
-      if (effective === 'none' && requiresTrustedApproval) {
-        return refuse(
-          'policy_manual_approval_disabled', 'none',
-          manualApprovalReason ?? 'this operation requires a separate trusted approval',
-          undefined, 'unavailable',
-        );
+      // `never` 跳过整个策略审批层。走到这里说明硬性安全校验都没有拦它，直接放行。
+      if (!applyRules) return answer('never');
+
+      // `always` 让每一次工具调用都单独询问：规则里的放行、自动分类与已记住的批准都不能免除审批。
+      if (effective === 'always') {
+        requiresManualApproval = true;
+        rememberable = false;
+        manualApprovalReason ??= 'Always mode asks about every tool call.';
       }
 
       const allowed = candidates.filter((item) => item.decision === 'allow');
@@ -476,14 +506,11 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         covered = undefined;
       } else if (command === undefined) {
         // 不含命令文本的调用不受命令语法检查影响；自动策略可放行，逐次审批仍需匹配放行规则。
-        covered = effective === 'auto' || effective === 'none' ? null : covering();
+        covered = effective === 'auto' ? null : covering();
       } else if (effective === 'auto') {
         // 自动策略只放行可完整解析且每段首词都不是脚本解释器的命令。
         // 不剥离解释器包装；例如 `bash -lc "git status"` 仍须审批。
         covered = segments !== undefined && canAutoApprove(inspection) ? null : undefined;
-      } else if (effective === 'never' || effective === 'none') {
-        // 这两个档位只允许已经确认在权限边界内的普通调用；模糊命令在上方标为需要可信审批。
-        covered = command === undefined || (segments !== undefined && canAutoApprove(inspection)) ? null : undefined;
       } else {
         // 逐次审批要求放行规则覆盖每个命令分段；无法解析的命令不能视为已覆盖。
         covered = segments !== undefined && parts?.every((segment) => allowed.some((item) => matches(segment, item.match)))
@@ -492,14 +519,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       }
       if (requiresManualApproval) covered = undefined;
       if (covered !== undefined) {
-        return covered === null ? answer(effective === 'never' ? 'never' : effective === 'none' ? 'none' : 'auto') : answer('rules', covered);
-      }
-
-      if (effective === 'never') {
-        return refuse('policy_denied', 'never', 'this operation requires approval, which is disabled for this session');
-      }
-      if (effective === 'none') {
-        return refuse('policy_manual_approval_disabled', 'none', 'this operation cannot be safely decided without a trusted approval', undefined, 'unavailable');
+        return covered === null ? answer('auto') : answer('rules', covered);
       }
 
       // 自动策略无法识别命令时转为逐次审批，并返回无法自动放行的原因。

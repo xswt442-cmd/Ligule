@@ -1,6 +1,7 @@
 // 会话记录首行保存格式版本、项目归属和创建时的模式信息。
 // 未知格式版本必须拒绝读取，避免静默跳过记录并生成错误的模型上下文。
 import { KernelRuntimeError } from '../errors.js';
+import { POLICY_SEMANTICS, isPolicyMode, readPersistedPolicyMode, type PolicyMode } from '../kernel/policy.js';
 import { isCanonicalTodoItems } from './todo.js';
 import { checkedImageReferences } from './media.js';
 import { isRunAcceptance, isRunResultRef } from './run.js';
@@ -98,6 +99,12 @@ const WRITTEN_KINDS = [
   'compaction', 'todoWrite', 'image', 'screenCapture',
 ];
 
+// 会话里保存的审批档位。返回 `unknown` 表示值无法解释，调用方必须拒绝该记录。
+export function readPolicyOverride(value: unknown, semantics: unknown): PolicyMode | null | 'unknown' {
+  if (value === null) return null;
+  return readPersistedPolicyMode(value, semantics) ?? 'unknown';
+}
+
 export function createSessionHeader({
   id,
   projectRoot,
@@ -169,7 +176,14 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
     if (kind === 'sessionPolicy') {
       if (event.ignorable !== true) throw new KernelRuntimeError('session_policy_ignorable_required');
       const override = event.override;
-      if ((override !== null && override !== 'ask' && override !== 'auto' && override !== 'none' && override !== 'never')
+      const semantics = event.semantics;
+      // 没有语义标记的历史事件只有旧四值合法；带标记的事件只接受新四档。
+      const validOverride = override === null
+        || (semantics === undefined
+          ? override === 'ask' || override === 'auto' || override === 'none' || override === 'never'
+          : semantics === POLICY_SEMANTICS && isPolicyMode(override));
+      if ((semantics !== undefined && semantics !== POLICY_SEMANTICS) || !validOverride
+        || readPolicyOverride(override, semantics) === 'unknown'
         || !Number.isSafeInteger(event.consecutive) || (event.consecutive as number) < 0
         || !Number.isSafeInteger(event.total) || (event.total as number) < (event.consecutive as number)
         || typeof event.forcedToAsk !== 'boolean') {
