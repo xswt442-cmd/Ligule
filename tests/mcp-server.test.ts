@@ -714,7 +714,8 @@ test('operator tools configure real sessions, answer Host interactions, and run 
   const fixtureCredential = 'local-operator-test-key';
   const markerAllowed = join(projectRoot, 'operator-approved.txt');
   const markerDenied = join(projectRoot, 'operator-denied.txt');
-  const markerHardDenied = join(projectRoot, 'policy-forbidden.txt');
+  // 边界外路径：这条拒绝来自强制校验，不来自 Policy 审批层，所以 never 下依然成立。
+  const markerHardDenied = join(tempRoot, 'policy-forbidden.txt');
   const markerSensitive = join(projectRoot, 'operator-secret-executed.txt');
   const requests: ProviderBody[] = [];
   const queueGate = gate();
@@ -781,7 +782,7 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     } else if (userText.includes('MCP_OPERATOR_DENY')) {
       tool = 'create'; args = { path: 'operator-denied.txt', content: 'must remain absent' };
     } else if (userText.includes('MCP_OPERATOR_HARD_DENY')) {
-      tool = 'create'; args = { path: 'policy-forbidden.txt', content: 'policy must remain final' };
+      tool = 'create'; args = { path: '../policy-forbidden.txt', content: 'policy must remain final' };
     } else if (userText.includes('MCP_OPERATOR_QUESTION')) {
       tool = 'ask_user_question'; args = { questions: JSON.stringify([{ question: 'Which option should be used?', options: [{ label: 'Option A' }, { label: 'Option B' }] }]) };
     } else if (userText.includes('MCP_OPERATOR_SENSITIVE_APPROVAL')) {
@@ -1014,7 +1015,8 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     const hardDenyRun = toolData(await context.client.callTool({ name: 'ligule_run_start', arguments: { sessionId, input: 'MCP_OPERATOR_HARD_DENY' } }), 'operator_hard_deny_run');
     const hardDenyDone = await waitForOutcome(context.client, hardDenyRun.operationId);
     assert.equal(hardDenyDone.state, 'done');
-    assert.equal(hardDenyDone.pendingInteractions.length, 0, 'a Policy hard denial is not exposed as an overridable approval');
+    // never 跳过的是 Policy 审批层；文件边界属于强制校验，仍然直接失败且不给审批入口。
+    assert.equal(hardDenyDone.pendingInteractions.length, 0, 'a mandatory boundary check is not exposed as an overridable approval');
     await assert.rejects(access(markerHardDenied), (error: unknown) => (error as { code?: string }).code === 'ENOENT');
     toolData(await context.client.callTool({ name: 'ligule_session_configure', arguments: { sessionId, changes: { policy: 'ask' } } }), 'operator_restore_ask');
 
