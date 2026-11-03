@@ -1,14 +1,28 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { arch, platform, release } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { benchmarkTimeoutMs, countsOf, positiveInteger, prepareRunDirectory, timeoutBasis } from './lib.ts';
+import { outputDirectoryFor, writeManifest } from './manifest.ts';
+import type { ManifestPlan, RunIdentity } from './manifest.ts';
 
 const repository = fileURLToPath(new URL('../..', import.meta.url));
+const HARBOR_VERSION = '0.25.0';
 
-function runIdentity(): Record<string, unknown> {
+type Plan = ManifestPlan & {
+  schema_version: string;
+  dataset: { name: string; version: string; source: string };
+  timeout_multipliers: { task: number; agent: number; agent_setup: number; environment_build: number };
+  model: { api: string; model_calls: number; timeout_ms: number; request_timeout_ms: number };
+  verifier: { reward_key: string; pass_threshold: number; authority: string };
+};
+
+type ExecutionStatus = 'completed' | 'failed' | 'timed_out';
+
+function runIdentity(): RunIdentity {
   const sha = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repository, encoding: 'utf8', windowsHide: true });
   const status = spawnSync('git', ['status', '--porcelain'], { cwd: repository, encoding: 'utf8', windowsHide: true });
   return {
@@ -19,18 +33,6 @@ function runIdentity(): Record<string, unknown> {
     arch: arch(),
   };
 }
-
-type PlanTask = { id: string; category: string; covers: string };
-type Plan = {
-  schema_version: string;
-  dataset: { name: string; version: string; source: string };
-  tasks: PlanTask[];
-  attempts_per_task: number;
-  concurrency: number;
-  timeout_multipliers: { task: number; agent: number; agent_setup: number; environment_build: number };
-  model: { api: string; model_calls: number; timeout_ms: number; request_timeout_ms: number };
-  verifier: { reward_key: string; pass_threshold: number; authority: string };
-};
 
 function option(name: string): string | undefined {
   const index = process.argv.indexOf(`--${name}`);
@@ -58,6 +60,74 @@ function resolvedDockerHost(): string | undefined {
   return host === '' ? undefined : host;
 }
 
+function harborEnvironment(apiKey: string): NodeJS.ProcessEnv {
+  const dockerHost = resolvedDockerHost();
+  return {
+    ...process.env,
+    PYTHONPATH: repository,
+    PYTHONUTF8: '1',
+    PYTHONIOENCODING: 'utf-8',
+    NO_COLOR: '1',
+    TERM: 'dumb',
+    ...(dockerHost === undefined ? {} : { DOCKER_HOST: dockerHost }),
+    LIGULE_API_KEY: apiKey,
+  };
+}
+
+function trialContainerNames(taskIds: readonly string[]): string[] {
+  const listed = spawnSync('docker', ['ps', '--format', '{{.Names}}'], { encoding: 'utf8', windowsHide: true, timeout: 30_000 });
+  if (listed.status !== 0) return [];
+  return (listed.stdout ?? '').split(/\r?\n/u).filter((name) =>
+    name.includes('__env-main-') && taskIds.some((id) => name.startsWith(`${id}__`)));
+}
+
+function removeContainers(names: readonly string[]): { removed: string[]; failed: string[] } {
+  const removed: string[] = [];
+  const failed: string[] = [];
+  for (const name of names) {
+    const result = spawnSync('docker', ['rm', '-f', name], { encoding: 'utf8', windowsHide: true, timeout: 60_000 });
+    if (result.status === 0) removed.push(name);
+    else failed.push(`${name}: ${(result.stderr ?? '').trim().slice(0, 200)}`);
+  }
+  return { removed, failed };
+}
+
+async function runReport(runDirectory: string, apiKey: string): Promise<{
+  directory: string;
+  json: string;
+  markdown: string | null;
+  summary: Record<string, unknown>;
+  stdout: string;
+  stderr: string;
+}> {
+  const directory = outputDirectoryFor(runDirectory);
+  const execution = spawnSync('uv', [
+    'run', '--no-project', '--with', `harbor==${HARBOR_VERSION}`,
+    'python', 'evals/report/report.py', runDirectory, '--output-dir', directory,
+  ], {
+    cwd: repository,
+    encoding: 'utf8',
+    windowsHide: true,
+    maxBuffer: 32 * 1024 * 1024,
+    env: harborEnvironment(apiKey),
+  });
+  if (execution.status !== 0) {
+    throw new Error(`report_failed:${execution.status ?? execution.signal ?? 'unknown'}:${(execution.stderr ?? '').slice(-2_000)}`);
+  }
+  const json = join(directory, 'report.json');
+  const files = await readdir(directory);
+  const markdownName = files.find((name) => name.endsWith('.md')) ?? null;
+  const report = JSON.parse(await readFile(json, 'utf8')) as { summary?: Record<string, unknown> };
+  return {
+    directory,
+    json,
+    markdown: markdownName === null ? null : join(directory, markdownName),
+    summary: report.summary ?? {},
+    stdout: execution.stdout ?? '',
+    stderr: execution.stderr ?? '',
+  };
+}
+
 async function main(): Promise<void> {
   const plan = JSON.parse(await readFile(join(repository, 'evals', 'benchmarks', 'plan.json'), 'utf8')) as Plan;
   const requestedTasks = option('tasks')?.split(',').map((task) => task.trim()).filter(Boolean);
@@ -65,6 +135,10 @@ async function main(): Promise<void> {
   const unknownTasks = requestedTasks?.filter((id) => !plan.tasks.some((task) => task.id === id)) ?? [];
   if (unknownTasks.length > 0) throw new Error(`unknown benchmark tasks: ${unknownTasks.join(', ')}`);
   if (tasks.length === 0) throw new Error('no benchmark tasks selected');
+  const timeoutOverride = positiveInteger(option('timeout-ms') ?? process.env.LIGULE_BENCH_TOTAL_TIMEOUT_MS, 'total_timeout_ms');
+  const timeoutMs = benchmarkTimeoutMs(plan, tasks.length, timeoutOverride);
+  const force = process.argv.includes('--force');
+  const collectOnly = process.argv.includes('--collect-only');
   const tarball = option('tarball') ?? process.env.LIGULE_BENCH_TARBALL;
   const datasetRoot = resolve(option('dataset-dir') ?? process.env.LIGULE_BENCH_DATASET_DIR
     ?? join(repository, 'testplace', 'benchmarks', 'datasets', `${plan.dataset.name}@${plan.dataset.version}`));
@@ -72,8 +146,44 @@ async function main(): Promise<void> {
   const baseUrl = process.env.LIGULE_BENCH_BASE_URL;
   const model = process.env.LIGULE_BENCH_MODEL;
   const api = process.env.LIGULE_BENCH_API ?? plan.model.api;
+  if (collectOnly) {
+    const requested = option('output');
+    if (requested === undefined) throw new Error('collect_only_requires_output_directory');
+    const runDirectory = resolve(requested);
+    const jobPath = join(runDirectory, 'job.json');
+    if (!existsSync(jobPath)) throw new Error(`collect_only_missing_job_json:${jobPath}`);
+    const identity = runIdentity();
+    const prior = existsSync(join(runDirectory, 'run.json'))
+      ? JSON.parse(await readFile(join(runDirectory, 'run.json'), 'utf8')) as { model?: { baseUrl?: string | null; model?: string | null } }
+      : {};
+    const collectedModel = model ?? prior.model?.model ?? undefined;
+    const collectedBaseUrl = baseUrl ?? prior.model?.baseUrl ?? undefined;
+    const manifest = await writeManifest({
+      runDirectory, plan: { ...plan, tasks }, identity, model: collectedModel, baseUrl: collectedBaseUrl, jobPath,
+      startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+    });
+    let report;
+    try { report = await runReport(runDirectory, apiKey ?? 'unused-for-collection'); }
+    catch (error) {
+      await writeFile(join(runDirectory, 'collection.json'), `${JSON.stringify({
+        collectedAt: new Date().toISOString(), manifest: manifest.path, counts: manifest.counts,
+        error: error instanceof Error ? error.message : String(error),
+      }, null, 2)}\n`, 'utf8');
+      throw error;
+    }
+    const counts = countsOf(report.summary) ?? manifest.counts;
+    await writeFile(join(runDirectory, 'collection.json'), `${JSON.stringify({
+      collectedAt: new Date().toISOString(), manifest: manifest.path, counts,
+      report: { directory: report.directory, json: report.json, markdown: report.markdown, summary: report.summary },
+    }, null, 2)}\n`, 'utf8');
+    process.stdout.write(`Collected existing Harbor output: pass ${counts.pass}, fail ${counts.fail}, infra_error ${counts.infra_error}, not_run ${counts.not_run}, total ${counts.total}\nArtifacts: ${runDirectory}\n`);
+    return;
+  }
   const nodeRuntime = process.env.LIGULE_BENCH_NODE_RUNTIME;
   const nodeRuntimeSha256 = process.env.LIGULE_BENCH_NODE_RUNTIME_SHA256;
+  const defaultRunDirectory = join(repository, 'testplace', 'benchmarks', `agent-${new Date().toISOString().replace(/[:.]/g, '-')}`);
+  const runDirectory = await prepareRunDirectory(option('output'), force, defaultRunDirectory);
+
   const checks: Record<string, { ok: boolean; detail: string }> = {
     docker: commandAvailable('docker', ['version', '--format', '{{.Server.Version}}']),
     uv: commandAvailable('uv', ['--version']),
@@ -100,16 +210,14 @@ async function main(): Promise<void> {
   const missingTasks = tasks.filter((task) => !existsSync(join(taskRoot, task.id, 'task.toml'))).map((task) => task.id);
   checks.dataset = {
     ok: missingTasks.length === 0,
-    detail: missingTasks.length === 0 ? taskRoot : `missing ${missingTasks.join(', ')} under ${taskRoot}; run: uv run --no-project --with harbor==0.25.0 harbor datasets download ${plan.dataset.name}@${plan.dataset.version} -o ${datasetRoot}`,
+    detail: missingTasks.length === 0 ? taskRoot : `missing ${missingTasks.join(', ')} under ${taskRoot}; run: uv run --no-project --with harbor==${HARBOR_VERSION} harbor datasets download ${plan.dataset.name}@${plan.dataset.version} -o ${datasetRoot}`,
   };
 
-  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const runDirectory = resolve(option('output') ?? join(repository, 'testplace', 'benchmarks', `agent-${stamp}`));
-  await mkdir(runDirectory, { recursive: true });
+  const identity = runIdentity();
   const blocked = Object.entries(checks).filter(([, check]) => !check.ok);
   const baseRecord = {
     generatedAt: new Date().toISOString(),
-    identity: runIdentity(),
+    identity,
     plan,
     datasetRoot,
     checks,
@@ -118,17 +226,18 @@ async function main(): Promise<void> {
     model: { api, baseUrl: baseUrl ?? null, model: model ?? null },
   };
   if (blocked.length > 0) {
-    const record = { ...baseRecord, status: 'BLOCKED', blocked: blocked.map(([name, check]) => ({ name, detail: check.detail })) };
+    const record = { ...baseRecord, executionStatus: 'blocked', blocked: blocked.map(([name, check]) => ({ name, detail: check.detail })) };
     await writeFile(join(runDirectory, 'run.json'), `${JSON.stringify(record, null, 2)}\n`, 'utf8');
     process.stdout.write(`Agent benchmark BLOCKED\n${blocked.map(([name, check]) => `- ${name}: ${check.detail}`).join('\n')}\nArtifacts: ${runDirectory}\n`);
     process.exitCode = 2;
     return;
   }
+  if (identity.gitSha === null) throw new Error('benchmark_requires_git_sha');
 
   const harborDirectory = join(runDirectory, 'harbor');
   await mkdir(harborDirectory, { recursive: true });
   const job = {
-    job_name: `ligule-terminal-bench-${stamp}`,
+    job_name: `ligule-terminal-bench-${new Date().toISOString().replace(/[:.]/g, '-')}`,
     n_attempts: plan.attempts_per_task,
     n_concurrent_trials: plan.concurrency,
     skip_credential_checks: true,
@@ -172,7 +281,7 @@ async function main(): Promise<void> {
   await writeFile(jobPath, `${JSON.stringify(job, null, 2)}\n`, 'utf8');
 
   const args = [
-    'run', '--no-project', '--with', 'harbor==0.25.0', 'harbor', 'run',
+    'run', '--no-project', '--with', `harbor==${HARBOR_VERSION}`, 'harbor', 'run',
     '--config', jobPath,
     '--path', taskRoot,
     ...tasks.flatMap((task) => ['--include-task-name', task.id]),
@@ -184,43 +293,97 @@ async function main(): Promise<void> {
     '--yes',
   ];
   const started = new Date().toISOString();
+  await writeFile(join(runDirectory, 'run-state.json'), `${JSON.stringify({
+    status: 'running',
+    started,
+    timeoutMs,
+    timeoutBasis: timeoutBasis(plan, tasks.length),
+    tasks: tasks.map((task) => task.id),
+    concurrency: plan.concurrency,
+    command: ['uv', ...args],
+  }, null, 2)}\n`, 'utf8');
+
   const execution = spawnSync('uv', args, {
     cwd: repository,
     encoding: 'utf8',
     windowsHide: true,
     maxBuffer: 64 * 1024 * 1024,
-    env: {
-      ...process.env,
-      PYTHONPATH: repository,
-      PYTHONUTF8: '1',
-      PYTHONIOENCODING: 'utf-8',
-      NO_COLOR: '1',
-      TERM: 'dumb',
-      ...(resolvedDockerHost() === undefined ? {} : { DOCKER_HOST: resolvedDockerHost() as string }),
-      LIGULE_API_KEY: apiKey,
-    },
+    timeout: timeoutMs,
+    killSignal: 'SIGKILL',
+    env: harborEnvironment(apiKey as string),
   });
   const finished = new Date().toISOString();
+  const timedOut = (execution.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT';
+  const executionStatus: ExecutionStatus = timedOut ? 'timed_out' : execution.status === 0 ? 'completed' : 'failed';
   const stdoutPath = join(runDirectory, 'harbor.stdout.log');
   const stderrPath = join(runDirectory, 'harbor.stderr.log');
   await writeFile(stdoutPath, execution.stdout ?? '', 'utf8');
-  await writeFile(stderrPath, execution.stderr ?? '', 'utf8');
-  const record = {
-    ...baseRecord,
-    status: execution.status === 0 ? 'COMPLETED' : 'FAILED',
+  await writeFile(stderrPath, `${execution.stderr ?? ''}${execution.error === undefined ? '' : `\n${execution.error.message}`}\n`, 'utf8');
+  await writeFile(join(runDirectory, 'run-state.json'), `${JSON.stringify({
+    status: executionStatus,
+    timedOut,
     started,
     finished,
+    timeoutMs,
     exitCode: execution.status,
     signal: execution.signal,
+    error: execution.error?.message ?? null,
+  }, null, 2)}\n`, 'utf8');
+
+  const leftovers = executionStatus === 'completed' ? [] : trialContainerNames(tasks.map((task) => task.id));
+  const cleanup = leftovers.length === 0 ? { removed: [], failed: [] } : removeContainers(leftovers);
+
+  let manifest;
+  let manifestError: string | undefined;
+  try {
+    manifest = await writeManifest({
+      runDirectory, plan: { ...plan, tasks }, identity, model, baseUrl, jobPath, startedAt: started, finishedAt: finished,
+    });
+  } catch (error) {
+    manifestError = error instanceof Error ? error.message : String(error);
+  }
+
+  let report;
+  let reportError: string | undefined;
+  if (manifest !== undefined) {
+    try { report = await runReport(runDirectory, apiKey as string); }
+    catch (error) { reportError = error instanceof Error ? error.message : String(error); }
+  }
+  const taskCounts = report === undefined ? manifest?.counts : countsOf(report.summary) ?? manifest?.counts;
+  const record = {
+    ...baseRecord,
+    executionStatus,
+    timedOut,
+    started,
+    finished,
+    timeoutMs,
+    timeoutBasis: timeoutBasis(plan, tasks.length),
+    exitCode: execution.status,
+    signal: execution.signal,
+    error: execution.error?.message ?? null,
     jobPath,
     harborDirectory,
     stdout: stdoutPath,
     stderr: stderrPath,
     tasks,
+    manifest: manifest === undefined ? { error: manifestError } : { path: manifest.path, counts: manifest.counts, results: manifest.results },
+    report: report === undefined ? { error: reportError } : {
+      directory: report.directory,
+      json: report.json,
+      markdown: report.markdown,
+      summary: report.summary,
+    },
+    taskCounts: taskCounts ?? null,
+    cleanup,
   };
   await writeFile(join(runDirectory, 'run.json'), `${JSON.stringify(record, null, 2)}\n`, 'utf8');
-  process.stdout.write(`Agent benchmark ${record.status}: exit ${execution.status}\nArtifacts: ${runDirectory}\n`);
-  if (execution.status !== 0) process.exitCode = 1;
+  const summaryText = taskCounts === undefined
+    ? 'task summary unavailable'
+    : `pass ${taskCounts.pass}, fail ${taskCounts.fail}, infra_error ${taskCounts.infra_error}, not_run ${taskCounts.not_run}, total ${taskCounts.total}`;
+  process.stdout.write(`Agent benchmark execution ${executionStatus}: ${summaryText}\nArtifacts: ${runDirectory}\n`);
+  if (reportError !== undefined) process.stdout.write(`Report generation failed: ${reportError}\n`);
+  if (manifestError !== undefined) process.stdout.write(`Manifest generation failed: ${manifestError}\n`);
+  if (executionStatus !== 'completed' || reportError !== undefined || manifestError !== undefined) process.exitCode = 1;
 }
 
 await main();
