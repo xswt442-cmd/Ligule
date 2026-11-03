@@ -26,6 +26,48 @@ test('process runner captures normal exits', async () => {
   }
 });
 
+test('a process that exits while a descendant holds the pipes still settles', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-process-drain-'));
+  try {
+    const child = join(root, 'child.cjs');
+    // 子进程立刻退出，但后代继承 stdio 并一直活着：结果必须按真实退出码收口，
+    // 不能因为 close 迟迟不来就把整次评测挂住（POSIX 上由 2 秒排空兜底）。
+    await writeFile(child, [
+      "const { spawn } = require('node:child_process');",
+      "spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'inherit'] });",
+      'process.stdout.write("bye");',
+      'process.exit(3);',
+      '',
+    ].join('\n'), 'utf8');
+    const started = Date.now();
+    const result = await runProcess(process.execPath, [child], {
+      cwd: root, env: process.env, timeoutMs: 60_000,
+    });
+    assert.equal(result.status, 3);
+    assert.equal(result.timedOut, false);
+    assert.equal(result.terminationPending, false);
+    assert.equal(result.stdout, 'bye');
+    assert.ok(Date.now() - started < 30_000, 'the runner waited for a leaked pipe instead of settling');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a missing command reports its spawn error instead of a phantom termination', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-process-missing-'));
+  try {
+    const result = await runProcess('ligule-definitely-missing-command', [], {
+      cwd: root, env: process.env, timeoutMs: 10_000,
+    });
+    assert.equal(result.status, null);
+    assert.equal(result.timedOut, false);
+    assert.equal(result.terminationPending, false);
+    assert.match(result.error ?? '', /ENOENT|not found/iu);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('timeout kills descendants and reports a completed termination', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ligule-process-tree-'));
   try {

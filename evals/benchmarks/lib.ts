@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, rename } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { TaskCounts } from './manifest.ts';
 
@@ -16,6 +16,21 @@ export type ProcessResult = {
   terminationError?: string;
   error?: string;
 };
+
+// 运行状态的写入必须串行且原子：启动阶段的 `onSpawn` 是异步写，晚于 `collecting`/`finished`
+// 落盘就会把状态倒回 `running`，让恢复逻辑以为原进程还活着。临时文件 + rename 避免半截 JSON。
+export function createStateWriter(path: string): (value: unknown) => Promise<void> {
+  let queue: Promise<void> = Promise.resolve();
+  return (value: unknown) => {
+    const next = queue.then(async () => {
+      const temporary = `${path}.${process.pid}.tmp`;
+      await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+      await rename(temporary, path);
+    });
+    queue = next.catch(() => undefined);
+    return next;
+  };
+}
 
 export async function activeBenchmarkOwner(directory: string): Promise<string | undefined> {
   for (const name of ['run-state.json', 'collect-state.json']) {
@@ -81,6 +96,10 @@ export async function runProcess(
     let terminationPending = false;
     let terminationError: string | undefined;
     let settled = false;
+    let exitStatus: number | null = null;
+    let exitSignal: NodeJS.Signals | null = null;
+    let exited = false;
+    let drainTimer: NodeJS.Timeout | undefined;
     const append = (current: string, chunk: Buffer): string => {
       const next = current + chunk.toString('utf8');
       return next.length > maxBytes ? next.slice(next.length - maxBytes) : next;
@@ -90,6 +109,7 @@ export async function runProcess(
     const finish = (status: number | null, signal: NodeJS.Signals | null, error?: string): void => {
       if (settled) return;
       settled = true;
+      if (drainTimer !== undefined) clearTimeout(drainTimer);
       process.off('SIGINT', onInterrupt);
       process.off('SIGTERM', onInterrupt);
       resolveRun({ pid: child.pid, status, signal, stdout, stderr, timedOut, interrupted, terminationPending, ...(terminationError === undefined ? {} : { terminationError }), ...(error === undefined ? {} : { error }) });
@@ -108,11 +128,14 @@ export async function runProcess(
         }
       }
       setTimeout(() => {
-        terminationPending = true;
+        // 只有进程本身还活着才算“终止仍未完成”；已经退出但管道被后代持有的，按真实退出码收口。
+        terminationPending = !exited;
         child.stdout?.destroy();
         child.stderr?.destroy();
         child.unref();
-        finish(null, 'SIGKILL');
+        finish(exited ? exitStatus : null, exited ? exitSignal : 'SIGKILL', exited
+          ? undefined
+          : 'termination_pending: the process was still running 10000ms after the kill request');
       }, 10_000).unref();
     };
     const onInterrupt = (): void => {
@@ -126,6 +149,20 @@ export async function runProcess(
     child.once('error', (error) => {
       clearTimeout(timer);
       finish(null, null, error.message);
+    });
+    child.once('exit', (status, signal) => {
+      exited = true;
+      exitStatus = status;
+      exitSignal = signal;
+      // 进程已经退出，别再让它去 taskkill 一个可能被系统复用的 PID。
+      clearTimeout(timer);
+      // 进程已退出但管道可能仍被后代持有，close 因而永不触发：留一点排空时间后强制收口。
+      drainTimer = setTimeout(() => {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        finish(status, signal);
+      }, 2_000);
+      drainTimer.unref();
     });
     child.once('close', (status, signal) => {
       clearTimeout(timer);

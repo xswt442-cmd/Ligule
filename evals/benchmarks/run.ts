@@ -5,7 +5,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { arch, platform, release } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { activeBenchmarkOwner, benchmarkTimeoutMs, countsOf, positiveInteger, prepareRunDirectory, providerUrlProblem, readTarballProvenance, runProcess, safeProviderUrl, timeoutBasis } from './lib.ts';
+import { activeBenchmarkOwner, benchmarkTimeoutMs, countsOf, createStateWriter, positiveInteger, prepareRunDirectory, providerUrlProblem, readTarballProvenance, runProcess, safeProviderUrl, timeoutBasis } from './lib.ts';
 import { outputDirectoryFor, writeManifest } from './manifest.ts';
 import type { ManifestPlan, RunIdentity } from './manifest.ts';
 
@@ -290,13 +290,24 @@ if (!existsSync(planPath)) throw new Error(`plan_missing:${planPath}`);
   };
 
   const identity = runIdentity();
-  const blocked = Object.entries(checks).filter(([, check]) => !check.ok);
   const tarballSha256 = tarball === undefined || !existsSync(tarball) ? null : await sha256(tarball);
   const provenanceResult = tarball === undefined || tarballSha256 === null
     ? { error: 'tarball_missing' }
     : await readTarballProvenance(resolve(tarball), tarballSha256);
+  // 没有可核对的 sidecar 时不能拿当前 checkout 的 SHA 冒充被测来源：记成 blocked，
+  // 保留 tarball 摘要与具体原因，绝不生成带“已验证来源”标记的评分报告。
+  if (tarballSha256 !== null) {
+    const provenance = provenanceResult.provenance;
+    checks.provenance = {
+      ok: provenance !== undefined,
+      detail: provenance === undefined
+        ? `${provenanceResult.error ?? 'source_sidecar_unknown'} for ${resolve(tarball ?? '')} sha256=${tarballSha256}; rebuild the tarball with the pack script so its .source.json is written`
+        : `${provenance.sourceGitSha}${provenance.sourceDirty ? ' (dirty)' : ''} sha256=${provenance.tarballSha256} built ${provenance.buildTimestamp}`,
+    };
+  }
+  const blocked = Object.entries(checks).filter(([, check]) => !check.ok);
   const testedIdentity: RunIdentity = provenanceResult.provenance === undefined
-    ? identity
+    ? { ...identity, gitSha: null, dirty: null }
     : { ...identity, gitSha: provenanceResult.provenance.sourceGitSha, dirty: provenanceResult.provenance.sourceDirty };
   const baseRecord = {
     generatedAt: new Date().toISOString(),
@@ -388,7 +399,8 @@ if (!existsSync(planPath)) throw new Error(`plan_missing:${planPath}`);
     '--max-retries', '0',
     '--yes',
   ];
-  await writeFile(join(runDirectory, 'run-state.json'), `${JSON.stringify({
+  const writeRunState = createStateWriter(join(runDirectory, 'run-state.json'));
+  await writeRunState({
     status: 'running',
     pid: process.pid,
     harborPid: null,
@@ -398,16 +410,15 @@ if (!existsSync(planPath)) throw new Error(`plan_missing:${planPath}`);
     tasks: tasks.map((task) => task.id),
     concurrency: plan.concurrency,
     command: ['uv', ...args],
-  }, null, 2)}\n`, 'utf8');
+  });
 
   const execution = await runProcess('uv', args, {
     cwd: repository,
     env: harborEnvironment(apiKey as string),
     timeoutMs,
     onSpawn: (pid) => {
-      void writeFile(join(runDirectory, 'run-state.json'), `${JSON.stringify({
-        status: 'running', pid: process.pid, harborPid: pid ?? null, started, timeoutMs,
-      }, null, 2)}\n`, 'utf8');
+      // 串行写入：这次写即使晚到，也不会覆盖之后落盘的 collecting/finished。
+      void writeRunState({ status: 'running', pid: process.pid, harborPid: pid ?? null, started, timeoutMs });
     },
   });
   const finished = new Date().toISOString();
@@ -419,7 +430,7 @@ if (!existsSync(planPath)) throw new Error(`plan_missing:${planPath}`);
   const stderrPath = join(runDirectory, 'harbor.stderr.log');
   await writeFile(stdoutPath, execution.stdout, 'utf8');
   await writeFile(stderrPath, `${execution.stderr}${execution.error === undefined ? '' : `\n${execution.error}`}\n`, 'utf8');
-  await writeFile(join(runDirectory, 'run-state.json'), `${JSON.stringify({
+  await writeRunState({
     status: 'collecting',
     pid: process.pid,
     harborPid: execution.pid ?? null,
@@ -434,7 +445,7 @@ if (!existsSync(planPath)) throw new Error(`plan_missing:${planPath}`);
     error: execution.error ?? null,
     terminationPending: execution.terminationPending,
     terminationError: execution.terminationError ?? null,
-  }, null, 2)}\n`, 'utf8');
+  });
 
   const enumerated = executionStatus === 'completed'
     ? { names: [] as string[], error: undefined }
@@ -495,7 +506,7 @@ if (!existsSync(planPath)) throw new Error(`plan_missing:${planPath}`);
     cleanup,
   };
   await writeFile(join(runDirectory, 'run.json'), `${JSON.stringify(record, null, 2)}\n`, 'utf8');
-  await writeFile(join(runDirectory, 'run-state.json'), `${JSON.stringify({
+  await writeRunState({
     status: 'finished',
     pid: process.pid,
     harborPid: execution.pid ?? null,
@@ -510,7 +521,7 @@ if (!existsSync(planPath)) throw new Error(`plan_missing:${planPath}`);
     error: execution.error ?? null,
     terminationPending: execution.terminationPending,
     terminationError: execution.terminationError ?? null,
-  }, null, 2)}\n`, 'utf8');
+  });
   const summaryText = taskCounts === undefined
     ? 'task summary unavailable'
     : `pass ${taskCounts.pass}, fail ${taskCounts.fail}, infra_error ${taskCounts.infra_error}, not_run ${taskCounts.not_run}, total ${taskCounts.total}`;

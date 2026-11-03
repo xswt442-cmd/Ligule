@@ -2,22 +2,23 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { benchmarkTimeoutMs, countsOf, positiveInteger, prepareRunDirectory, readTarballProvenance, timeoutBasis } from './lib.ts';
+import { benchmarkTimeoutMs, countsOf, createStateWriter, positiveInteger, prepareRunDirectory, readTarballProvenance, timeoutBasis } from './lib.ts';
 import { writeManifest } from './manifest.ts';
 
 const repository = fileURLToPath(new URL('../..', import.meta.url));
 const runner = join(repository, 'evals', 'benchmarks', 'run.ts');
 
-function run(args: readonly string[]): { status: number | null; stderr: string } {
+function run(args: readonly string[], options: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}): { status: number | null; stdout: string; stderr: string } {
   const result = spawnSync(process.execPath, ['--experimental-strip-types', runner, ...args], {
-    cwd: repository, encoding: 'utf8', windowsHide: true, timeout: 30_000,
+    cwd: repository, encoding: 'utf8', windowsHide: true, timeout: options.timeoutMs ?? 30_000,
+    env: options.env ?? process.env,
   });
   if (result.error !== undefined) throw result.error;
-  return { status: result.status, stderr: result.stderr ?? '' };
+  return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '' };
 }
 
 const IDENTITY = {
@@ -170,6 +171,97 @@ test('repeated attempts refuse ambiguous missing results instead of misassigning
     }), /repeated_attempt_result_missing/u);
   } finally {
     await rm(runDirectory, { recursive: true, force: true });
+  }
+});
+
+test('a tarball without a provenance sidecar blocks the run instead of borrowing the checkout identity', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-blocked-'));
+  try {
+    const tarball = join(root, 'ligule.tgz');
+    await writeFile(tarball, 'fixture\n', 'utf8');
+    const sha = createHash('sha256').update('fixture\n').digest('hex');
+    const output = join(root, 'run');
+    const env = { ...process.env };
+    delete env.LIGULE_API_KEY;
+    delete env.LIGULE_BENCH_TARBALL;
+    const result = run(['--output', output, '--tarball', tarball], { env, timeoutMs: 120_000 });
+    assert.equal(result.status, 2, result.stdout + result.stderr);
+    assert.match(result.stdout, /- provenance: source_sidecar_missing/u);
+    const record = JSON.parse(await readFile(join(output, 'run.json'), 'utf8')) as {
+      executionStatus: string;
+      testedIdentity: { gitSha: string | null; dirty: boolean | null };
+      tarballSha256: string | null;
+      blocked: { name: string; detail: string }[];
+    };
+    assert.equal(record.executionStatus, 'blocked');
+    assert.equal(record.testedIdentity.gitSha, null);
+    assert.equal(record.testedIdentity.dirty, null);
+    assert.equal(record.tarballSha256, sha);
+    assert.ok(record.blocked.some((entry) => entry.name === 'provenance' && entry.detail.includes(tarball)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a matched provenance sidecar becomes the tested identity', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-provenance-run-'));
+  try {
+    const tarball = join(root, 'ligule.tgz');
+    await writeFile(tarball, 'fixture\n', 'utf8');
+    const sha = createHash('sha256').update('fixture\n').digest('hex');
+    await writeFile(`${tarball}.source.json`, `${JSON.stringify({
+      schemaVersion: 1, package: 'ligule', version: '0.1.2', tarball: 'ligule.tgz',
+      tarballSha256: sha, sourceGitSha: IDENTITY.gitSha, sourceDirty: true,
+      buildNodeVersion: 'v24.22.1', buildTimestamp: '2026-01-01T00:00:00.000Z', builder: 'fixture',
+    })}\n`, 'utf8');
+    const output = join(root, 'run');
+    const env = { ...process.env };
+    delete env.LIGULE_API_KEY;
+    const result = run(['--output', output, '--tarball', tarball], { env, timeoutMs: 120_000 });
+    assert.equal(result.status, 2, result.stdout + result.stderr);
+    assert.doesNotMatch(result.stdout, /- provenance: /u);
+    const record = JSON.parse(await readFile(join(output, 'run.json'), 'utf8')) as {
+      testedIdentity: { gitSha: string | null; dirty: boolean | null };
+      sourceProvenance: { sourceGitSha?: string };
+    };
+    assert.equal(record.testedIdentity.gitSha, IDENTITY.gitSha);
+    assert.equal(record.testedIdentity.dirty, true);
+    assert.equal(record.sourceProvenance.sourceGitSha, IDENTITY.gitSha);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('run state writes stay ordered when a late spawn update follows them', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-state-'));
+  try {
+    const path = join(root, 'run-state.json');
+    const write = createStateWriter(path);
+    // 模拟 onSpawn 的异步写晚到：三次写同时排队，最终落盘的必须是最新状态。
+    const pending = [write({ status: 'running', harborPid: null }), write({ status: 'collecting' }), write({ status: 'finished' })];
+    await Promise.all(pending);
+    const state = JSON.parse(await readFile(path, 'utf8')) as { status: string };
+    assert.equal(state.status, 'finished');
+    assert.deepEqual((await readdir(root)).filter((name) => name.endsWith('.tmp')), []);
+    await write({ status: 'running' });
+    assert.equal((JSON.parse(await readFile(path, 'utf8')) as { status: string }).status, 'running');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('a failed state write does not strand the queue', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ligule-state-fail-'));
+  try {
+    const missingDirectory = join(root, 'absent', 'run-state.json');
+    const write = createStateWriter(missingDirectory);
+    await assert.rejects(() => write({ status: 'running' }));
+    const path = join(root, 'run-state.json');
+    const healthy = createStateWriter(path);
+    await healthy({ status: 'finished' });
+    assert.equal((JSON.parse(await readFile(path, 'utf8')) as { status: string }).status, 'finished');
+  } finally {
+    await rm(root, { recursive: true, force: true });
   }
 });
 
