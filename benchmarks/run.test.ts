@@ -39,6 +39,10 @@ test('performance runner refuses to overwrite an explicit output directory', asy
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /output_directory_exists/u);
     assert.equal(await readFile(join(output, 'marker.txt'), 'utf8'), 'keep me\n');
+    const forced = run(['--output', output, '--force']);
+    assert.notEqual(forced.status, 0);
+    assert.match(forced.stderr, /output_directory_not_benchmark_run/u);
+    assert.equal(await readFile(join(output, 'marker.txt'), 'utf8'), 'keep me\n');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

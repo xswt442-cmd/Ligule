@@ -33,7 +33,7 @@ An explicit `--output` fails if the directory already exists; `--force` renames 
 
 ## Environment overrides
 
-- `LIGULE_BENCH_CLI`: absolute path to an installed `ligule` CLI entry (`.../node_modules/ligule/dist/cli.js`). The default is the repository build.
+- `LIGULE_BENCH_CLI`: absolute path to an installed `ligule` CLI entry (`.../node_modules/ligule/dist/cli.js`). The default is the repository build; use this override for an installed-consumer release baseline. Record which entry was measured alongside the results.
 - `LIGULE_BENCH_MCP_SDK`: absolute path to an installed `@modelcontextprotocol/sdk`. The default is the repository dependency.
 
 A scenario reports `blocked` when the host cannot provide the execution backend (for example, the process sandbox is unavailable). It does not synthesize samples. Windows and Linux results are reported separately; absolute timings from different machines are not directly comparable.

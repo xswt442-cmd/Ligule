@@ -46,6 +46,9 @@ if (requestedOutput === undefined) {
   runDirectory = resolve(requestedOutput);
   if (existsSync(runDirectory)) {
     if (!force) throw new Error(`output_directory_exists:${runDirectory}; pass --force to preserve it as a previous run`);
+    if (!existsSync(join(runDirectory, 'summary.json')) || !existsSync(join(runDirectory, 'raw.jsonl'))) {
+      throw new Error(`output_directory_not_benchmark_run:${runDirectory}`);
+    }
     const previous = `${runDirectory}.previous-${stamp}`;
     await rename(runDirectory, previous);
     process.stdout.write(`Preserved existing output at ${previous}\n`);
@@ -53,6 +56,9 @@ if (requestedOutput === undefined) {
 }
 const workRoot = join(runDirectory, 'tmp');
 await mkdir(workRoot, { recursive: true });
+await writeFile(join(runDirectory, 'benchmark.json'), `${JSON.stringify({
+  kind: 'ligule-harness-performance', version: 1, gitSha: environment.gitSha, createdAt: generatedAt,
+}, null, 2)}\n`, 'utf8');
 
 const results: ScenarioResult[] = [];
 for (const scenario of scenarios) {
