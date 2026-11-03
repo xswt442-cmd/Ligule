@@ -35,7 +35,7 @@ import { historyPathOf, loadHistory, rememberHistory } from '../kernel/input-his
 import { parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../kernel/desktop-prefs.js';
 import { credentialStatus, deleteCredential, storeCredential } from '../kernel/credentials.js';
 import { modelServices, modelSelection, resolveModel, type ModelSelection } from '../kernel/model-services.js';
-import { POLICY_SEMANTICS, createDecisionChain, isPolicyMode, isPolicyRule, policyArgsHash, readPolicyMode, type DecisionChain, type PolicyAskResult, type PolicyMode, type PolicyState, type PolicyThresholds } from '../kernel/policy.js';
+import { POLICY_SEMANTICS, createDecisionChain, isPolicyMode, isPolicyRule, policyArgsHash, readPersistedPolicyMode, readPolicyMode, type DecisionChain, type PolicyAskResult, type PolicyMode, type PolicyState, type PolicyThresholds } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
 import { createSessionLog, type SessionLog } from '../session/session.js';
@@ -4105,8 +4105,10 @@ export function createHost({
             services: modelServices(values.model?.services),
             selection: values.model?.selection === undefined ? null : modelSelection(values.model.selection),
             // 返回配置中的默认策略；`status.get` 返回会话当前生效的策略。
-            // 历史值（没有语义标记的 none/never）按旧语义映射后再展示，避免界面显示成可用的新档位。
-            policyMode: readPolicyMode(values.policy.mode, true),
+            // 带语义标记的文件按新语义展示；没有标记的历史 none/never 仍按旧语义降级，避免界面显示成可用的新档位。
+            policyMode: values.policy.mode === undefined
+              ? undefined
+              : readPersistedPolicyMode(values.policy.mode, values.policy.semantics),
             layers,
             sources,
             rules,
