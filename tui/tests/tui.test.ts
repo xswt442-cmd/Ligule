@@ -1733,7 +1733,7 @@ test('/policy never asks for confirmation before it turns approvals off', option
     await type('/policy never');
     await waitFor(() => count('确认完全不审批') > second, { read: () => strip(painted).slice(-700) });
     await choose('我确认跳过所有审批', 0);
-    await waitFor(() => requests.some((request) => request.method === 'policy.set' && request.params.mode === 'never'), { read: () => strip(painted).slice(-700) });
+    await waitFor(() => requests.some((request) => request.method === 'policy.set' && (request.params as { mode?: string }).mode === 'never'), { read: () => strip(painted).slice(-700) });
     await waitFor(() => spoken('当前会话审批方式：never'), { read: () => strip(painted).slice(-700) });
     assert.equal(await policyOf(), 'never');
   } finally {
