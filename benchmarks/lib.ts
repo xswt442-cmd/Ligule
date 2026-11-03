@@ -58,23 +58,31 @@ export async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
 }
 
-export function summaryOf(result: ScenarioResult): Record<string, Record<string, number>> {
-  const metrics = new Map<string, number[]>();
+const NON_METRIC = new Set(['workload', 'events', 'outputBytes', 'bytes', 'tools', 'resultBytes']);
+
+export function summaryOf(result: ScenarioResult): Record<string, Record<string, Record<string, number>>> {
+  const workloads = new Map<string, Map<string, number[]>>();
   for (const sample of result.samples) {
+    const workload = typeof sample.workload === 'string' ? sample.workload : 'default';
+    const metrics = workloads.get(workload) ?? new Map<string, number[]>();
     for (const [key, value] of Object.entries(sample)) {
-      if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+      if (NON_METRIC.has(key) || typeof value !== 'number' || !Number.isFinite(value)) continue;
       const values = metrics.get(key) ?? [];
       values.push(value);
       metrics.set(key, values);
     }
+    workloads.set(workload, metrics);
   }
-  return Object.fromEntries([...metrics.entries()].map(([key, values]) => [key, statistic(values)]));
+  return Object.fromEntries([...workloads.entries()].map(([workload, metrics]) => [
+    workload,
+    Object.fromEntries([...metrics.entries()].map(([key, values]) => [key, statistic(values)])),
+  ]));
 }
 
 export function markdownReport(summary: {
   generatedAt: string;
   environment: Record<string, unknown>;
-  scenarios: { name: string; status: string; reason?: string; metrics: Record<string, Record<string, number>> }[];
+  scenarios: { name: string; status: string; reason?: string; metrics: Record<string, Record<string, Record<string, number>>> }[];
 }): string {
   const lines = [
     '# Ligule harness performance',
@@ -89,9 +97,10 @@ export function markdownReport(summary: {
   for (const scenario of summary.scenarios) {
     lines.push(`## ${scenario.name}`, '');
     lines.push(`Status: ${scenario.status}${scenario.reason === undefined ? '' : ` (${scenario.reason})`}`, '');
-    if (Object.keys(scenario.metrics).length > 0) {
+    for (const [workload, metrics] of Object.entries(scenario.metrics)) {
+      lines.push(`### ${workload}`, '');
       lines.push('| metric | min | p50 | p95 | max | mean |', '| --- | --- | --- | --- | --- | --- |');
-      for (const [metric, values] of Object.entries(scenario.metrics)) {
+      for (const [metric, values] of Object.entries(metrics)) {
         lines.push(`| ${metric} | ${values.min.toFixed(2)} | ${values.p50.toFixed(2)} | ${values.p95.toFixed(2)} | ${values.max.toFixed(2)} | ${values.mean.toFixed(2)} |`);
       }
       lines.push('');

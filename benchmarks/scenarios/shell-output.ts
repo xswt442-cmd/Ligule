@@ -36,14 +36,16 @@ export const shellOutput: Scenario = {
         ...(scriptBinding === undefined ? {} : { scriptBinding }),
       });
       const durationMs = performance.now() - started;
-      const rssDeltaBytes = process.memoryUsage().rss - rssBefore;
+      const benchmarkProcessRssDeltaBytes = process.memoryUsage().rss - rssBefore;
       if (result.exitCode !== 0) throw new Error(`shell_output_exit:${String(result.exitCode)}`);
       if (result.text.length <= 0) throw new Error('shell_output_empty');
+      if (bytes > EXEC_BYTES && !result.text.includes('[truncated:')) throw new Error(`shell_output_not_bounded:${bytes}`);
+      if (result.text.length > EXEC_BYTES + 256) throw new Error(`shell_output_text_too_long:${result.text.length}`);
       if (record) {
         samples.push({
-          outputBytes: bytes,
+          workload: `${bytes / (1024 * 1024)}-MiB-output`,
           durationMs,
-          rssDeltaBytes,
+          benchmarkProcessRssDeltaBytes,
           returnedTextCharacters: result.text.length,
           durationMsPerMiB: durationMs / (bytes / (1024 * 1024)),
         });
@@ -69,7 +71,11 @@ export const shellOutput: Scenario = {
       const duration = Number(sample.durationMs);
       bySize.set(size, [...(bySize.get(size) ?? []), duration]);
     }
-    const notes: Record<string, unknown> = { execBytes: EXEC_BYTES, shell: shell.kind };
+    const notes: Record<string, unknown> = {
+      execBytes: EXEC_BYTES,
+      shell: shell.kind,
+      rssNote: 'benchmarkProcessRssDeltaBytes is this benchmark process, not the executed child peak.',
+    };
     const small = bySize.get(OUTPUTS[0]) ?? [];
     const large = bySize.get(OUTPUTS[1]) ?? [];
     if (small.length > 0 && large.length > 0) {

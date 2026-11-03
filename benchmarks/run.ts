@@ -77,8 +77,11 @@ await writeFile(join(runDirectory, 'raw.jsonl'), raw.length === 0 ? '' : `${raw.
 process.stdout.write('\n');
 for (const scenario of summary.scenarios) {
   process.stdout.write(`${scenario.status.toUpperCase()} ${scenario.name}${scenario.reason === undefined ? '' : `: ${scenario.reason}`}\n`);
-  for (const [metric, values] of Object.entries(scenario.metrics)) {
-    process.stdout.write(`  ${metric}: p50=${values.p50.toFixed(2)} p95=${values.p95.toFixed(2)} min=${values.min.toFixed(2)} max=${values.max.toFixed(2)}\n`);
+  for (const [workload, metrics] of Object.entries(scenario.metrics)) {
+    process.stdout.write(`  [${workload}]\n`);
+    for (const [metric, values] of Object.entries(metrics)) {
+      process.stdout.write(`    ${metric}: p50=${values.p50.toFixed(2)} p95=${values.p95.toFixed(2)} min=${values.min.toFixed(2)} max=${values.max.toFixed(2)}\n`);
+    }
   }
 }
 process.stdout.write(`\nArtifacts: ${runDirectory}\n`);
