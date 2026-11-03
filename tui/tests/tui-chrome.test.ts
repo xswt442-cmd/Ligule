@@ -26,9 +26,11 @@ test('configuration keeps approval visible and stays within narrow display width
   for (const columns of [32, 50, 80, 120]) {
     for (const locale of ['zh', 'en'] as const) {
       for (const mode of ['minimal', 'very-long-mode-中文😀'.repeat(5)]) {
-        const text = configurationText({ model: 'very-long-model-中文😀'.repeat(5), mode, policy: 'none', columns, locale });
-        assert.ok(displayWidth(text) <= columns, text);
-        assert.ok(text.includes(locale === 'zh' ? '不受审批' : 'none'), text);
+        for (const policy of ['never', 'always'] as const) {
+          const text = configurationText({ model: 'very-long-model-中文😀'.repeat(5), mode, policy, columns, locale });
+          assert.ok(displayWidth(text) <= columns, text);
+          assert.ok(text.includes(locale === 'zh' ? (policy === 'never' ? '不审批' : '每次审批') : policy), text);
+        }
       }
     }
   }

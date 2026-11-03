@@ -38,7 +38,7 @@ export const UI_COMMANDS = Object.freeze([
   { name: 'mcp', usage: '/mcp [list|add|remove|trust|confirm|revoke|tools]', text: '管理本机 MCP Server 配置、信任与工具', hint: '[操作]', whenRunning: false },
   { name: 'extensions', usage: '/extensions [on|off]', text: '列出用户扩展，或停用与启用', hint: '[on|off] [名称]', whenRunning: false },
   { name: 'trust', usage: '/trust [revoke]', text: '查看工作区信任，或撤销信任并退出', hint: '[revoke]', whenRunning: false },
-  { name: 'policy', usage: '/policy [ask|auto|none|reset]', text: '查看或修改审批方式', hint: '[ask|auto|none|reset]', whenRunning: true },
+  { name: 'policy', usage: '/policy [always|ask|auto|never|reset]', text: '查看或修改审批方式', hint: '[always|ask|auto|never|reset]', whenRunning: true },
   { name: 'permission', usage: '/permission [read-only|workspace-write|full-access|network]', text: '查看或修改本会话的 OS 权限', hint: '[档位|network]', whenRunning: false },
   { name: 'screen', usage: '/screen [on [confirm]|off]', text: '单独授权或撤销本会话截图', hint: '[on [confirm]|off]', whenRunning: true },
   { name: 'browser', usage: '/browser [stop|resume]', text: '查看或控制本会话浏览器', hint: '[stop|resume]', whenRunning: true },
@@ -74,7 +74,7 @@ const ENGLISH_COMMANDS: Record<CommandName, readonly [string, string, string]> =
   mcp: ['/mcp [list|add|remove|trust|confirm|revoke|tools]', 'Manage local MCP server configuration, trust, and tools', '[action]'],
   extensions: ['/extensions [on|off]', 'List user extensions, or disable and enable them', '[on|off] [name]'],
   trust: ['/trust [revoke]', 'View workspace trust, or revoke it and exit', '[revoke]'],
-  policy: ['/policy [ask|auto|none|reset]', 'Show or change the approval mode', '[ask|auto|none|reset]'],
+  policy: ['/policy [always|ask|auto|never|reset]', 'Show or change the approval mode', '[always|ask|auto|never|reset]'],
   permission: ['/permission [read-only|workspace-write|full-access|network]', 'View or change this session’s operating-system permissions', '[profile|network]'],
   screen: ['/screen [on [confirm]|off]', 'Authorize or revoke screen capture for this Session', '[on [confirm]|off]'],
   browser: ['/browser [stop|resume]', 'Show or control this Session’s browser', '[stop|resume]'],
@@ -166,7 +166,7 @@ export function routeInput(text: string, running: boolean): InputRoute {
 }
 
 const ARGUMENTS: Readonly<Record<string, readonly string[]>> = {
-  policy: ['ask', 'auto', 'none', 'reset'],
+  policy: ['always', 'ask', 'auto', 'never', 'reset'],
   permission: ['read-only', 'workspace-write', 'full-access', 'network'],
   screen: ['on', 'off'],
   'screen on': ['confirm'],

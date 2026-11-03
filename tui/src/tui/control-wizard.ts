@@ -2,7 +2,7 @@
 // 这里不接触 Host 请求、React 状态或消息展示，聊天界面只负责把用户输入交给它、再执行返回的动作。
 export type ControlPermissionProfile = 'read-only' | 'workspace-write' | 'full-access';
 export type ControlNetworkScope = 'disabled' | 'policy' | 'unrestricted';
-export type ControlPolicyMode = 'ask' | 'auto' | 'none';
+export type ControlPolicyMode = 'always' | 'ask' | 'auto' | 'never';
 
 export type ControlWizardValues = {
   name?: string;
@@ -42,7 +42,7 @@ export type ControlWizardOutcome =
 
 const PERMISSION_PROFILES: readonly ControlPermissionProfile[] = ['read-only', 'workspace-write', 'full-access'];
 const NETWORK_SCOPES: readonly ControlNetworkScope[] = ['disabled', 'policy', 'unrestricted'];
-const POLICY_MODES: readonly ControlPolicyMode[] = ['ask', 'auto', 'none'];
+const POLICY_MODES: readonly ControlPolicyMode[] = ['always', 'ask', 'auto', 'never'];
 const PERMISSION_RANK: Readonly<Record<ControlPermissionProfile, number>> = { 'read-only': 0, 'workspace-write': 1, 'full-access': 2 };
 const NETWORK_RANK: Readonly<Record<ControlNetworkScope, number>> = { disabled: 0, policy: 1, unrestricted: 2 };
 
@@ -111,14 +111,14 @@ export function parseControlWizardInput(wizard: ControlWizard, raw: string, t: W
     }
   } else if (wizard.step === 5) {
     if (!POLICY_MODES.includes(input as ControlPolicyMode)) {
-      return fail(t('请输入 ask、auto 或 none。', 'Enter ask, auto, or none.'));
+      return fail(t('请输入 always、ask、auto 或 never。', 'Enter always, ask, auto, or never.'));
     }
     values.defaultPolicy = input as ControlPolicyMode;
   } else if (wizard.step === 6) {
     const allowed = input.split(',').map((part) => part.trim()).filter(Boolean);
     if (allowed.length === 0 || allowed.some((part) => !POLICY_MODES.includes(part as ControlPolicyMode))
       || !distinct(allowed) || !allowed.includes(values.defaultPolicy ?? 'ask')) {
-      return fail(t('请输入不重复的 Policy 列表，例如 ask,none，并包含默认 Policy。', 'Enter distinct Policy modes such as ask,none, including the default.'));
+      return fail(t('请输入不重复的 Policy 列表，例如 ask,auto，并包含默认 Policy。', 'Enter distinct Policy modes such as ask,auto, including the default.'));
     }
     values.allowedPolicies = allowed as ControlPolicyMode[];
   } else if (wizard.step === 7) {
@@ -178,9 +178,10 @@ export function controlGrantRequest(values: ControlWizardValues, projectRoot: st
     defaultNetwork: values.defaultNetwork!,
     maxNetwork: values.maxNetwork!,
     defaultPolicy: values.defaultPolicy!,
+    allowedPolicyAlways: values.allowedPolicies!.includes('always'),
     allowedPolicyAsk: values.allowedPolicies!.includes('ask'),
     allowedPolicyAuto: values.allowedPolicies!.includes('auto'),
-    allowedPolicyNone: values.allowedPolicies!.includes('none'),
+    allowedPolicyNever: values.allowedPolicies!.includes('never'),
     allowOperator: values.allowOperator!,
     allowedMcpServers: values.allowedMcpServers ?? [],
     allowedMcpTools: values.allowedMcpTools ?? [],

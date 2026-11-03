@@ -663,11 +663,11 @@ test('the candidate list narrows on what is typed and appends host templates', o
   assert.ok(candidatesOf('/approval mode', [], undefined, 'en').some(command => command.name === 'policy'));
   assert.ok(candidatesOf('/tool mode', [], undefined, 'en').some(command => command.name === 'mode'));
   assert.ok(candidatesOf('/credentials', [], undefined, 'en').some(command => command.name === 'credentials'));
-  assert.deepEqual(candidatesOf('/policy a').map(command => command.name), ['policy ask', 'policy auto']);
+  assert.deepEqual(candidatesOf('/policy a').map(command => command.name), ['policy always', 'policy ask', 'policy auto']);
   assert.deepEqual(candidatesOf('/permission network d').map(command => command.name), ['permission network disabled']);
   assert.deepEqual(candidatesOf('/permission  n').map(command => command.name), ['permission network']);
   assert.deepEqual(candidatesOf('/permission \t network\t d').map(command => command.name), ['permission network disabled']);
-  assert.deepEqual(candidatesOf('/policy\ta').map(command => command.name), ['policy ask', 'policy auto']);
+  assert.deepEqual(candidatesOf('/policy\ta').map(command => command.name), ['policy always', 'policy ask', 'policy auto']);
   assert.deepEqual(candidatesOf('/queue drop 2'), []);
   assert.deepEqual(candidatesOf('/queue l').map(command => command.name), ['queue list']);
   assert.deepEqual(candidatesOf('/git:release:prepare ', templates), []);
@@ -1671,7 +1671,7 @@ test('/policy changes the session setting and updates the bottom configuration l
     await waitFor(() => lastFrame().includes(`审批 ${policyLabel(other)}`), { read: lastFrame });
 
     await type('/policy sometimes');
-    await waitFor(() => spoken('用法：/policy ask|auto|none|reset'), { read: () => painted });
+    await waitFor(() => spoken('用法：/policy always|ask|auto|never|reset（旧 none 等同 ask）'), { read: () => painted });
 
     await type('/policy reset');
     await waitFor(() => spoken(`已恢复默认审批方式：${configDefault}`), { read: () => painted });
@@ -1942,7 +1942,9 @@ test('a submitted grant cannot be canceled or submitted again while the Host res
     }
 
     await answer('yes');
-    await waitFor(() => lastFrame().includes('授权请求已提交') && lastFrame().includes('› yes'), { read: lastFrame });
+    // The draft alone proves nothing: wait until the Enter was actually handled and the guard spoke twice.
+    await waitFor(() => (plainOutput(painted).match(/此时不能取消或重复提交/gu) ?? []).length >= 2, { within: 15_000, read: lastFrame });
+    assert.equal(inputLine(), '› yes', 'the second attempt is preserved as a draft');
     assert.equal(createRequests().length, 1, 'a pending grant submission cannot create another request');
 
     releaseCreateResponse();

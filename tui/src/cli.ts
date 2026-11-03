@@ -14,7 +14,7 @@ import {
 } from '@ligule/core/tui.js';
 import { providerDiagnosticText, runtimeFailureText } from './tui/errors.js';
 import { configureTerminalColors } from './tui/output.js';
-import { isPolicyRule, type ConfigSnapshot, type Connection, type ModeDirectories, type PolicyMode, type PolicyRule, type PolicyThresholds } from '@ligule/core/tui.js';
+import { isPolicyMode, isPolicyRule, type ConfigSnapshot, type Connection, type ModeDirectories, type PolicyMode, type PolicyRule, type PolicyThresholds } from '@ligule/core/tui.js';
 interface CliPolicy extends Record<string, unknown> {
   readonly mode?: PolicyMode;
   readonly rules?: PolicyRule[];
@@ -75,7 +75,7 @@ function responseCount(value: Record<string, unknown>, field: string): number {
 function policyOf(value: unknown): CliPolicy | undefined {
   if (value === undefined || !isRecord(value)) return undefined;
   const mode = value.mode;
-  if (mode !== undefined && mode !== 'ask' && mode !== 'auto' && mode !== 'none' && mode !== 'never') throw new KernelError('policy_mode_unknown');
+  if (mode !== undefined && !isPolicyMode(mode)) throw new KernelError('policy_mode_unknown');
   let rules: PolicyRule[] | undefined;
   if (value.rules !== undefined) {
     if (!Array.isArray(value.rules) || !value.rules.every(isPolicyRule)) throw new KernelError('policy_rules_invalid');

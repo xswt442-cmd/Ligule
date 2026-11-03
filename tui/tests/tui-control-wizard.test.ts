@@ -42,14 +42,16 @@ test('control wizard rejects ceilings below the defaults', () => {
 test('control wizard keeps policy lists distinct and inclusive of the default', () => {
   const duplicated = parseControlWizardInput(wizard(6, { defaultPolicy: 'ask' }), 'ask,ask', t);
   assert.equal(duplicated.kind, 'error');
-  const missingDefault = parseControlWizardInput(wizard(6, { defaultPolicy: 'ask' }), 'auto,none', t);
+  const missingDefault = parseControlWizardInput(wizard(6, { defaultPolicy: 'ask' }), 'auto,never', t);
   assert.equal(missingDefault.kind, 'error');
-  const ok = parseControlWizardInput(wizard(6, { defaultPolicy: 'ask' }), 'ask,none', t) as WizardStep;
+  const legacy = parseControlWizardInput(wizard(6, { defaultPolicy: 'ask' }), 'ask,none', t);
+  assert.equal(legacy.kind, 'error');
+  const ok = parseControlWizardInput(wizard(6, { defaultPolicy: 'ask' }), 'ask,never', t) as WizardStep;
   assert.equal(ok.kind, 'step');
-  assert.deepEqual(ok.wizard.values.allowedPolicies, ['ask', 'none']);
-  const onlyNoPrompts = parseControlWizardInput(wizard(6, { defaultPolicy: 'none' }), 'none', t) as WizardStep;
+  assert.deepEqual(ok.wizard.values.allowedPolicies, ['ask', 'never']);
+  const onlyNoPrompts = parseControlWizardInput(wizard(6, { defaultPolicy: 'never' }), 'never', t) as WizardStep;
   assert.equal(onlyNoPrompts.kind, 'step');
-  assert.deepEqual(onlyNoPrompts.wizard.values.allowedPolicies, ['none']);
+  assert.deepEqual(onlyNoPrompts.wizard.values.allowedPolicies, ['never']);
 });
 
 test('control wizard defers MCP tool listing and aborts when trust is refused', () => {
@@ -90,7 +92,7 @@ test('control wizard submits and maps values onto the create request', () => {
     defaultNetwork: 'policy',
     maxNetwork: 'unrestricted',
     defaultPolicy: 'ask',
-    allowedPolicies: ['ask', 'none'],
+    allowedPolicies: ['ask', 'never'],
     allowOperator: true,
     allowedMcpServers: ['notes'],
     allowedMcpTools: ['mcp:notes/read'],
@@ -119,9 +121,10 @@ test('control wizard submits and maps values onto the create request', () => {
     defaultNetwork: 'policy',
     maxNetwork: 'unrestricted',
     defaultPolicy: 'ask',
+    allowedPolicyAlways: false,
     allowedPolicyAsk: true,
     allowedPolicyAuto: false,
-    allowedPolicyNone: true,
+    allowedPolicyNever: true,
     allowOperator: true,
     allowedMcpServers: ['notes'],
     allowedMcpTools: ['mcp:notes/read'],
