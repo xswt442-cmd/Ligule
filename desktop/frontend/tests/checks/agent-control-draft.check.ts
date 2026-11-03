@@ -66,9 +66,10 @@ const request = createGrantRequest(
 assert.equal(request.version, 'v7');
 assert.equal(request.grantName, 'grant');
 assert.equal(request.projectRoot, '/project');
+assert.equal(request.allowedPolicyAlways, false);
 assert.equal(request.allowedPolicyAsk, true);
 assert.equal(request.allowedPolicyAuto, true);
-assert.equal(request.allowedPolicyNone, false);
+assert.equal(request.allowedPolicyNever, false);
 assert.equal(request.allowOperator, true);
 assert.deepEqual(request.allowedMcpTools, ['mcp:notes/read']);
 assert.ok(typeof request.expiresAt === 'string' && (request.expiresAt as string).includes('T'));
