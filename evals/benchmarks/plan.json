@@ -17,6 +17,12 @@
   ],
   "attempts_per_task": 1,
   "concurrency": 2,
+  "timeout_multipliers": {
+    "task": 1.0,
+    "agent": 1.0,
+    "agent_setup": 4.0,
+    "environment_build": 2.0
+  },
   "model": {
     "api": "messages",
     "model_calls": 20,

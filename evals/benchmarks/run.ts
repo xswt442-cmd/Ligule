@@ -14,6 +14,7 @@ type Plan = {
   tasks: PlanTask[];
   attempts_per_task: number;
   concurrency: number;
+  timeout_multipliers: { task: number; agent: number; agent_setup: number; environment_build: number };
   model: { api: string; model_calls: number; timeout_ms: number; request_timeout_ms: number };
   verifier: { reward_key: string; pass_threshold: number; authority: string };
 };
@@ -117,10 +118,10 @@ async function main(): Promise<void> {
     n_attempts: plan.attempts_per_task,
     n_concurrent_trials: plan.concurrency,
     skip_credential_checks: true,
-    timeout_multiplier: 1.0,
-    agent_timeout_multiplier: 1.0,
-    agent_setup_timeout_multiplier: 1.0,
-    environment_build_timeout_multiplier: 1.0,
+    timeout_multiplier: plan.timeout_multipliers.task,
+    agent_timeout_multiplier: plan.timeout_multipliers.agent,
+    agent_setup_timeout_multiplier: plan.timeout_multipliers.agent_setup,
+    environment_build_timeout_multiplier: plan.timeout_multipliers.environment_build,
     agents: [{
       import_path: 'evals.harbor.ligule_agent:LiguleAgent',
       model_name: model,
@@ -138,6 +139,7 @@ async function main(): Promise<void> {
           ligule_node_runtime_tarball: resolve(nodeRuntime),
           ligule_node_runtime_sha256: nodeRuntimeSha256,
         }),
+        ...(process.env.LIGULE_BENCH_BUILD_TOOLS === '1' ? { ligule_install_build_tools: true } : {}),
       },
       env: { LIGULE_API_KEY: '${LIGULE_API_KEY}' },
     }],
@@ -160,6 +162,7 @@ async function main(): Promise<void> {
     '--path', taskRoot,
     ...tasks.flatMap((task) => ['--include-task-name', task.id]),
     '--jobs-dir', harborDirectory,
+    ...(baseUrl === undefined ? [] : ['--allow-agent-host', new URL(baseUrl).hostname]),
     '--n-attempts', String(plan.attempts_per_task),
     '--n-concurrent', String(plan.concurrency),
     '--max-retries', '0',

@@ -8,6 +8,7 @@ Runs a frozen `terminal-bench@2.0` subset through the existing Harbor adapter an
 - `uv` on `PATH`; the runner resolves Harbor `0.25.0` into the uv cache.
 - A built CLI tarball: `pnpm --filter ligule run pack-release`, then `--tarball <absolute path>` or `LIGULE_BENCH_TARBALL`.
 - Provider settings: `LIGULE_API_KEY`, `LIGULE_BENCH_BASE_URL`, `LIGULE_BENCH_MODEL`; optionally `LIGULE_BENCH_API` (`messages` by default).
+- Images without Node 24: set `LIGULE_BENCH_NODE_RUNTIME` to an official Linux Node 24 `.tar.gz` and `LIGULE_BENCH_NODE_RUNTIME_SHA256` to its official digest. Images that need a compiler for native npm modules: set `LIGULE_BENCH_BUILD_TOOLS=1`; the adapter installs only `build-essential`/`python3` when missing.
 - The frozen dataset locally. Download once outside tracked files:
 
 ```sh
