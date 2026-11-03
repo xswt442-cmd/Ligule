@@ -12,8 +12,19 @@ export type ProcessResult = {
   timedOut: boolean;
   interrupted: boolean;
   terminationPending: boolean;
+  terminationError?: string;
   error?: string;
 };
+
+export function isProcessAlive(pid: unknown): boolean {
+  if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
 
 export async function runProcess(
   command: string,
@@ -38,6 +49,7 @@ export async function runProcess(
     let timedOut = false;
     let interrupted = false;
     let terminationPending = false;
+    let terminationError: string | undefined;
     let settled = false;
     const append = (current: string, chunk: Buffer): string => {
       const next = current + chunk.toString('utf8');
@@ -50,18 +62,28 @@ export async function runProcess(
       settled = true;
       process.off('SIGINT', onInterrupt);
       process.off('SIGTERM', onInterrupt);
-      resolveRun({ status, signal, stdout, stderr, timedOut, interrupted, terminationPending, ...(error === undefined ? {} : { error }) });
+      resolveRun({ status, signal, stdout, stderr, timedOut, interrupted, terminationPending, ...(terminationError === undefined ? {} : { terminationError }), ...(error === undefined ? {} : { error }) });
     };
     const killTree = (): void => {
       if (process.platform === 'win32') {
         if (child.pid !== undefined) {
-          spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: 30_000 });
+          const result = spawnSync('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true, timeout: 30_000 });
+          if (result.status !== 0) terminationError = `${result.stderr ?? ''}${result.error?.message ?? ''}`.trim().slice(0, 500) || 'taskkill_failed';
         }
       } else {
         try { if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL'); }
-        catch { try { child.kill('SIGKILL'); } catch { /* already exited */ } }
+        catch (error) {
+          terminationError = error instanceof Error ? error.message : String(error);
+          try { child.kill('SIGKILL'); } catch { /* already exited */ }
+        }
       }
-      setTimeout(() => { terminationPending = true; finish(null, 'SIGKILL'); }, 10_000).unref();
+      setTimeout(() => {
+        terminationPending = true;
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        child.unref();
+        finish(null, 'SIGKILL');
+      }, 10_000).unref();
     };
     const onInterrupt = (): void => {
       interrupted = true;
@@ -173,11 +195,11 @@ export async function prepareRunDirectory(requested: string | undefined, force: 
     }
     const stateFile = resolve(directory, 'run-state.json');
     if (existsSync(stateFile)) {
-      try {
-        const state = JSON.parse(await readFile(stateFile, 'utf8')) as { status?: unknown };
-        if (state.status === 'running') throw new Error(`active_benchmark_run:${directory}; stop it or use --collect-only`);
-      } catch (error) {
-        if (error instanceof Error && error.message.startsWith('active_benchmark_run:')) throw error;
+      let state: { status?: unknown; pid?: unknown };
+      try { state = JSON.parse(await readFile(stateFile, 'utf8')) as typeof state; }
+      catch { throw new Error(`run_state_invalid:${directory}`); }
+      if (state.status === 'running' && isProcessAlive(state.pid)) {
+        throw new Error(`active_benchmark_run:${directory}; stop it or use --collect-only`);
       }
     }
     const previous = `${directory}.previous-${stamp}`;

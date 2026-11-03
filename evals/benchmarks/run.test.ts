@@ -73,7 +73,7 @@ test('run directories refuse silent overwrite and preserve previous evidence wit
     const active = join(root, 'active');
     await mkdir(active);
     await writeFile(join(active, 'run.json'), `${JSON.stringify({ identity: IDENTITY, plan: {}, executionStatus: 'running' })}\n`, 'utf8');
-    await writeFile(join(active, 'run-state.json'), '{"status":"running"}\n', 'utf8');
+    await writeFile(join(active, 'run-state.json'), `${JSON.stringify({ status: 'running', pid: process.pid })}\n`, 'utf8');
     await assert.rejects(() => prepareRunDirectory(active, true, join(root, 'unused')), /active_benchmark_run/u);
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -112,7 +112,7 @@ test('the manifest rejects malformed trial results instead of hiding them as not
   }
 });
 
-test('repeated attempts keep the planned denominator and distinguish started-without-result', async () => {
+test('repeated attempts refuse ambiguous missing results instead of misassigning them', async () => {
   const runDirectory = await mkdtemp(join(tmpdir(), 'ligule-manifest-attempts-'));
   try {
     const job = join(runDirectory, 'job.json');
@@ -132,18 +132,10 @@ test('repeated attempts keep the planned denominator and distinguish started-wit
       model: { model_calls: 1, timeout_ms: 1, request_timeout_ms: 1 },
       verifier: { reward_key: 'reward', pass_threshold: 1 },
     };
-    const result = await writeManifest({
+    await assert.rejects(() => writeManifest({
       runDirectory, plan, identity: IDENTITY, model: 'fixture-model', baseUrl: 'https://provider.invalid/v1',
       jobPath: job, jobName: 'job-1', startedAt: '2026-01-01T00:00:00.000Z', finishedAt: '2026-01-01T00:01:00.000Z',
-    });
-    assert.equal(result.attempts, 2);
-    assert.equal(result.notRun, 1);
-    const manifest = JSON.parse(await readFile(join(runDirectory, 'manifest.json'), 'utf8')) as {
-      attempts: Record<string, unknown>[];
-    };
-    const secondAttempt = manifest.attempts.find((attempt) => attempt.attempt === 2);
-    assert.equal(secondAttempt?.result_file, null);
-    assert.equal(secondAttempt?.not_run_reason, 'trial_started_result_missing');
+    }), /repeated_attempt_result_missing/u);
   } finally {
     await rm(runDirectory, { recursive: true, force: true });
   }

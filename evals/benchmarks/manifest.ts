@@ -26,6 +26,7 @@ type HarborTrial = {
   task_name?: unknown;
   trial_name?: unknown;
   task_id?: unknown;
+  started_at?: unknown;
 };
 
 export type TaskCounts = { pass: number; fail: number; infra_error: number; not_run: number; total: number };
@@ -34,6 +35,7 @@ export type ManifestResult = {
   path: string;
   attempts: number;
   notRun: number;
+  startedWithoutResult: number;
 };
 
 async function findFiles(root: string, name: string): Promise<string[]> {
@@ -75,12 +77,15 @@ export async function writeManifest({
   finishedAt: string;
 }): Promise<ManifestResult> {
   if (identity.gitSha === null) throw new Error('manifest_requires_git_sha');
+  if (!/^[A-Za-z0-9._-]+$/u.test(jobName) || jobName === '.' || jobName === '..') throw new Error(`unsafe_job_name:${jobName}`);
   const jobDirectory = join(runDirectory, 'harbor', jobName);
-  if (!existsSync(jobDirectory)) throw new Error(`harbor_job_missing:${jobName}`);
-  const trialFiles = await findFiles(jobDirectory, 'result.json');
-  const trialDirectories = (await readdir(jobDirectory, { withFileTypes: true }))
-    .filter((entry) => entry.isDirectory() && entry.name.includes('__'))
-    .map((entry) => entry.name);
+  const jobExists = existsSync(jobDirectory);
+  const trialFiles = jobExists ? await findFiles(jobDirectory, 'result.json') : [];
+  const trialDirectories = jobExists
+    ? (await readdir(jobDirectory, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory() && entry.name.includes('__'))
+      .map((entry) => entry.name)
+    : [];
   const trials = new Map<string, { path: string; result: HarborTrial }[]>();
   for (const path of trialFiles) {
     if (!trialResultPath(runDirectory, path)) continue;
@@ -99,8 +104,12 @@ export async function writeManifest({
 
   const attempts: Record<string, unknown>[] = [];
   for (const task of plan.tasks) {
-    const taskTrials = (trials.get(task.id) ?? []).sort((left, right) => String(left.result.trial_name).localeCompare(String(right.result.trial_name)));
+    const taskTrials = (trials.get(task.id) ?? []).sort((left, right) =>
+      String(left.result.started_at ?? left.result.trial_name).localeCompare(String(right.result.started_at ?? right.result.trial_name)));
     const taskTrialDirectories = trialDirectories.filter((name) => name.startsWith(`${task.id}__`)).sort();
+    if (plan.attempts_per_task > 1 && taskTrials.length !== plan.attempts_per_task) {
+      throw new Error(`repeated_attempt_result_missing:${task.id}:${taskTrials.length}/${plan.attempts_per_task}`);
+    }
     for (let index = 0; index < plan.attempts_per_task; index += 1) {
       const trial = taskTrials[index];
       if (trial === undefined) {
@@ -172,6 +181,7 @@ export async function writeManifest({
     path,
     attempts: attempts.length,
     notRun: attempts.filter((attempt) => attempt.not_run_reason !== null).length,
+    startedWithoutResult: attempts.filter((attempt) => attempt.not_run_reason === 'trial_started_result_missing').length,
   };
 }
 

@@ -5,7 +5,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { arch, platform, release } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { benchmarkTimeoutMs, countsOf, positiveInteger, prepareRunDirectory, providerUrlProblem, runProcess, safeProviderUrl, timeoutBasis } from './lib.ts';
+import { benchmarkTimeoutMs, countsOf, isProcessAlive, positiveInteger, prepareRunDirectory, providerUrlProblem, runProcess, safeProviderUrl, timeoutBasis } from './lib.ts';
 import { outputDirectoryFor, writeManifest } from './manifest.ts';
 import type { ManifestPlan, RunIdentity } from './manifest.ts';
 
@@ -199,10 +199,12 @@ async function main(): Promise<void> {
     const collectedModel = prior.model?.model ?? model ?? undefined;
     const collectedBaseUrl = prior.model?.baseUrl ?? baseUrl ?? undefined;
     const state = existsSync(join(runDirectory, 'run-state.json'))
-      ? JSON.parse(await readFile(join(runDirectory, 'run-state.json'), 'utf8')) as { started?: string; finished?: string; status?: string }
+      ? JSON.parse(await readFile(join(runDirectory, 'run-state.json'), 'utf8')) as {
+        started?: string; finished?: string; status?: string; pid?: number;
+      }
       : {};
-    if (state.status === 'running' && !process.argv.includes('--collect-running')) {
-      throw new Error('active_benchmark_run: stop it or pass --collect-running for a read-only snapshot');
+    if (state.status === 'running' && isProcessAlive(state.pid)) {
+      throw new Error('active_benchmark_run: the original benchmark process is still running');
     }
     const startedAt = prior.started ?? state.started ?? new Date().toISOString();
     const finishedAt = prior.finished ?? state.finished ?? new Date().toISOString();
@@ -215,6 +217,7 @@ async function main(): Promise<void> {
     catch (error) {
       await writeFile(join(runDirectory, 'collection.json'), `${JSON.stringify({
         collectedAt: new Date().toISOString(), manifest: manifest.path, attempts: manifest.attempts, notRun: manifest.notRun,
+        startedWithoutResult: manifest.startedWithoutResult,
         error: error instanceof Error ? error.message : String(error),
       }, null, 2)}\n`, 'utf8');
       throw error;
@@ -224,7 +227,8 @@ async function main(): Promise<void> {
     await writeFile(join(runDirectory, 'collection.json'), `${JSON.stringify({
       collectedAt: new Date().toISOString(),
       source: { gitSha: prior.identity.gitSha, model: collectedModel ?? null, baseUrl: collectedBaseUrl ?? null, started: startedAt, finished: finishedAt },
-      manifest: manifest.path, counts,
+      manifest: manifest.path, attempts: manifest.attempts, notRun: manifest.notRun,
+      startedWithoutResult: manifest.startedWithoutResult, counts,
       report: { directory: report.directory, json: report.json, markdown: report.markdown, summary: report.summary },
     }, null, 2)}\n`, 'utf8');
     process.stdout.write(`Collected existing Harbor output: pass ${counts.pass}, fail ${counts.fail}, infra_error ${counts.infra_error}, not_run ${counts.not_run}, total ${counts.total}\nArtifacts: ${runDirectory}\n`);
@@ -364,6 +368,7 @@ async function main(): Promise<void> {
   ];
   await writeFile(join(runDirectory, 'run-state.json'), `${JSON.stringify({
     status: 'running',
+    pid: process.pid,
     started,
     timeoutMs,
     timeoutBasis: timeoutBasis(plan, tasks.length),
@@ -397,6 +402,7 @@ async function main(): Promise<void> {
     signal: execution.signal,
     error: execution.error ?? null,
     terminationPending: execution.terminationPending,
+    terminationError: execution.terminationError ?? null,
   }, null, 2)}\n`, 'utf8');
 
   const enumerated = executionStatus === 'completed'
@@ -437,19 +443,23 @@ async function main(): Promise<void> {
     signal: execution.signal,
     error: execution.error ?? null,
     terminationPending: execution.terminationPending,
+    terminationError: execution.terminationError ?? null,
     jobPath,
     harborDirectory,
     stdout: stdoutPath,
     stderr: stderrPath,
     tasks,
-    manifest: manifest === undefined ? { error: manifestError } : { path: manifest.path, attempts: manifest.attempts, notRun: manifest.notRun },
+    manifest: manifest === undefined ? { error: manifestError } : {
+      path: manifest.path, attempts: manifest.attempts, notRun: manifest.notRun,
+      startedWithoutResult: manifest.startedWithoutResult,
+    },
     report: report === undefined ? { error: reportError } : {
       directory: report.directory,
       json: report.json,
       markdown: report.markdown,
       summary: report.summary,
     },
-    taskCounts: taskCounts ?? null,
+    taskCounts: taskCounts === undefined ? null : { ...taskCounts, startedWithoutResult: manifest?.startedWithoutResult ?? null },
     cleanup,
   };
   await writeFile(join(runDirectory, 'run.json'), `${JSON.stringify(record, null, 2)}\n`, 'utf8');
