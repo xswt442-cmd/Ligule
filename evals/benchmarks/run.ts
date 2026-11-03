@@ -140,6 +140,7 @@ async function main(): Promise<void> {
           ligule_node_runtime_sha256: nodeRuntimeSha256,
         }),
         ...(process.env.LIGULE_BENCH_BUILD_TOOLS === '1' ? { ligule_install_build_tools: true } : {}),
+        ...(process.env.LIGULE_BENCH_APT_MIRROR === undefined ? {} : { ligule_setup_apt_mirror: process.env.LIGULE_BENCH_APT_MIRROR }),
       },
       env: { LIGULE_API_KEY: '${LIGULE_API_KEY}' },
     }],
