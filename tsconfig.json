@@ -3,6 +3,7 @@
   "references": [
     { "path": "./core" },
     { "path": "./core/tests" },
+    { "path": "./benchmarks" },
     { "path": "./tui" },
     { "path": "./scripts" },
     { "path": "./tests" },
