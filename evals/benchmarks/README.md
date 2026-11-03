@@ -33,6 +33,17 @@ An explicit `--output` never overwrites an existing directory: the runner fails 
 
 Exit codes describe the benchmark execution, not task success: `0` Harbor and report generation completed (inspect `taskCounts` for pass/fail/infra/not-run), `1` Harbor failed, timed out, or report/manifest generation failed, `2` blocked because a prerequisite is missing. A blocked result lists every missing prerequisite; it is not a model score. A timed-out execution records the timeout and incomplete run state. Cleanup targets only this job's exact trial containers (matched by trial name/compose project), never other concurrent runs; any removal failure is recorded.
 
+## Pipeline canary
+
+`canary-plan.json` and `canary/` provide a one-task file-tool canary that is not part of the benchmark score. It asks the agent to create `/app/answer.txt` with `LIGULE-CANARY-OK` using only `create`/`read`, and an independent Harbor verifier writes the reward. Run it with the same prerequisites and:
+
+```sh
+pnpm run bench:agent -- --plan evals/benchmarks/canary-plan.json \
+  --dataset-dir evals/benchmarks/canary --tasks canary
+```
+
+The canary image uses a locally available base image so the check does not depend on a Docker Hub pull. It validates the provider, Ligule Session/tool path, Harbor adapter, report manifest, and verifier without mixing the result into the eight-task benchmark.
+
 ## Plan and scoring
 
 The plan fixes the dataset version, task IDs, one attempt per task, concurrency, model-call/timeout budget, and the verifier authority. Harbor's task verifier runs in its own environment and decides pass/fail. The runner uses the existing `evals.harbor.ligule_agent:LiguleAgent` adapter and `--allow-full-access` behavior inside the task container; it does not create approvals or read verifier files.
