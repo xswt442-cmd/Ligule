@@ -22,7 +22,7 @@ test('safe presets stay inside the minimal permission envelope', () => {
     assert.equal(preset.defaultNetwork, 'policy', preset.id);
     assert.equal(preset.defaultPolicy, 'ask', preset.id);
     assert.equal(preset.allowOperator, false, preset.id);
-    assert.ok(preset.allowedPolicies.every(policy => policy === 'ask' || policy === 'none'), preset.id);
+    assert.ok(preset.allowedPolicies.every(policy => policy === 'ask'), preset.id);
   }
 });
 
@@ -76,7 +76,7 @@ test('the observer preset creates a grant whose ceiling the Host accepts verbati
       defaultPolicy: reader.defaultPolicy,
       allowedPolicyAsk: reader.allowedPolicies.includes('ask'),
       allowedPolicyAuto: (reader.allowedPolicies as readonly string[]).includes('auto'),
-      allowedPolicyNone: reader.allowedPolicies.includes('none'),
+      allowedPolicyNone: false,
       allowOperator: reader.allowOperator,
       allowedMcpServers: [],
       allowedMcpTools: [],

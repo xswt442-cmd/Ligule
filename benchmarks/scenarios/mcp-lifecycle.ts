@@ -166,7 +166,7 @@ export const mcpLifecycle: Scenario = {
         defaultNetwork: 'disabled',
         maxNetwork: 'policy',
         defaultPolicy: 'auto',
-        allowedPolicies: ['ask', 'auto', 'none'],
+        allowedPolicies: ['ask', 'auto'],
         allowOperator: true,
         confirmPartialWorkspaceWrite: true,
         confirmFullAccess: false,

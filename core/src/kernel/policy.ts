@@ -52,6 +52,9 @@ function isPortableAbsolutePath(value: string): boolean {
   return isAbsolute(value) || /^[A-Za-z]:[\\/]/u.test(value) || /^\\\\[^\\/]+[\\/]/u.test(value);
 }
 
+/** 规则表条目来自配置文件，类型定义在 `config-edit.ts`；这里重新导出，避免调用方多引一个模块。 */
+export type { PolicyRule } from './config-edit.js';
+
 export function isPolicyRule(value: unknown): value is PolicyRule {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
   const rule = value as Record<string, unknown>;
