@@ -65,7 +65,7 @@ Windows 路径示例：
 {"command":"ligule","args":["mcp-server","--project","/absolute/path/to/project","--operator"]}
 ```
 
-`--operator` 代表本机操控者明确授权这个 stdio 客户端。它允许回答真实待处理的 Policy 审批和用户提问，以及修改单个会话的 Mode、Policy、模型、生成参数和每轮循环上限；它不更改文件边界、工作区信任或硬拒绝规则。可选 Policy 只有 `ask`、`auto` 和 `none`；已保存的旧版 `never` 保持原有拒绝语义。审批不能覆盖非法工具参数或工作区边界。`ligule_run_status` 的待处理交互只含有界摘要，不会重复传输完整工具参数。可信本地 TUI 或 Desktop 可以在请求仍待处理时展开详情。Host 无法安全审阅请求时会返回明确的 unavailable/error 错误码，不会记作用户拒绝。
+`--operator` 代表本机操控者明确授权这个 stdio 客户端。它允许回答真实待处理的 Policy 审批和用户提问，以及修改单个会话的 Mode、Policy、模型、生成参数和每轮循环上限；它不更改文件边界、工作区信任或硬拒绝规则。可选 Policy 为 `always`、`ask`、`auto` 和 `never`；`never` 跳过整个 Policy 层但保留硬性安全校验，旧版的 `none` 与旧 `never` 一律按 `ask` 读取。审批不能覆盖非法工具参数或工作区边界。`ligule_run_status` 的待处理交互只含有界摘要，不会重复传输完整工具参数。可信本地 TUI 或 Desktop 可以在请求仍待处理时展开详情。Host 无法安全审阅请求时会返回明确的 unavailable/error 错误码，不会记作用户拒绝。
 
 每条待决答复都绑定原始会话和 `requestId`。状态与事件中的 `source` 区分本机 TUI/Desktop 用户（`human`）和 MCP 操控者（`controller`）；两者对待决审批的明确批准都会清除拒绝计数并解除强制逐次审批，只有 `human` 答复可以保存审批记忆。操作结束、断连或请求失效后，迟到的答复会返回 `control_interaction_stale`，不会记作用户拒绝。
 

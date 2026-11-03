@@ -6,6 +6,28 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ## [Unreleased]
 
+### 简体中文
+
+**改进**
+
+- 审批方式改为四档：`always`（每次都要审批）、`ask`（逐次审批）、`auto`（自动判定）、`never`（完全不审批）。`/policy`、审批方式选择器和底部配置行同步更新；选择 `never` 前必须先确认，并说明规则表里的 allow/ask/deny 不再参与判定。
+- 旧配置、旧会话记录和旧授权里的 `none`、以及旧语义的 `never` 一律按 `ask` 读取，历史数据不会自动变成“跳过审批”；新写入的记录带语义标记，可与旧记录区分。
+
+**修复**
+
+- 外控授权向导提交完成后，尚未处理的一次回车不再会从陈旧状态复活向导、用同一个名字重复提交授权。
+
+### English
+
+**Improved**
+
+- Approval modes are now `always` (every call waits), `ask`, `auto`, and `never` (skip the policy layer). `/policy`, the mode picker, and the bottom configuration line follow the new set; choosing `never` requires a confirmation that explains allow/ask/deny rules no longer take part.
+- Legacy `none` values and the old `never` meaning are read as `ask` in existing config, session records, and grants, so history never silently becomes “skip approvals”. Newly written records carry a semantics marker that separates them from old ones.
+
+**Fixed**
+
+- After a grant request is submitted, an Enter that was still in flight can no longer resurrect the wizard from stale state and submit the same grant twice.
+
 ## [0.1.2] - 2026-11-02
 
 ### 简体中文

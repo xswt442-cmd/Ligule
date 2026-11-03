@@ -6,6 +6,20 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ## [Unreleased]
 
+### 简体中文
+
+**改进**
+
+- 审批方式改为四档：`always`（每次都要审批）、`ask`（逐次审批）、`auto`（自动判定）、`never`（完全不审批）。设置里的审批方式选择器、会话配置行和外控授权草稿同步更新；选择 `never` 前必须先确认。
+- 旧配置与会话记录里的 `none`、以及旧语义的 `never` 按 `ask` 读取，历史数据不会自动变成“跳过审批”。
+
+### English
+
+**Improved**
+
+- Approval modes are now `always`, `ask`, `auto`, and `never` (skip the policy layer). The settings picker, session status line, and Agent Control grant draft follow the new set, and choosing `never` requires a confirmation.
+- Legacy `none` values and the old `never` meaning are read as `ask`, so existing data never silently becomes “skip approvals”.
+
 ## [0.1.2] - 2026-11-02
 
 ### 简体中文
