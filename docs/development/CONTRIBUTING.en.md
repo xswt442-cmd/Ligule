@@ -20,7 +20,9 @@ pnpm verify-install
 
 Core's package tests live under `core/tests/`, TUI tests under `tui/tests/`, and cross-package integration tests under the repository-level `tests/`. Desktop frontend check scripts live under `desktop/frontend/tests/checks/`; development support stays under `desktop/frontend/dev/`. Run the complete suite with `pnpm test` to include Core, TUI, and cross-package tests.
 
-The MCP integration in `tests/mcp-server.test.js` uses a real SDK stdio client, a local HTTP model endpoint, persistent Session records, Policy decisions and child processes. Run it directly with `node --test --import ./tests/hooks/isolated-data-root.ts tests/mcp-server.test.js`. The standalone client in `tests/helpers/mcp-control.mjs` accepts explicit installed CLI and SDK paths so the same control calls can be checked outside the checkout. See the [Agent Control via MCP guide](../agent-control/guide.en.md) for tool and permission semantics. A deterministic model endpoint does not count as a real external model service test.
+Tests are TypeScript (`*.test.ts`) and run with Node 24 type stripping; `pnpm build` typechecks the Core, TUI, integration, and benchmark projects. Shared Host fixtures live in `core/tests/helpers/`; TUI tests use the thin `tui/tests/helpers/tui-host.ts` adapter. A few platform runners and fixtures stay `.mjs` or `.cjs` where the Electron runtime, native shim, or external tool contract requires it.
+
+The MCP integration in `tests/mcp-server.test.ts` uses a real SDK stdio client, a local HTTP model endpoint, persistent Session records, Policy decisions and child processes. Run it directly with `node --experimental-strip-types --test --import ./tests/hooks/isolated-data-root.ts tests/mcp-server.test.ts`. The standalone client in `tests/helpers/mcp-control.mjs` accepts explicit installed CLI and SDK paths so the same control calls can be checked outside the checkout. See the [Agent Control via MCP guide](../agent-control/guide.en.md) for tool and permission semantics. A deterministic model endpoint does not count as a real external model service test.
 
 ## Desktop development
 
@@ -38,6 +40,10 @@ pnpm --filter ligule-desktop run dev
 ```
 
 Cross-platform installers, real-window checks, and native acceptance require the matching Electron runtime. Before running acceptance, confirm that the build target and runtime architecture match the operating system; report platform coverage from checks actually run.
+
+## Benchmarks
+
+`pnpm run bench:perf` runs the deterministic harness scenarios (CLI first round, Session JSONL parse/read/list, shell output, MCP receipt lifecycle) and writes raw samples plus JSON/Markdown summaries under `testplace/benchmarks/`. `pnpm run bench:agent` runs the frozen `terminal-bench@2.0` plan through the Harbor adapter; it requires Docker, a CLI tarball, provider settings, the frozen dataset, and a Node 24 Linux runtime for images without Node. Both commands record the Git SHA, tarball digest, model/API, budget, and platform. A blocked prerequisite is reported as `BLOCKED`, never as a score. See [benchmarks/README.md](../../benchmarks/README.md) and [evals/benchmarks/README.md](../../evals/benchmarks/README.md).
 
 ## Keep changes verifiable
 

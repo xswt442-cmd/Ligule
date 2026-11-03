@@ -20,7 +20,9 @@ pnpm verify-install
 
 Core 包内测试位于 `core/tests/`，TUI 测试位于 `tui/tests/`，跨模块集成测试位于仓库根目录的 `tests/`。桌面前端检查脚本位于 `desktop/frontend/tests/checks/`，开发辅助文件保留在 `desktop/frontend/dev/`。运行完整套件请使用 `pnpm test`，其中包含 Core、TUI 和跨模块测试。
 
-`tests/mcp-server.test.js` 通过真实 SDK stdio 客户端、本地 HTTP 模型端点、持久 Session 记录、Policy 与子进程验证外控。可单独运行 `node --test --import ./tests/hooks/isolated-data-root.ts tests/mcp-server.test.js`。`tests/helpers/mcp-control.mjs` 独立客户端接受明确的已安装 CLI 和 SDK 路径，可在检出目录之外检查相同控制调用。工具与权限语义见 [Agent Control（MCP）指南](../agent-control/guide.zh-CN.md)。确定性模型端点测试不代表真实外部模型服务验收。
+测试使用 TypeScript（`*.test.ts`），由 Node 24 的类型剥离直接运行；`pnpm build` 会类型检查 Core、TUI、集成与 Benchmark 项目。共享 Host 辅助位于 `core/tests/helpers/`；TUI 测试使用轻量的 `tui/tests/helpers/tui-host.ts` 适配层。少数平台运行器与 fixture 因 Electron 运行时、原生 shim 或外部工具契约保留为 `.mjs` 或 `.cjs`。
+
+`tests/mcp-server.test.ts` 通过真实 SDK stdio 客户端、本地 HTTP 模型端点、持久 Session 记录、Policy 与子进程验证外控。可单独运行 `node --experimental-strip-types --test --import ./tests/hooks/isolated-data-root.ts tests/mcp-server.test.ts`。`tests/helpers/mcp-control.mjs` 独立客户端接受明确的已安装 CLI 和 SDK 路径，可在检出目录之外检查相同控制调用。工具与权限语义见 [Agent Control（MCP）指南](../agent-control/guide.zh-CN.md)。确定性模型端点测试不代表真实外部模型服务验收。
 
 ## 桌面开发
 
@@ -38,6 +40,10 @@ pnpm --filter ligule-desktop run dev
 ```
 
 跨平台安装包、真实窗口和平台原生验收使用对应平台的 Electron 运行时。运行验收前，确认构建目标、运行时架构与当前操作系统一致；只根据实际执行结果记录平台覆盖情况。
+
+## 基准测试
+
+`pnpm run bench:perf` 运行确定性的 Harness 场景（CLI 首轮任务、Session JSONL 解析/读取/列表、Shell 输出、MCP 回执生命周期），原始样本与 JSON/Markdown 摘要写入 `testplace/benchmarks/`。`pnpm run bench:agent` 通过 Harbor 适配器运行冻结的 `terminal-bench@2.0` 计划；需要 Docker、CLI tarball、提供方设置、冻结数据集，以及为没有 Node 的镜像准备的 Node 24 Linux 运行时。两个命令都会记录 Git SHA、tarball 摘要、模型/API、预算与平台。缺少前置条件时报告 `BLOCKED`，不会当作得分。详见 [benchmarks/README.md](../../benchmarks/README.md) 与 [evals/benchmarks/README.md](../../evals/benchmarks/README.md)。
 
 ## 让改动可核验
 
