@@ -35,8 +35,22 @@ async function sha256(path: string): Promise<string> {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
+function resolvedDockerHost(): string | undefined {
+  if (process.env.DOCKER_HOST !== undefined) return process.env.DOCKER_HOST;
+  const context = spawnSync('docker', ['context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'], {
+    encoding: 'utf8', windowsHide: true, timeout: 30_000,
+  });
+  const host = context.status === 0 ? context.stdout.trim() : '';
+  return host === '' ? undefined : host;
+}
+
 async function main(): Promise<void> {
   const plan = JSON.parse(await readFile(join(repository, 'evals', 'benchmarks', 'plan.json'), 'utf8')) as Plan;
+  const requestedTasks = option('tasks')?.split(',').map((task) => task.trim()).filter(Boolean);
+  const tasks = requestedTasks === undefined ? plan.tasks : plan.tasks.filter((task) => requestedTasks.includes(task.id));
+  const unknownTasks = requestedTasks?.filter((id) => !plan.tasks.some((task) => task.id === id)) ?? [];
+  if (unknownTasks.length > 0) throw new Error(`unknown benchmark tasks: ${unknownTasks.join(', ')}`);
+  if (tasks.length === 0) throw new Error('no benchmark tasks selected');
   const tarball = option('tarball') ?? process.env.LIGULE_BENCH_TARBALL;
   const datasetRoot = resolve(option('dataset-dir') ?? process.env.LIGULE_BENCH_DATASET_DIR
     ?? join(repository, 'testplace', 'benchmarks', 'datasets', `${plan.dataset.name}@${plan.dataset.version}`));
@@ -44,6 +58,8 @@ async function main(): Promise<void> {
   const baseUrl = process.env.LIGULE_BENCH_BASE_URL;
   const model = process.env.LIGULE_BENCH_MODEL;
   const api = process.env.LIGULE_BENCH_API ?? plan.model.api;
+  const nodeRuntime = process.env.LIGULE_BENCH_NODE_RUNTIME;
+  const nodeRuntimeSha256 = process.env.LIGULE_BENCH_NODE_RUNTIME_SHA256;
   const checks: Record<string, { ok: boolean; detail: string }> = {
     docker: commandAvailable('docker', ['version', '--format', '{{.Server.Version}}']),
     uv: commandAvailable('uv', ['--version']),
@@ -51,10 +67,23 @@ async function main(): Promise<void> {
     providerKey: { ok: typeof apiKey === 'string' && apiKey !== '', detail: apiKey === undefined || apiKey === '' ? 'LIGULE_API_KEY is unset' : 'set (value not recorded)' },
     providerBaseUrl: { ok: typeof baseUrl === 'string' && baseUrl !== '', detail: baseUrl ?? 'LIGULE_BENCH_BASE_URL is unset' },
     providerModel: { ok: typeof model === 'string' && model !== '', detail: model ?? 'LIGULE_BENCH_MODEL is unset' },
+    nodeRuntime: {
+      ok: (nodeRuntime === undefined && nodeRuntimeSha256 === undefined)
+        || (nodeRuntime !== undefined && nodeRuntimeSha256 !== undefined && /^[0-9a-f]{64}$/u.test(nodeRuntimeSha256) && existsSync(nodeRuntime)),
+      detail: nodeRuntime === undefined && nodeRuntimeSha256 === undefined
+        ? 'not supplied; task images must provide Node 24+'
+        : nodeRuntime === undefined || nodeRuntimeSha256 === undefined
+          ? 'LIGULE_BENCH_NODE_RUNTIME and LIGULE_BENCH_NODE_RUNTIME_SHA256 must be supplied together'
+          : `${resolve(nodeRuntime)} sha256=${nodeRuntimeSha256}`,
+    },
   };
+  if (nodeRuntime !== undefined && nodeRuntimeSha256 !== undefined && existsSync(nodeRuntime)) {
+    const actual = await sha256(nodeRuntime);
+    if (actual !== nodeRuntimeSha256) checks.nodeRuntime = { ok: false, detail: `runtime digest ${actual} does not match ${nodeRuntimeSha256}` };
+  }
   const datasetDirectory = join(datasetRoot, plan.dataset.name);
-  const taskRoot = existsSync(join(datasetDirectory, plan.tasks[0]?.id ?? '', 'task.toml')) ? datasetDirectory : datasetRoot;
-  const missingTasks = plan.tasks.filter((task) => !existsSync(join(taskRoot, task.id, 'task.toml'))).map((task) => task.id);
+  const taskRoot = existsSync(join(datasetDirectory, tasks[0]?.id ?? '', 'task.toml')) ? datasetDirectory : datasetRoot;
+  const missingTasks = tasks.filter((task) => !existsSync(join(taskRoot, task.id, 'task.toml'))).map((task) => task.id);
   checks.dataset = {
     ok: missingTasks.length === 0,
     detail: missingTasks.length === 0 ? taskRoot : `missing ${missingTasks.join(', ')} under ${taskRoot}; run: uv run --no-project --with harbor==0.25.0 harbor datasets download ${plan.dataset.name}@${plan.dataset.version} -o ${datasetRoot}`,
@@ -105,6 +134,10 @@ async function main(): Promise<void> {
         ligule_model_calls: plan.model.model_calls,
         ligule_timeout_ms: plan.model.timeout_ms,
         ligule_request_timeout_ms: plan.model.request_timeout_ms,
+        ...(nodeRuntime === undefined ? {} : {
+          ligule_node_runtime_tarball: resolve(nodeRuntime),
+          ligule_node_runtime_sha256: nodeRuntimeSha256,
+        }),
       },
       env: { LIGULE_API_KEY: '${LIGULE_API_KEY}' },
     }],
@@ -125,7 +158,7 @@ async function main(): Promise<void> {
     'run', '--no-project', '--with', 'harbor==0.25.0', 'harbor', 'run',
     '--config', jobPath,
     '--path', taskRoot,
-    ...plan.tasks.flatMap((task) => ['--include-task-name', task.id]),
+    ...tasks.flatMap((task) => ['--include-task-name', task.id]),
     '--jobs-dir', harborDirectory,
     '--n-attempts', String(plan.attempts_per_task),
     '--n-concurrent', String(plan.concurrency),
@@ -138,7 +171,16 @@ async function main(): Promise<void> {
     encoding: 'utf8',
     windowsHide: true,
     maxBuffer: 64 * 1024 * 1024,
-    env: { ...process.env, PYTHONPATH: repository, LIGULE_API_KEY: apiKey },
+    env: {
+      ...process.env,
+      PYTHONPATH: repository,
+      PYTHONUTF8: '1',
+      PYTHONIOENCODING: 'utf-8',
+      NO_COLOR: '1',
+      TERM: 'dumb',
+      ...(resolvedDockerHost() === undefined ? {} : { DOCKER_HOST: resolvedDockerHost() as string }),
+      LIGULE_API_KEY: apiKey,
+    },
   });
   const finished = new Date().toISOString();
   const stdoutPath = join(runDirectory, 'harbor.stdout.log');
@@ -156,7 +198,7 @@ async function main(): Promise<void> {
     harborDirectory,
     stdout: stdoutPath,
     stderr: stderrPath,
-    tasks: plan.tasks,
+    tasks,
   };
   await writeFile(join(runDirectory, 'run.json'), `${JSON.stringify(record, null, 2)}\n`, 'utf8');
   process.stdout.write(`Agent benchmark ${record.status}: exit ${execution.status}\nArtifacts: ${runDirectory}\n`);
