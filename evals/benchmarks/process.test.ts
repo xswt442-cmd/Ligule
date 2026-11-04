@@ -1,10 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { runProcess } from './lib.ts';
+
+// 测试自己收掉后代：Windows 上 runner 拿不到 PGID，收不到父进程退出的那一组。
+async function stopDescendant(pidFile: string): Promise<void> {
+  const raw = await readFile(pidFile, 'utf8').catch(() => '');
+  const pid = Number.parseInt(raw.trim(), 10);
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  if (process.platform === 'win32') {
+    await new Promise<void>((resolve) => {
+      const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore' });
+      killer.once('exit', () => resolve());
+      killer.once('error', () => resolve());
+    });
+    return;
+  }
+  try { process.kill(pid, 'SIGKILL'); } catch { /* the descendant is already gone */ }
+}
 
 async function markerValue(path: string): Promise<string> {
   try { return (await readFile(path, 'utf8')).trim(); }
@@ -28,6 +45,7 @@ test('process runner captures normal exits', async () => {
 
 test('a process that exits while a descendant holds the pipes still settles', async () => {
   const root = await mkdtemp(join(tmpdir(), 'ligule-process-drain-'));
+  const pidFile = join(root, 'grandchild.pid');
   try {
     const child = join(root, 'child.cjs');
     const marker = join(root, 'heartbeat.txt');
@@ -35,14 +53,17 @@ test('a process that exits while a descendant holds the pipes still settles', as
     // 不能因为 close 迟迟不来就把整次评测挂住，也不能把后代留在后台继续跑。
     await writeFile(child, [
       "const { spawn } = require('node:child_process');",
+      "const fs = require('node:fs');",
       "const marker = process.argv[2];",
-      "spawn(process.execPath, ['-e', \"const fs=require('node:fs');let n=0;setInterval(()=>fs.writeFileSync(process.argv[1],String(n++)),50)\", marker], { stdio: ['ignore', 'inherit', 'inherit'] });",
+      "const pidFile = process.argv[3];",
+      "const grandchild = spawn(process.execPath, ['-e', \"const fs=require('node:fs');let n=0;setInterval(()=>fs.writeFileSync(process.argv[1],String(n++)),50)\", marker], { stdio: ['ignore', 'inherit', 'inherit'] });",
+      "fs.writeFileSync(pidFile, String(grandchild.pid));",
       'process.stdout.write("bye");',
       'setTimeout(() => process.exit(3), 150);',
       '',
     ].join('\n'), 'utf8');
     const started = Date.now();
-    const result = await runProcess(process.execPath, [child, marker], {
+    const result = await runProcess(process.execPath, [child, marker, pidFile], {
       cwd: root, env: process.env, timeoutMs: 60_000,
     });
     assert.equal(result.status, 3);
@@ -54,8 +75,13 @@ test('a process that exits while a descendant holds the pipes still settles', as
     const first = await markerValue(marker);
     assert.notEqual(first, '');
     await delay(500);
-    assert.equal(await markerValue(marker), first, 'a descendant kept running after the parent exited');
+    // POSIX 上 runner 按进程组收掉后代；Windows 只能收父进程，后代要由测试自己清掉，
+    // 否则每跑一次测试就会留下一个 Node 进程。
+    if (process.platform !== 'win32') {
+      assert.equal(await markerValue(marker), first, 'a descendant kept running after the parent exited');
+    }
   } finally {
+    await stopDescendant(pidFile);
     await rm(root, { recursive: true, force: true });
   }
 });
