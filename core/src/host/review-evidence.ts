@@ -48,6 +48,22 @@ function summarizeToolParams(params: unknown): string {
 const PROFILE_LEVEL: Record<string, number> = { 'read-only': 0, 'workspace-write': 1, 'full-access': 2 };
 const NETWORK_LEVEL: Record<string, number> = { disabled: 0, policy: 1, unrestricted: 2 };
 
+/**
+ * 证据读不到时的固定结论。授权的安全性依赖“证据仍然是当前的”，
+ * 所以这里只允许转人工：绝不复用上一轮缓存的约束去做自动放行。
+ */
+export const REVIEW_EVIDENCE_UNAVAILABLE_REASON = 'the session log could not be read, so the review evidence is stale';
+
+export type StaleReviewOutcome = {
+  readonly decision: 'ask-human';
+  readonly reasonCode: 'review_evidence_unavailable';
+  readonly reason: string;
+};
+
+export function staleReviewOutcome(): StaleReviewOutcome {
+  return { decision: 'ask-human', reasonCode: 'review_evidence_unavailable', reason: REVIEW_EVIDENCE_UNAVAILABLE_REASON };
+}
+
 export async function selectReviewEvidence(
   session: SessionLog,
   options: ReviewEvidenceOptions = {},

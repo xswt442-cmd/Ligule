@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildReviewInput, REVIEW_INPUT_VERSION } from '../dist/kernel/reviewer.js';
 import type { ReviewFacts } from '../dist/kernel/reviewer.js';
-import { selectReviewEvidence } from '../dist/host/review-evidence.js';
+import { selectReviewEvidence, staleReviewOutcome } from '../dist/host/review-evidence.js';
 import type { SessionLog } from '../dist/session/session.js';
 
 type Event = Record<string, unknown>;
@@ -146,4 +146,12 @@ test('lowering write access to read-only counts as withdrawn evidence too', asyn
   ];
   const evidence = await selectReviewEvidence(sessionOf(events), { tool: 'exec' });
   assert.deepEqual(evidence?.revoked.map((item) => item.seq), [6], 'workspace-write to read-only is a narrowing');
+});
+
+test('unreadable evidence falls back to a human, never to the last snapshot', async () => {
+  // Host 在 selectReviewEvidence 返回 undefined 时会直接用这个结论：转人工，且不可被自动放行。
+  const outcome = staleReviewOutcome();
+  assert.equal(outcome.decision, 'ask-human');
+  assert.equal(outcome.reasonCode, 'review_evidence_unavailable');
+  assert.match(outcome.reason, /could not be read/u);
 });

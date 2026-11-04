@@ -56,7 +56,7 @@ import { controllerScopeOf, mayRecordHumanRun, maySetPermission, requirePermissi
 import { usageEvent } from '../session/usage.js';
 import { summarizeUsage } from '../session/usage-summary.js';
 import { readSessionRecord } from '../session/record.js';
-import { selectReviewEvidence } from './review-evidence.js';
+import { selectReviewEvidence, staleReviewOutcome } from './review-evidence.js';
 import type { ReviewEvidence } from '../kernel/reviewer.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel, readPolicyOverride } from '../session/format.js';
@@ -1909,27 +1909,43 @@ export function createHost({
       // 每次复审前从原始 Session 事件重建可信证据：早期约束、撤销与收紧、相关历史都带 seq。
       const evidence = await selectReviewEvidence(session, {
         tool: request.tool,
-        ...(captureGrant === undefined ? {} : { grantActive: captureGrant.revokedAt === undefined }),
+        ...(captureGrant === undefined ? {} : { grantActive: captureGrant.revokedAt === null }),
       });
-      if (evidence !== undefined) state.reviewEvidence = evidence;
-      const outcome = await reviewer.review(request);
-      try {
-        await session.append({
-          kind: 'policyReview',
-          ignorable: true,
-          at: new Date().toISOString(),
-          tool: request.tool,
-          review: outcome.decision,
-          reasonCode: outcome.reasonCode,
-          make: 'session-reviewer',
-          durationMs: Date.now() - startedAt,
-          // 证据来源可回查：只记真正送进提示词的序号，预算丢掉的历史不冒领。
-          ...(outcome.includedSeqs === undefined || outcome.includedSeqs.length === 0 ? {} : { evidenceSeqs: [...outcome.includedSeqs] }),
-          ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
-        });
-      } catch (error) {
-        logger?.log?.('failed to record the review decision', { sessionId: id, session_error: String(error) });
+      const appendAudit = async (record: {
+        readonly decision: 'allow' | 'deny' | 'ask-human';
+        readonly reasonCode?: string;
+        readonly reason?: string;
+        readonly includedSeqs?: readonly number[];
+      }): Promise<void> => {
+        try {
+          await session.append({
+            kind: 'policyReview',
+            ignorable: true,
+            at: new Date().toISOString(),
+            tool: request.tool,
+            review: record.decision,
+            ...(record.reasonCode === undefined ? {} : { reasonCode: record.reasonCode }),
+            make: 'session-reviewer',
+            durationMs: Date.now() - startedAt,
+            // 证据来源可回查：只记真正送进提示词的序号，预算丢掉的历史不冒领。
+            ...(record.includedSeqs === undefined || record.includedSeqs.length === 0 ? {} : { evidenceSeqs: [...record.includedSeqs] }),
+            ...(record.reason === undefined ? {} : { reason: record.reason }),
+          });
+        } catch (error) {
+          logger?.log?.('failed to record the review decision', { sessionId: id, session_error: String(error) });
+        }
+      };
+      if (evidence === undefined) {
+        // 读不到原始日志时不能复用上一轮的约束：自动放行的安全性依赖“证据仍然是当前的”。
+        // 复用旧快照会让撤销或收紧失效，所以本次直接转人工，并把结论写进审计。
+        state.reviewEvidence = undefined;
+        const stale = staleReviewOutcome();
+        await appendAudit(stale);
+        return stale;
       }
+      state.reviewEvidence = evidence;
+      const outcome = await reviewer.review(request);
+      await appendAudit(outcome);
       return outcome;
     };
     const chain = createDecisionChain({
