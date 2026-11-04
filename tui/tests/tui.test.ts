@@ -2259,6 +2259,8 @@ test('/usage reads the Host aggregate and keeps the two accounts apart', options
     await waitFor(() => requests.some((request) => request.method === 'usage.get'), { read: () => strip(painted).slice(-700) });
     await waitFor(() => strip(painted).includes('主 Agent：暂无调用') && strip(painted).includes('复审：暂无调用'),
       { read: () => strip(painted).slice(-700) });
+    // 没有复审记录时不能凭空写“最近复审”。
+    assert.equal(strip(painted).includes('最近复审'), false, 'usage must not invent a review that never happened');
   } finally {
     instance.unmount();
   }

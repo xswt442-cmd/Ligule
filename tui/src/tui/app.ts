@@ -2300,10 +2300,20 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           const cached = bucket.cachedInput === 0 ? '' : t(`，其中缓存 ${bucket.cachedInput}`, ` (${bucket.cachedInput} cached)`);
           return t(`${label}：${bucket.requests} 次请求，${input}${cached}，${output}`, `${label}: ${bucket.requests} calls, ${input}${cached}, ${output}`);
         };
-        push({ kind: 'meta', text: [
+        // 最近一次复审也从会话记录里读，TUI 不自己推断裁决。
+        const page = await client.request('session.read', { sessionId }).catch(() => null);
+        const reviews = (page?.events ?? []).filter((event) => (event as { kind?: string }).kind === 'policyReview');
+        const last = reviews[reviews.length - 1] as { review?: string; reasonCode?: string; evidenceSeqs?: number[] } | undefined;
+        const lines = [
           line(t('主 Agent', 'Agent'), summary.agent),
           line(t('复审', 'Reviewer'), summary.reviewer),
-        ].join('\n') });
+        ];
+        if (last?.review !== undefined) {
+          const code = last.reasonCode ?? 'review_unspecified';
+          const count = last.evidenceSeqs?.length ?? 0;
+          lines.push(t(`最近复审：${last.review}（${code}，证据 ${count} 条）`, `Last review: ${last.review} (${code}, ${count} evidence items)`));
+        }
+        push({ kind: 'meta', text: lines.join('\n') });
       })();
       return;
     }
