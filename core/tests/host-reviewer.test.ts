@@ -43,7 +43,7 @@ test('a usable reply becomes a recorded allow with its fingerprint', async () =>
     ]),
     factsOf: () => facts,
   });
-  const outcome = await reviewer.review({ tool: 'exec', input: facts.args, command: 'python3 script.py', policy: 'auto' });
+  const outcome = await reviewer.review({ tool: 'exec', input: facts.args, command: 'python3 script.py', policy: 'auto', reason: undefined });
   assert.equal(outcome.decision, 'allow');
   assert.equal(outcome.reasonCode, 'read_only_python');
   assert.equal(outcome.inputVersion, 1);
@@ -58,7 +58,7 @@ test('every unusable reply turns into ask-human instead of an approval', async (
   const invalid = createSessionReviewer({
     settings, provider: providerOf([{ type: 'text', text: 'sure, go ahead' }]), factsOf: () => facts,
   });
-  const unusable = await invalid.review({ tool: 'exec', input: facts.args, policy: 'auto' });
+  const unusable = await invalid.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
   assert.equal(unusable.decision, 'ask-human');
   assert.equal(unusable.reasonCode, 'review_reply_truncated');
   assert.equal(invalid.usage().failures, 1);
@@ -66,7 +66,7 @@ test('every unusable reply turns into ask-human instead of an approval', async (
   const toolCalling = createSessionReviewer({
     settings, provider: providerOf([{ type: 'tool-call', name: 'exec', input: { command: 'rm -rf /' } }]), factsOf: () => facts,
   });
-  const escaped = await toolCalling.review({ tool: 'exec', input: facts.args, policy: 'auto' });
+  const escaped = await toolCalling.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
   assert.equal(escaped.decision, 'ask-human');
   assert.equal(escaped.reasonCode, 'review_reply_invalid');
 });
@@ -76,12 +76,12 @@ test('a failing or hanging provider reports ask-human and keeps counting failure
     stream: async function* () { throw new Error('connect ECONNREFUSED'); },
   } as unknown as ModelProvider;
   const failing = createSessionReviewer({ settings, provider: broken, factsOf: () => facts });
-  const failed = await failing.review({ tool: 'exec', input: facts.args, policy: 'auto' });
+  const failed = await failing.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
   assert.equal(failed.decision, 'ask-human');
   assert.equal(failed.reasonCode, 'review_failed');
 
   const hanging: ModelProvider = {
-    stream: async function* (_request, options) {
+    stream: async function* (_request: unknown, options?: { signal?: AbortSignal }) {
       // 真实 Provider 会响应中止信号；假 Provider 也必须遵守，否则测不出超时分支。
       await new Promise((resolve, reject) => {
         const timer = setTimeout(resolve, 5_000);
@@ -94,7 +94,7 @@ test('a failing or hanging provider reports ask-human and keeps counting failure
     },
   } as unknown as ModelProvider;
   const slow = createSessionReviewer({ settings: { ...settings, timeoutMs: 50 }, provider: hanging, factsOf: () => facts });
-  const timedOut = await slow.review({ tool: 'exec', input: facts.args, policy: 'auto' });
+  const timedOut = await slow.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
   assert.equal(timedOut.decision, 'ask-human');
   assert.equal(timedOut.reasonCode, 'review_timeout');
 });
@@ -105,9 +105,9 @@ test('the per-run budget and the input budget stop calls before they are made', 
     provider: providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }]),
     factsOf: () => facts,
   });
-  assert.equal((await reviewer.review({ tool: 'exec', input: facts.args, policy: 'auto' })).decision, 'allow');
-  assert.equal((await reviewer.review({ tool: 'exec', input: facts.args, policy: 'auto' })).decision, 'allow');
-  const exhausted = await reviewer.review({ tool: 'exec', input: facts.args, policy: 'auto' });
+  assert.equal((await reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined })).decision, 'allow');
+  assert.equal((await reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined })).decision, 'allow');
+  const exhausted = await reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
   assert.equal(exhausted.decision, 'ask-human');
   assert.equal(exhausted.reasonCode, 'review_budget_exhausted');
   assert.equal(reviewer.usage().calls, 2);
@@ -117,7 +117,7 @@ test('the per-run budget and the input budget stop calls before they are made', 
     provider: providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }]),
     factsOf: () => facts,
   });
-  const refused = await overBudget.review({ tool: 'exec', input: facts.args, policy: 'auto' });
+  const refused = await overBudget.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
   assert.equal(refused.decision, 'ask-human');
   assert.equal(refused.reasonCode, 'review_input_over_budget');
   assert.equal(overBudget.usage().calls, 0);
@@ -135,7 +135,7 @@ test('the reviewer reports its own usage once, whatever the endpoint says', asyn
     factsOf: () => facts,
     onUsage: (event) => { recorded.push(event as { purpose?: string; input?: number | null; output?: number | null }); },
   });
-  const outcome = await reviewer.review({ tool: 'exec', input: facts.args, command: 'python3 script.py', policy: 'auto' });
+  const outcome = await reviewer.review({ tool: 'exec', input: facts.args, command: 'python3 script.py', policy: 'auto', reason: undefined });
   assert.equal(outcome.decision, 'allow');
   // 复审的 token 要单独成账，主 Agent 与会话汇总才能按用途分开。
   assert.equal(recorded.length, 1);
@@ -151,11 +151,11 @@ test('a reply without usage still counts the estimate exactly once', async () =>
     provider: providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }, { type: 'finish' }]),
     factsOf: () => facts,
   });
-  const first = await reviewer.review({ tool: 'exec', input: facts.args, command: 'python3 script.py', policy: 'auto' });
+  const first = await reviewer.review({ tool: 'exec', input: facts.args, command: 'python3 script.py', policy: 'auto', reason: undefined });
   assert.equal(first.decision, 'allow');
   const afterFirst = reviewer.usage().inputTokens ?? 0;
   assert.ok(afterFirst > 0, '端点没报输入时退回估算，否则预算形同虚设');
-  await reviewer.review({ tool: 'exec', input: facts.args, command: 'python3 script.py', policy: 'auto' });
+  await reviewer.review({ tool: 'exec', input: facts.args, command: 'python3 script.py', policy: 'auto', reason: undefined });
   const afterSecond = reviewer.usage().inputTokens ?? 0;
   // 每次只加一份估算；若重复计入，第二次调用后会是四倍而不是两倍。
   assert.equal(afterSecond - afterFirst, afterFirst, '每次调用只记一份输入');
