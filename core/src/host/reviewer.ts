@@ -6,14 +6,11 @@ import type { PolicyReview, PolicyReviewOutcome, PolicyReviewRecord, PolicyRevie
 import { usageEvent } from '../session/usage.js';
 
 /**
- * Host 侧复审（Reviewer）执行器：持有独立模型路由、预算和计数，把 Kernel 的复审请求变成一次
- * 受控的模型调用。任何失败都返回 `ask-human`，由既有审批通道接手——绝不因为复审不可用而放行。
+ * Host 侧复审（Reviewer）执行器：预算和计数由它持有，模型路由则由调用方按当前 Run 的
+ * Session generation 提供。任何失败都返回 `ask-human`，由既有审批通道接手——绝不因为
+ * 复审不可用而放行。
  */
 export interface ReviewerSettings {
-  readonly model?: string;
-  readonly baseURL?: string;
-  readonly api?: 'messages' | 'chat-completions';
-  readonly apiKeyEnv?: string;
   readonly maxInputTokens: number;
   readonly maxOutputTokens: number;
   readonly timeoutMs: number;
@@ -58,13 +55,9 @@ function positive(value: unknown, fallback: number): number {
  */
 export function reviewerSettings(config: Record<string, unknown>): ReviewerSettings | undefined {
   const table = config.reviewer;
+  // 只认布尔真值：项目配置里的 `enabled = "true"` 不会悄悄打开付费请求。
   if (!isRecord(table) || table.enabled !== true) return undefined;
-  const api = table.api === 'messages' || table.api === 'chat-completions' ? table.api : undefined;
   return {
-    ...(typeof table.model === 'string' && table.model !== '' ? { model: table.model } : {}),
-    ...(typeof table.baseURL === 'string' && table.baseURL !== '' ? { baseURL: table.baseURL } : {}),
-    ...(api === undefined ? {} : { api }),
-    ...(typeof table.apiKeyEnv === 'string' && table.apiKeyEnv !== '' ? { apiKeyEnv: table.apiKeyEnv } : {}),
     maxInputTokens: positive(table.maxInputTokens, DEFAULTS.maxInputTokens),
     maxOutputTokens: positive(table.maxOutputTokens, DEFAULTS.maxOutputTokens),
     timeoutMs: positive(table.timeoutMs, DEFAULTS.timeoutMs),
@@ -73,9 +66,39 @@ export function reviewerSettings(config: Record<string, unknown>): ReviewerSetti
   };
 }
 
+/** 已移除的复审路由字段：复审永远跟随当前 Session 的模型，不再单独选择端点或凭据。 */export const REVIEWER_ROUTE_FIELDS = ['model', 'baseURL', 'api', 'apiKeyEnv'] as const;
+
+/**
+ * 列出配置里残留的路由字段。它们不再生效，Host 必须明确拒绝而不是静默忽略：
+ * 一个项目配置里的 `baseURL` 不能看起来像“已经生效”。
+ */
+export function reviewerRouteFields(config: Record<string, unknown>): readonly string[] {
+  const table = config.reviewer;
+  if (!isRecord(table)) return [];
+  return REVIEWER_ROUTE_FIELDS.filter((field) => table[field] !== undefined);
+}
+
+/**
+ * 合并层与可信层的预算取较小值：项目配置只能收紧复审预算，不能把上限调大，
+ * 也不能靠 `enabled` 自行打开付费请求（启用判定在 Host 侧只认可信层）。
+ */
+export function narrowReviewerSettings(merged: ReviewerSettings, trusted: ReviewerSettings): ReviewerSettings {
+  return {
+    maxInputTokens: Math.min(merged.maxInputTokens, trusted.maxInputTokens),
+    maxOutputTokens: Math.min(merged.maxOutputTokens, trusted.maxOutputTokens),
+    timeoutMs: Math.min(merged.timeoutMs, trusted.timeoutMs),
+    maxPerRun: Math.min(merged.maxPerRun, trusted.maxPerRun),
+    maxTotalTokens: Math.min(merged.maxTotalTokens, trusted.maxTotalTokens),
+  };
+}
+
 export interface ReviewerDeps {
   readonly settings: ReviewerSettings;
-  readonly provider: ModelProvider;
+  /**
+   * 取当前 Run 的 Session 模型路由。用取值函数而不是实例：模型切换只在 Host 既有轮次
+   * 边界生效，复审不能拿一个创建会话时的旧 Provider 继续跑。
+   */
+  readonly provider: () => ModelProvider;
   /** 由 Host 装配可信事实；Kernel 只传当前动作。 */
   readonly factsOf: (request: PolicyReviewRequest) => ReviewFacts;
   readonly logger?: (message: string, detail?: Record<string, unknown>) => void;
@@ -145,8 +168,18 @@ export function createSessionReviewer({ settings, provider, factsOf, logger, onU
     let toolCall: string | undefined;
     // 端点用量要按用途记账：先收集本次复审的全部流事件，结束后写成 purpose=reviewer 的用量事件。
     const collected: unknown[] = [];
+    let active: ModelProvider;
     try {
-      for await (const event of provider.stream({
+      // 路由在调用前取一次：这一轮复审与它审批的那次调用用同一个 Session 模型。
+      active = provider();
+    } catch (error) {
+      failures += 1;
+      logger?.('reviewer route unavailable', { reason: String(error) });
+      settleBudget();
+      return askHuman('review_unavailable', '复审没有可用的 Session 模型路由，转人工审批。');
+    }
+    try {
+      for await (const event of active.stream({
         system: built.input.system,
         tools: [],
         messages: [{ role: 'user', text: built.input.user }],

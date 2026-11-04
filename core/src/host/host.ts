@@ -106,7 +106,7 @@ import type { PolicyRule } from '../kernel/config-edit.js';
 import type { ToolDefinition } from '../kernel/kernel.js';
 import { adoptSessionMode, type SessionModeState } from './session-mode.js';
 import { providerFromConfig, hostProviderFromConfig, type HostGenerationOptions, type HostProvider } from './provider.js';
-import { createSessionReviewer, reviewerSettings, type SessionReviewer } from './reviewer.js';
+import { createSessionReviewer, narrowReviewerSettings, reviewerRouteFields, reviewerSettings, type SessionReviewer } from './reviewer.js';
 import type { PolicyReviewRecord, PolicyReviewRequest } from '../kernel/policy.js';
 import type { ReviewFacts } from '../kernel/reviewer.js';
 import { approvalArgsDigest, summarizeApproval } from './approval.js';
@@ -1817,39 +1817,44 @@ export function createHost({
             });
     }
     // 复审只在配置显式启用时存在；未启用时 `auto` 与 P9.5 行为一致。
-    const reviewSettings = reviewerSettings(config as unknown as Record<string, unknown>);
-    const reviewer = reviewSettings === undefined ? undefined : (() => {
-      // 复审的默认路由就是用户选中的主模型；先把主模型解析成具体端点，
-      // 再让 `[reviewer]` 覆盖需要的字段——直接删 `selection` 会退回配置文件里的第一个服务。
-      const main = resolveModel(modelConfigOf(config));
-      const route: Record<string, unknown> = {
-        ...(typeof main.api === 'string' ? { api: reviewSettings.api ?? main.api } : {}),
-        ...(reviewSettings.api === undefined ? {} : { api: reviewSettings.api }),
-        ...(reviewSettings.baseURL === undefined
-          ? (typeof main.baseURL === 'string' ? { baseURL: main.baseURL } : {})
-          : { baseURL: reviewSettings.baseURL }),
-        ...(reviewSettings.model === undefined
-          ? (typeof main.model === 'string' ? { model: main.model } : {})
-          : { model: reviewSettings.model }),
-        ...(typeof main.apiKeyEnv === 'string' || reviewSettings.apiKeyEnv !== undefined
-          ? { apiKeyEnv: reviewSettings.apiKeyEnv ?? main.apiKeyEnv }
-          : {}),
-      };
-      // 项目层的 `[reviewer]` 是不可信输入：端点与凭据引用必须是用户配置或命令行绑定过的，
-      // 否则一次复审就能把已保存的密钥发到任意地址。
-      const bindings = Object.keys(env.layers).length === 0 ? undefined
-        : modelConfigOf(createConfig({ user: env.layers.user ?? {}, flag: env.layers.flag ?? {} }));
-      const bound = bindings !== undefined && typeof route.api === 'string' && typeof route.baseURL === 'string'
-        && hasModelCredentialBinding(bindings, route.api, route.baseURL, route.apiKeyEnv ?? 'LIGULE_API_KEY');
-      if (!bound) {
+    const mergedReviewSettings = reviewerSettings(config as unknown as Record<string, unknown>);
+    // 项目配置不能自己打开付费请求：`enabled` 只认用户配置与命令行；预算只能被收紧，
+    // 不能被合并后的项目层放大。
+    const trustedLayers = Object.keys(env.layers).length === 0
+      ? undefined
+      : createConfig({ user: env.layers.user ?? {}, flag: env.layers.flag ?? {} });
+    const trustedReviewSettings = trustedLayers === undefined
+      ? mergedReviewSettings
+      : reviewerSettings(trustedLayers as unknown as Record<string, unknown>);
+    const reviewSettings = mergedReviewSettings === undefined || trustedReviewSettings === undefined
+      ? undefined
+      : narrowReviewerSettings(mergedReviewSettings, trustedReviewSettings);
+    // 复审不选自己的模型：它用的就是这一轮 Run 的 Session generation（同一个 Provider、
+    // 同一个端点、同一份凭据绑定），只额外压一个输出预算。
+    // 可信层里残留的路由字段从不生效，也不能看起来像生效：明确拒绝，让用户删掉它们。
+    // 不可信层（项目配置）写进来的同名字段更不可能生效，只记一条诊断，不阻断会话。
+    const trustedRouteFields = trustedLayers === undefined
+      ? reviewerRouteFields(config as unknown as Record<string, unknown>)
+      : reviewerRouteFields(trustedLayers as unknown as Record<string, unknown>);
+    if (trustedRouteFields.length > 0) {
+      throw new KernelError('reviewer_route_removed', {
+        detail: `the [reviewer] table still sets ${trustedRouteFields.join(', ')}; the reviewer always uses the session model, so remove those fields`,
+      });
+    }
+    if (reviewSettings !== undefined) {
+      const ignoredRouteFields = reviewerRouteFields(config as unknown as Record<string, unknown>);
+      if (ignoredRouteFields.length > 0) {
         try {
-          logger?.log?.('reviewer stays off: its endpoint and credential are not bound', { sessionId: id });
+          logger?.log?.('reviewer ignores route fields from an untrusted configuration layer', {
+            sessionId: id, fields: ignoredRouteFields.join(','),
+          });
         } catch { /* 记录失败不影响会话 */ }
-        return undefined;
       }
+    }
+    const reviewer = reviewSettings === undefined ? undefined : (() => {
       return createSessionReviewer({
         settings: reviewSettings,
-        provider: deriveProvider({ ...config, model: route }, { outputTokens: reviewSettings.maxOutputTokens }),
+        provider: () => state.generation.provider.withGeneration({ outputTokensCeiling: reviewSettings.maxOutputTokens }),
         factsOf: (request: PolicyReviewRequest): ReviewFacts => ({
           tool: request.tool,
           args: request.input,

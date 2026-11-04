@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createSessionReviewer, reviewerSettings } from '../dist/host/reviewer.js';
+import { createSessionReviewer, narrowReviewerSettings, reviewerRouteFields, reviewerSettings } from '../dist/host/reviewer.js';
 import type { ModelProvider } from '../dist/kernel/loop.js';
 import type { ReviewFacts } from '../dist/kernel/reviewer.js';
 
@@ -36,7 +36,7 @@ const settings = {
 test('a usable reply becomes a recorded allow with its fingerprint', async () => {
   const reviewer = createSessionReviewer({
     settings,
-    provider: providerOf([
+    provider: () => providerOf([
       { type: 'text', text: '{"decision":"allow","reasonCode":"read_only_python","reason":"只读取文件。"}' },
       { type: 'usage', input: 150, output: 20 },
       { type: 'finish' },
@@ -56,7 +56,7 @@ test('a usable reply becomes a recorded allow with its fingerprint', async () =>
 
 test('every unusable reply turns into ask-human instead of an approval', async () => {
   const invalid = createSessionReviewer({
-    settings, provider: providerOf([{ type: 'text', text: 'sure, go ahead' }]), factsOf: () => facts,
+    settings, provider: () => providerOf([{ type: 'text', text: 'sure, go ahead' }]), factsOf: () => facts,
   });
   const unusable = await invalid.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
   assert.equal(unusable.decision, 'ask-human');
@@ -64,7 +64,7 @@ test('every unusable reply turns into ask-human instead of an approval', async (
   assert.equal(invalid.usage().failures, 1);
 
   const toolCalling = createSessionReviewer({
-    settings, provider: providerOf([{ type: 'tool-call', name: 'exec', input: { command: 'rm -rf /' } }]), factsOf: () => facts,
+    settings, provider: () => providerOf([{ type: 'tool-call', name: 'exec', input: { command: 'rm -rf /' } }]), factsOf: () => facts,
   });
   const escaped = await toolCalling.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
   assert.equal(escaped.decision, 'ask-human');
@@ -75,7 +75,7 @@ test('a failing or hanging provider reports ask-human and keeps counting failure
   const broken: ModelProvider = {
     stream: async function* () { throw new Error('connect ECONNREFUSED'); },
   } as unknown as ModelProvider;
-  const failing = createSessionReviewer({ settings, provider: broken, factsOf: () => facts });
+  const failing = createSessionReviewer({ settings, provider: () => broken, factsOf: () => facts });
   const failed = await failing.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
   assert.equal(failed.decision, 'ask-human');
   assert.equal(failed.reasonCode, 'review_failed');
@@ -93,7 +93,7 @@ test('a failing or hanging provider reports ask-human and keeps counting failure
       yield { type: 'text', text: '{"decision":"allow","reasonCode":"late"}' } as never;
     },
   } as unknown as ModelProvider;
-  const slow = createSessionReviewer({ settings: { ...settings, timeoutMs: 50 }, provider: hanging, factsOf: () => facts });
+  const slow = createSessionReviewer({ settings: { ...settings, timeoutMs: 50 }, provider: () => hanging, factsOf: () => facts });
   const timedOut = await slow.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
   assert.equal(timedOut.decision, 'ask-human');
   assert.equal(timedOut.reasonCode, 'review_timeout');
@@ -102,7 +102,7 @@ test('a failing or hanging provider reports ask-human and keeps counting failure
 test('the per-run budget and the input budget stop calls before they are made', async () => {
   const reviewer = createSessionReviewer({
     settings,
-    provider: providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }]),
+    provider: () => providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }]),
     factsOf: () => facts,
   });
   assert.equal((await reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined })).decision, 'allow');
@@ -114,7 +114,7 @@ test('the per-run budget and the input budget stop calls before they are made', 
 
   const overBudget = createSessionReviewer({
     settings: { ...settings, maxInputTokens: 20 },
-    provider: providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }]),
+    provider: () => providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }]),
     factsOf: () => facts,
   });
   const refused = await overBudget.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
@@ -127,7 +127,7 @@ test('the reviewer reports its own usage once, whatever the endpoint says', asyn
   const recorded: { purpose?: string; input?: number | null; output?: number | null }[] = [];
   const reviewer = createSessionReviewer({
     settings,
-    provider: providerOf([
+    provider: () => providerOf([
       { type: 'text', text: '{"decision":"allow","reasonCode":"read_only_python"}' },
       { type: 'usage', input: 80, output: 5 },
       { type: 'finish' },
@@ -148,7 +148,7 @@ test('the reviewer reports its own usage once, whatever the endpoint says', asyn
 test('a reply without usage still counts the estimate exactly once', async () => {
   const reviewer = createSessionReviewer({
     settings: { ...settings, maxTotalTokens: 40_000 },
-    provider: providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }, { type: 'finish' }]),
+    provider: () => providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }, { type: 'finish' }]),
     factsOf: () => facts,
   });
   const first = await reviewer.review({ tool: 'exec', input: facts.args, command: 'python3 script.py', policy: 'auto', reason: undefined });
@@ -164,7 +164,7 @@ test('a reply without usage still counts the estimate exactly once', async () =>
 test('the per-run limit is reset by beginRun, not exhausted by the whole session', async () => {
   const reviewer = createSessionReviewer({
     settings: { ...settings, maxPerRun: 1 },
-    provider: providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }]),
+    provider: () => providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }]),
     factsOf: () => facts,
   });
   assert.equal((await reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined })).decision, 'allow');
@@ -180,7 +180,7 @@ test('output tokens count against the total budget, not just the input', async (
   const reviewer = createSessionReviewer({
     // 输出 5000 + 预留 400 已经超过 5000 的总预算，但只看输入（100）时会误判为还有额度。
     settings: { ...settings, maxTotalTokens: 5_000, maxPerRun: 5 },
-    provider: providerOf([
+    provider: () => providerOf([
       { type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' },
       { type: 'usage', input: 100, output: 5_000 },
       { type: 'finish' },
@@ -197,7 +197,7 @@ test('a request whose endpoint reports nothing still shows up with unknown count
   const recorded: { purpose?: string; input?: number | null; output?: number | null }[] = [];
   const reviewer = createSessionReviewer({
     settings,
-    provider: providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }, { type: 'finish' }]),
+    provider: () => providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }, { type: 'finish' }]),
     factsOf: () => facts,
     onUsage: (event) => { recorded.push(event as { purpose?: string; input?: number | null; output?: number | null }); },
   });
@@ -211,12 +211,51 @@ test('a request whose endpoint reports nothing still shows up with unknown count
 
 test('the reviewer stays disabled until the configuration asks for it', () => {
   assert.equal(reviewerSettings({}), undefined);
-  assert.equal(reviewerSettings({ reviewer: { enabled: false, model: 'x' } }), undefined);
-  const enabled = reviewerSettings({ reviewer: { enabled: true, model: 'reviewer-model', baseURL: 'http://127.0.0.1:1/v1', maxPerRun: 3 } });
-  assert.equal(enabled?.model, 'reviewer-model');
+  assert.equal(reviewerSettings({ reviewer: { enabled: false } }), undefined);
+  // 只有布尔真值才算启用：字符串 "true" 不会悄悄打开付费请求。
+  assert.equal(reviewerSettings({ reviewer: { enabled: 'true' } }), undefined);
+  const enabled = reviewerSettings({ reviewer: { enabled: true, maxPerRun: 3 } });
   assert.equal(enabled?.maxPerRun, 3);
   // 未写的预算取默认值，写坏的值也退回默认值而不是变成 0 或负预算。
   assert.equal(enabled?.maxInputTokens, 2_000);
   assert.equal(enabled?.maxOutputTokens, 400);
   assert.equal(reviewerSettings({ reviewer: { enabled: true, maxPerRun: -1 } })?.maxPerRun, 8);
+  // 复审不再有独立路由：残留字段被列出来，由 Host 明确拒绝。
+  assert.deepEqual(reviewerRouteFields({ reviewer: { enabled: true, model: 'm', baseURL: 'http://x' } }), ['model', 'baseURL']);
+  assert.deepEqual(reviewerRouteFields({ reviewer: { enabled: true } }), []);
+  assert.deepEqual(reviewerRouteFields({}), []);
+  // 项目层只能收紧预算，不能放大。
+  assert.deepEqual(
+    narrowReviewerSettings(
+      { maxInputTokens: 4_000, maxOutputTokens: 800, timeoutMs: 20_000, maxPerRun: 8, maxTotalTokens: 80_000 },
+      { maxInputTokens: 2_000, maxOutputTokens: 400, timeoutMs: 10_000, maxPerRun: 4, maxTotalTokens: 40_000 },
+    ),
+    { maxInputTokens: 2_000, maxOutputTokens: 400, timeoutMs: 10_000, maxPerRun: 4, maxTotalTokens: 40_000 },
+  );
+});
+
+test('every review asks the host for the current session route', async () => {
+  let routeCalls = 0;
+  const seen: string[] = [];
+  const reviewer = createSessionReviewer({
+    settings,
+    provider: () => {
+      routeCalls += 1;
+      // 依次返回两条不同的“服务”：复审必须每次现取，不能缓存创建会话时的那一条。
+      const name = `provider-${routeCalls}`;
+      seen.push(name);
+      return {
+        name,
+        stream: async function* () {
+          yield { type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' } as never;
+          yield { type: 'finish' } as never;
+        },
+      } as unknown as ModelProvider;
+    },
+    factsOf: () => facts,
+  });
+  await reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
+  await reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
+  assert.equal(routeCalls, 2, '复审不能缓存创建会话时的 Provider');
+  assert.deepEqual(seen, ['provider-1', 'provider-2'], '每一轮的复审都走该轮 Run 的 Session 模型路由');
 });

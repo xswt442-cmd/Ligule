@@ -53,11 +53,8 @@ export const EDITABLE: Readonly<Record<string, EditableField>> = {
   'policy.rules': { path: ['policy', 'rules'], kind: 'rules' },
   'mcp.servers': { path: ['mcp', 'servers'], kind: 'mcpServer' },
   // 复审默认关闭；启用后才在 `auto` 无法确定性放行时调用一次模型复审。
+  // 路由不在这里配置：复审始终用当前 Session 的模型与服务，只额外限制预算。
   'reviewer.enabled': { path: ['reviewer', 'enabled'], kind: 'boolean' },
-  'reviewer.api': { path: ['reviewer', 'api'], kind: 'enum', oneOf: ['messages', 'chat-completions'] },
-  'reviewer.model': { path: ['reviewer', 'model'], kind: 'string' },
-  'reviewer.baseURL': { path: ['reviewer', 'baseURL'], kind: 'url' },
-  'reviewer.apiKeyEnv': { path: ['reviewer', 'apiKeyEnv'], kind: 'envName' },
   'reviewer.maxInputTokens': { path: ['reviewer', 'maxInputTokens'], kind: 'positiveInteger' },
   'reviewer.maxOutputTokens': { path: ['reviewer', 'maxOutputTokens'], kind: 'positiveInteger' },
   'reviewer.timeoutMs': { path: ['reviewer', 'timeoutMs'], kind: 'positiveInteger' },
