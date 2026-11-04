@@ -81,8 +81,6 @@ const NETWORK_LEVEL: Record<string, number> = { disabled: 0, policy: 1, unrestri
  * 证据读不到时的固定结论。授权的安全性依赖“证据仍然是当前的”，
  * 所以这里只允许转人工：绝不复用上一轮缓存的约束去做自动放行。
  */
-export const REVIEW_EVIDENCE_UNAVAILABLE_REASON = 'the session log could not be read, so the review evidence is stale';
-
 export type StaleReviewOutcome = {
   readonly decision: 'ask-human';
   readonly reasonCode: 'review_evidence_unavailable';
@@ -90,15 +88,17 @@ export type StaleReviewOutcome = {
 };
 
 export function staleReviewOutcome(): StaleReviewOutcome {
-  return { decision: 'ask-human', reasonCode: 'review_evidence_unavailable', reason: REVIEW_EVIDENCE_UNAVAILABLE_REASON };
+  return {
+    decision: 'ask-human',
+    reasonCode: 'review_evidence_unavailable',
+    reason: 'the session log could not be read, so the review evidence is stale',
+  };
 }
 
 /**
  * Grant 失效时的固定结论。撤销、到期或重读失败都由 Host 判定，
  * 提示词里的 `active="false"` 只是事实，不能成为自动放行的依据。
  */
-export const REVIEW_GRANT_INACTIVE_REASON = 'the grant behind this session is revoked, expired or unreadable';
-
 export type InactiveGrantOutcome = {
   readonly decision: 'ask-human';
   readonly reasonCode: 'review_grant_inactive';
@@ -106,7 +106,11 @@ export type InactiveGrantOutcome = {
 };
 
 export function inactiveGrantOutcome(): InactiveGrantOutcome {
-  return { decision: 'ask-human', reasonCode: 'review_grant_inactive', reason: REVIEW_GRANT_INACTIVE_REASON };
+  return {
+    decision: 'ask-human',
+    reasonCode: 'review_grant_inactive',
+    reason: 'the grant behind this session is revoked, expired or unreadable',
+  };
 }
 
 export async function selectReviewEvidence(
