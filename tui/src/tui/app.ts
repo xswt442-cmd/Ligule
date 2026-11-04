@@ -2308,16 +2308,23 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         const readRecord = async () => {
           const direct = await client.request('session.read', { sessionId }).catch((error: unknown) => ({ code: errorCode(error) ?? 'session_read_failed' }));
           if (!('code' in direct)) return direct;
-          return client.request('session.observe', { projectRoot: info.boundary ?? '', sessionId, limit: 400 }).catch(() => null);
+          return client.request('session.observe', { projectRoot: info.boundary ?? '', sessionId, limit: 400 }).catch((error: unknown) => ({ code: errorCode(error) ?? 'session_observe_failed' }));
         };
         const page = await readRecord();
         if (activeSession.current !== sessionId) return;
-        const reviews = (page?.events ?? []).filter((event) => (event as { kind?: string }).kind === 'policyReview');
-        const last = reviews[reviews.length - 1] as { review?: string; reasonCode?: string; evidenceSeqs?: number[] } | undefined;
         const lines = [
           line(t('主 Agent', 'Agent'), summary.agent),
           line(t('复审', 'Reviewer'), summary.reviewer),
         ];
+        // 记录读不出来时不能把“读不到”说成“没有复审”：用量那本账仍然照实显示，
+        // 但复审这一行必须明确报错，否则用户会以为这段时间一次复审都没发生。
+        if ('code' in page) {
+          push({ kind: 'meta', text: lines.join('\n') });
+          push({ kind: 'error', text: t(`无法读取会话记录，最近复审未知：${page.code}`, `Cannot read the session log, so the last review is unknown: ${page.code}`) });
+          return;
+        }
+        const reviews = page.events.filter((event) => (event as { kind?: string }).kind === 'policyReview');
+        const last = reviews[reviews.length - 1] as { review?: string; reasonCode?: string; evidenceSeqs?: number[] } | undefined;
         if (last?.review !== undefined) {
           const code = last.reasonCode ?? 'review_unspecified';
           const count = last.evidenceSeqs?.length ?? 0;
