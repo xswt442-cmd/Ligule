@@ -245,6 +245,22 @@ function policyRuleKey(rule: Pick<PolicyRule, 'tool' | 'match' | 'target' | 'pat
   return JSON.stringify([rule.tool, rule.match ?? '', rule.target ?? '', rule.path ?? '', rule.argsHash ?? '']);
 }
 
+/**
+ * 把一条 Policy 规则投影成复审事实。作用域字段（target/path/argsHash）必须原样带上，
+ * 否则 Reviewer 会把“只对这一条命令生效”的拒绝看成泛化的拒绝。
+ */
+function reviewRuleOf(rule: PolicyRule, source: 'session' | 'config'): NonNullable<ReviewFacts['rules']>[number] {
+  return {
+    tool: rule.tool,
+    decision: rule.decision,
+    source,
+    ...(rule.match === undefined ? {} : { match: rule.match }),
+    ...(rule.target === undefined ? {} : { target: rule.target }),
+    ...(rule.path === undefined ? {} : { path: rule.path }),
+    ...(rule.argsHash === undefined ? {} : { argsHash: rule.argsHash }),
+  };
+}
+
 interface HostSessionBase {
   taskBudget?: TaskBudget;
   lastTask?: ReturnType<TaskBudget['snapshot']>;
@@ -1876,20 +1892,8 @@ export function createHost({
           userInstructions: (state.reviewEvidence?.constraints ?? []).filter((item) => item.source === 'user').map((item) => item.text),
           ...(state.reviewEvidence === undefined ? {} : { evidence: state.reviewEvidence }),
           rules: [
-            ...state.sessionPolicyRules.map((rule) => ({
-              tool: rule.tool, decision: rule.decision, source: 'session' as const,
-              ...(rule.match === undefined ? {} : { match: rule.match }),
-              ...(rule.target === undefined ? {} : { target: rule.target }),
-              ...(rule.path === undefined ? {} : { path: rule.path }),
-              ...(rule.argsHash === undefined ? {} : { argsHash: rule.argsHash }),
-            })),
-            ...(policy?.rules ?? []).map((rule) => ({
-              tool: rule.tool, decision: rule.decision, source: 'config' as const,
-              ...(rule.match === undefined ? {} : { match: rule.match }),
-              ...(rule.target === undefined ? {} : { target: rule.target }),
-              ...(rule.path === undefined ? {} : { path: rule.path }),
-              ...(rule.argsHash === undefined ? {} : { argsHash: rule.argsHash }),
-            })),
+            ...state.sessionPolicyRules.map((rule) => reviewRuleOf(rule, 'session')),
+            ...(policy?.rules ?? []).map((rule) => reviewRuleOf(rule, 'config')),
           ],
           ...(liveGrant === undefined ? {} : {
             grant: {
