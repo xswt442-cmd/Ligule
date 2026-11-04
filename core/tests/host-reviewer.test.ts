@@ -201,6 +201,22 @@ test('output tokens count against the total budget, not just the input', async (
   assert.equal(again.reasonCode, 'review_budget_exhausted');
 });
 
+test('an unreported output still costs the reserved ceiling', async () => {
+  const reviewer = createSessionReviewer({
+    // 预算只够一次“估算 + 预留输出”。端点不报输出时若把预留整笔还回去，第二次就会超支。
+    settings: { ...settings, maxTotalTokens: 1_000, maxPerRun: 5 },
+    provider: () => providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }, { type: 'finish', reason: 'stop' }]),
+    factsOf: () => facts,
+  });
+  assert.equal((await reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined })).decision, 'allow');
+  const usage = reviewer.usage();
+  // 对外仍报“未知”，不把保守计费当成端点实测值。
+  assert.equal(usage.outputTokens, null);
+  const again = await reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
+  assert.equal(again.decision, 'ask-human');
+  assert.equal(again.reasonCode, 'review_budget_exhausted');
+});
+
 test('a request whose endpoint reports nothing still shows up with unknown counts', async () => {
   const recorded: { purpose?: string; input?: number | null; output?: number | null }[] = [];
   const reviewer = createSessionReviewer({

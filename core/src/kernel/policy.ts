@@ -425,7 +425,9 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         catch { /* Invalid paths cannot match a remembered allow and remain subject to the tool's path check. */ }
       }
       const argsHash = policyArgsHash(input, identityDigest);
-      const candidates = !applyRules ? [] : currentRules.filter((item) => {
+      // 一条规则是否作用于这一次调用：工具、文件/工作区范围与参数指纹都要对上。
+      // 复审返回后重验拒绝规则时也用它，范围规则不会被漏掉。
+      const inScope = (item: PolicyRule): boolean => {
         if (item.tool !== named) return false;
         if (item.target !== undefined || item.path !== undefined) {
           if (currentFilePath === undefined || item.path === undefined || !isAbsolute(item.path)) return false;
@@ -435,7 +437,8 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         }
         if (item.argsHash !== undefined) return item.argsHash === argsHash;
         return true;
-      });
+      };
+      const candidates = !applyRules ? [] : currentRules.filter(inScope);
       // 先按 Host 选择的语法解析命令，再逐段应用规则。解析不完整时将整条命令视为无法确认。
       const kind = shell?.kind ?? 'bash';
       const inspection = command === undefined ? undefined : await inspectCommand(command, kind);
@@ -594,16 +597,15 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         } catch {
           outcome = undefined;
         }
-        if (outcome !== undefined && (`${current}:${forcedToAsk}` !== modeSignature || JSON.stringify(currentRules) !== rulesSignature)) {
-          // 过期结论必须作废：回到确定性与人工审批路径，而不是拿旧判定放行或拒绝。
+        // 过期结论必须作废：回到确定性与人工审批路径，而不是拿旧判定放行或拒绝。
+        // 复审抛错时同样要重验：异常不能让等待期间新增的拒绝规则失效。
+        const changed = `${current}:${forcedToAsk}` !== modeSignature || JSON.stringify(currentRules) !== rulesSignature;
+        if (changed) {
           outcome = undefined;
           // 作废不等于忽略新规则：等待期间新增的 deny 要当场生效，否则会落到可被批准的分支。
-          const added = currentRules.find((item) => item.decision === 'deny'
-            && item.tool === named
-            && item.target === undefined && item.path === undefined
-            && (item.argsHash === undefined || item.argsHash === argsHash)
+          const tightened = currentRules.filter(inScope).find((item) => item.decision === 'deny'
             && (matches(command, item.match) || (segments ?? []).some((segment) => matches(segment, item.match))));
-          if (added !== undefined) return refuse('policy_denied', 'rule', added.reason ?? '等待复审期间规则表收紧了这一次调用', added.match);
+          if (tightened !== undefined) return refuse('policy_denied', 'rule', tightened.reason ?? '等待复审期间规则表收紧了这一次调用', tightened.match);
         }
         if (outcome !== undefined && outcome.decision === 'allow') {
           recordApproval();

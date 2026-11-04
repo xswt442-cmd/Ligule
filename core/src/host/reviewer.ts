@@ -168,6 +168,7 @@ export function createSessionReviewer({ settings, provider, factsOf, logger, onU
     runCalls += 1;
     // 预算只记一份：先用估算做准入检查，之后收到端点的真实输入量就替换它，绝不重复累加。
     let providerInputSeen = false;
+    let providerOutputSeen = false;
     let budgetSettled = false;
     const settleBudget = (): void => {
       if (budgetSettled) return;
@@ -176,6 +177,11 @@ export function createSessionReviewer({ settings, provider, factsOf, logger, onU
       reservedTokens -= reservation;
       // 端点始终没报输入时退回估算，否则累计预算是空的、上限形同虚设。
       if (!providerInputSeen) inputTokens += built.input.estimatedInputTokens;
+      // 输出同理：端点没报就按预留上限保守计费，未知输出不能把额度白还回去。
+      if (!providerOutputSeen) {
+        outputTokens += settings.maxOutputTokens;
+        unknownOutput = true;
+      }
     };
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), settings.timeoutMs);
@@ -200,7 +206,7 @@ export function createSessionReviewer({ settings, provider, factsOf, logger, onU
         if (event.type === 'reasoning') reasoned = true;
         if (event.type === 'usage') {
           if (typeof event.input === 'number') { inputTokens += event.input; providerInputSeen = true; } else unknownInput = true;
-          if (typeof event.output === 'number') outputTokens += event.output; else unknownOutput = true;
+          if (typeof event.output === 'number') { outputTokens += event.output; providerOutputSeen = true; } else unknownOutput = true;
         }
         if (event.type === 'tool-call') {
           // 复审绝不能自己调用工具；出现工具调用说明装配或模型越界，先记账再转人工。

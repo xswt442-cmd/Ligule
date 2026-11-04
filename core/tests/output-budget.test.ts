@@ -34,6 +34,17 @@ test('a later generation can only lower the output ceiling', () => {
   assert.equal(plain.withGeneration({ outputTokensCeiling: 400 }).outputTokens, 400);
 });
 
+test('a later generation keeps the session settings it does not name', () => {
+  // 复审只收紧输出上限；会话的思考档必须跟着走，不能被重建时的默认值抹掉。
+  const session = hostProviderFromConfig(
+    { model: { ...official, outputTokens: 8192 } },
+    { outputTokensCeiling: 8192, thinkingEffort: 'low' },
+  );
+  const narrowed = session.withGeneration({ outputTokensCeiling: 400 });
+  assert.equal(narrowed.outputTokens, 400);
+  assert.equal(narrowed.thinkingEffort, 'low');
+});
+
 test('output budgets fail explicitly when unsupported or invalid', () => {
   assert.throws(() => providerFromConfig({ model: { ...official, baseURL: 'https://proxy.example/v1', outputTokens: 16384 } }),
     (error) => hasCode(error, 'provider_output_budget_unsupported'));

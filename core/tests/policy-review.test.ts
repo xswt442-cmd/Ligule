@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDecisionChain } from '../dist/index.js';
+import { policyArgsHash } from '../dist/kernel/policy.js';
 import type { PolicyQuestion, PolicyReviewRecord, PolicyReviewRequest } from '../dist/kernel/policy.js';
 
 // `auto` 下只有“确定性策略认不出命令形状”这一种不确定可以交给复审。
@@ -151,6 +152,42 @@ test('a denial threshold tightening during a review discards the verdict', async
   assert.equal(verdict.via, 'ask', '作废后回到人工审批，而不是拿旧结论放行');
   // 并发的那次调用自己也可能问过一次人，这里只要求这次调用确实回到了人工。
   assert.ok(asked.length >= 1);
+});
+
+test('a deny rule added while the review throws still denies the pending call', async () => {
+  let chain: ReturnType<typeof createDecisionChain> | undefined;
+  const built = createDecisionChain({
+    mode: 'auto',
+    ask: async () => true,
+    review: async () => {
+      // 复审自己失败了，但等待期间新写的拒绝规则必须当场生效，不能被异常绕过。
+      chain?.setRules([{ tool: 'exec', decision: 'deny', match: 'python3 *', reason: '解释器被临时禁止' }]);
+      throw new Error('provider 429');
+    },
+  });
+  chain = built;
+  const verdict = await built.evaluate(interpreterCall);
+  assert.equal(verdict.decision, 'deny');
+  assert.equal(verdict.via, 'rule');
+  assert.equal(verdict.code, 'policy_denied');
+});
+
+test('a deny rule scoped to these exact arguments still applies after a review', async () => {
+  const scoped = policyArgsHash({ command: 'python3 script.py' });
+  let chain: ReturnType<typeof createDecisionChain> | undefined;
+  const built = createDecisionChain({
+    mode: 'auto',
+    ask: async () => true,
+    review: async () => {
+      // 只针对这一组参数的拒绝同样有效：重验不能只看不带范围的规则。
+      chain?.setRules([{ tool: 'exec', decision: 'deny', argsHash: scoped, reason: '这一组参数被拒绝' }]);
+      return { decision: 'allow', reasonCode: 'read_only_python', fingerprint: 'f', inputVersion: 2 };
+    },
+  });
+  chain = built;
+  const verdict = await built.evaluate(interpreterCall);
+  assert.equal(verdict.decision, 'deny');
+  assert.equal(verdict.via, 'rule');
 });
 
 test('a deny rule for another tool never rejects the pending call', async () => {

@@ -89,7 +89,11 @@ export async function selectReviewEvidence(
     if (kind === 'user') {
       const text = textOf(event);
       if (text === undefined) continue;
-      const item: EvidenceItem = { seq, source: 'user', text };
+      // 可信本地 UI 记的 Run 是 human；外控（controller:*）写进来的同一段文字只是请求，
+      // 不能和人类禁令并列为授权事实。
+      const scope = (event.run as { callerScope?: unknown } | undefined)?.callerScope;
+      const fromController = typeof scope === 'string' && scope !== 'human';
+      const item: EvidenceItem = { seq, source: fromController ? 'controller' : 'user', text };
       constraints.push(item);
       task = item;
       continue;

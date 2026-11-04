@@ -120,7 +120,9 @@ export function providerFromConfig(config: ConfigSnapshot, generation: HostGener
         .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
       const ceiling = ceilings.length === 0 ? undefined : Math.min(...ceilings);
       const unusable = next.outputTokensCeiling ?? generation.outputTokensCeiling;
+      // 会话的其它生成参数（思考档等）必须跟着走，只有输出上限可以被收紧。
       return providerFromConfig({ ...config, model: selectedConfig }, {
+        ...generation,
         ...next,
         ...(ceiling !== undefined ? { outputTokensCeiling: ceiling } : unusable === undefined ? {} : { outputTokensCeiling: unusable }),
       });

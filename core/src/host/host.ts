@@ -1868,16 +1868,23 @@ export function createHost({
           workspaceTrusted,
           ...(request.reason === undefined ? {} : { reason: request.reason }),
           // 用户原文只作事实，不会进入主 Agent 的模型投影。
-          userInstructions: (state.reviewEvidence?.constraints ?? []).map((item) => item.text),
+          // 只有人类写的约束算授权事实；外控写入的“用户原文”只是请求。
+          userInstructions: (state.reviewEvidence?.constraints ?? []).filter((item) => item.source === 'user').map((item) => item.text),
           ...(state.reviewEvidence === undefined ? {} : { evidence: state.reviewEvidence }),
           rules: [
             ...state.sessionPolicyRules.map((rule) => ({
               tool: rule.tool, decision: rule.decision, source: 'session' as const,
               ...(rule.match === undefined ? {} : { match: rule.match }),
+              ...(rule.target === undefined ? {} : { target: rule.target }),
+              ...(rule.path === undefined ? {} : { path: rule.path }),
+              ...(rule.argsHash === undefined ? {} : { argsHash: rule.argsHash }),
             })),
             ...(policy?.rules ?? []).map((rule) => ({
               tool: rule.tool, decision: rule.decision, source: 'config' as const,
               ...(rule.match === undefined ? {} : { match: rule.match }),
+              ...(rule.target === undefined ? {} : { target: rule.target }),
+              ...(rule.path === undefined ? {} : { path: rule.path }),
+              ...(rule.argsHash === undefined ? {} : { argsHash: rule.argsHash }),
             })),
           ],
           ...(captureGrant === undefined ? {} : {
