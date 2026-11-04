@@ -123,6 +123,44 @@ test('the per-run budget and the input budget stop calls before they are made', 
   assert.equal(overBudget.usage().calls, 0);
 });
 
+test('the reviewer reports its own usage once, whatever the endpoint says', async () => {
+  const recorded: { purpose?: string; input?: number | null; output?: number | null }[] = [];
+  const reviewer = createSessionReviewer({
+    settings,
+    provider: providerOf([
+      { type: 'text', text: '{"decision":"allow","reasonCode":"read_only_python"}' },
+      { type: 'usage', input: 80, output: 5 },
+      { type: 'finish' },
+    ]),
+    factsOf: () => facts,
+    onUsage: (event) => { recorded.push(event as { purpose?: string; input?: number | null; output?: number | null }); },
+  });
+  const outcome = await reviewer.review({ tool: 'exec', input: facts.args, command: 'python3 script.py', policy: 'auto' });
+  assert.equal(outcome.decision, 'allow');
+  // 复审的 token 要单独成账，主 Agent 与会话汇总才能按用途分开。
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0]?.purpose, 'reviewer');
+  assert.equal(recorded[0]?.input, 80);
+  // 估算只用于准入检查：端点报回 80 就只能记 80，重复叠加会让预算提前耗尽、用量报大。
+  assert.equal(reviewer.usage().inputTokens, 80);
+});
+
+test('a reply without usage still counts the estimate exactly once', async () => {
+  const reviewer = createSessionReviewer({
+    settings: { ...settings, maxTotalTokens: 40_000 },
+    provider: providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }, { type: 'finish' }]),
+    factsOf: () => facts,
+  });
+  const first = await reviewer.review({ tool: 'exec', input: facts.args, command: 'python3 script.py', policy: 'auto' });
+  assert.equal(first.decision, 'allow');
+  const afterFirst = reviewer.usage().inputTokens ?? 0;
+  assert.ok(afterFirst > 0, '端点没报输入时退回估算，否则预算形同虚设');
+  await reviewer.review({ tool: 'exec', input: facts.args, command: 'python3 script.py', policy: 'auto' });
+  const afterSecond = reviewer.usage().inputTokens ?? 0;
+  // 每次只加一份估算；若重复计入，第二次调用后会是四倍而不是两倍。
+  assert.equal(afterSecond - afterFirst, afterFirst, '每次调用只记一份输入');
+});
+
 test('the reviewer stays disabled until the configuration asks for it', () => {
   assert.equal(reviewerSettings({}), undefined);
   assert.equal(reviewerSettings({ reviewer: { enabled: false, model: 'x' } }), undefined);

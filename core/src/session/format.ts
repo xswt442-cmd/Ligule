@@ -273,18 +273,22 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
     }
     if (kind === 'policyReview') {
       // 复审记录只作审计：它不进入模型投影，旧读取方可以安全跳过。
+      // 用量不走这里——复审的 token 记在 purpose=reviewer 的 usage 事件上，避免两套数字打架。
       if (event.ignorable !== true
         || typeof event.tool !== 'string' || event.tool.trim() === ''
         || (event.review !== 'allow' && event.review !== 'deny' && event.review !== 'ask-human')
         || typeof event.at !== 'string' || !Number.isFinite(Date.parse(event.at))
-        || (event.inputTokens !== undefined && (!Number.isSafeInteger(event.inputTokens) || (event.inputTokens as number) < 0))
-        || (event.outputTokens !== undefined && (!Number.isSafeInteger(event.outputTokens) || (event.outputTokens as number) < 0))
         || (event.reasonCode !== undefined && (typeof event.reasonCode !== 'string' || !/^[a-z0-9_]{1,60}$/u.test(event.reasonCode)))
         || typeof event.durationMs !== 'number' || !Number.isFinite(event.durationMs)
         || (event.reason !== undefined && typeof event.reason !== 'string')
         || (event.make !== undefined && typeof event.make !== 'string')) {
         throw new KernelRuntimeError('session_policy_review_event_invalid');
       }
+    }
+    if (kind === 'usage' && event.purpose !== undefined
+      && event.purpose !== 'agent' && event.purpose !== 'reviewer') {
+      // 用途决定这条用量记在主 Agent 还是复审账上；无法解释的用途必须拒绝，不能猜。
+      throw new KernelRuntimeError('session_usage_event_invalid');
     }
     events.push(event);
     if (kind === 'user') {

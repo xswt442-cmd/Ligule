@@ -3,6 +3,7 @@ import {
   buildReviewInput, parseReviewReply, type ReviewFacts,
 } from '../kernel/reviewer.js';
 import type { PolicyReview, PolicyReviewOutcome, PolicyReviewRecord, PolicyReviewRequest } from '../kernel/policy.js';
+import { usageEvent } from '../session/usage.js';
 
 /**
  * Host 侧复审（Reviewer）执行器：持有独立模型路由、预算和计数，把 Kernel 的复审请求变成一次
@@ -76,9 +77,22 @@ export interface ReviewerDeps {
   /** 由 Host 装配可信事实；Kernel 只传当前动作。 */
   readonly factsOf: (request: PolicyReviewRequest) => ReviewFacts;
   readonly logger?: (message: string, detail?: Record<string, unknown>) => void;
+  /** 每次复审拿到端点用量后回调一次，Host 用它写 `purpose: 'reviewer'` 的 usage 事件。 */
+  readonly onUsage?: (event: ReturnType<typeof usageEvent>) => void;
 }
 
-export function createSessionReviewer({ settings, provider, factsOf, logger }: ReviewerDeps): SessionReviewer {
+function reportUsage(
+  events: readonly unknown[],
+  system: string,
+  user: string,
+  onUsage: ReviewerDeps['onUsage'],
+): void {
+  if (onUsage === undefined || events.length === 0) return;
+  const event = usageEvent({ system, tools: [], messages: [{ role: 'user', text: user }] }, [...events], 'reviewer');
+  if (event !== null) onUsage(event);
+}
+
+export function createSessionReviewer({ settings, provider, factsOf, logger, onUsage }: ReviewerDeps): SessionReviewer {
   let calls = 0;
   let inputTokens = 0;
   let outputTokens = 0;
@@ -103,29 +117,40 @@ export function createSessionReviewer({ settings, provider, factsOf, logger }: R
       return askHuman('review_budget_exhausted', 'Review 累计输入已超预算，转人工审批。');
     }
     calls += 1;
-    inputTokens += built.input.estimatedInputTokens;
+    // 预算只记一份：先用估算做准入检查，之后收到端点的真实输入量就替换它，绝不重复累加。
+    let providerInputSeen = false;
+    let budgetSettled = false;
+    const settleBudget = (): void => {
+      if (budgetSettled) return;
+      budgetSettled = true;
+      // 端点始终没报输入时退回估算，否则累计预算是空的、上限形同虚设。
+      if (!providerInputSeen) inputTokens += built.input.estimatedInputTokens;
+    };
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), settings.timeoutMs);
     timer.unref?.();
     let text = '';
     let reasoned = false;
+    let toolCall: string | undefined;
+    // 端点用量要按用途记账：先收集本次复审的全部流事件，结束后写成 purpose=reviewer 的用量事件。
+    const collected: unknown[] = [];
     try {
       for await (const event of provider.stream({
         system: built.input.system,
         tools: [],
         messages: [{ role: 'user', text: built.input.user }],
       }, { signal: controller.signal })) {
+        collected.push(event);
         if (event.type === 'text') text += event.text;
         if (event.type === 'reasoning') reasoned = true;
         if (event.type === 'usage') {
-          if (typeof event.input === 'number') inputTokens += event.input; else unknownInput = true;
+          if (typeof event.input === 'number') { inputTokens += event.input; providerInputSeen = true; } else unknownInput = true;
           if (typeof event.output === 'number') outputTokens += event.output; else unknownOutput = true;
         }
         if (event.type === 'tool-call') {
-          // 复审绝不能自己调用工具；出现工具调用说明装配或模型越界，直接转人工。
-          failures += 1;
-          logger?.('reviewer tried to call a tool', { tool: event.name });
-          return askHuman('review_reply_invalid', '复审返回了工具调用，转人工审批。');
+          // 复审绝不能自己调用工具；出现工具调用说明装配或模型越界，先记账再转人工。
+          toolCall = event.name;
+          break;
         }
         if (event.type === 'finish') break;
       }
@@ -133,11 +158,20 @@ export function createSessionReviewer({ settings, provider, factsOf, logger }: R
       failures += 1;
       const aborted = controller.signal.aborted;
       logger?.('reviewer request failed', { code: aborted ? 'review_timeout' : 'review_failed' });
+      settleBudget();
+      reportUsage(collected, built.input.system, built.input.user, onUsage);
       return askHuman(aborted ? 'review_timeout' : 'review_failed', aborted
         ? `复审在 ${settings.timeoutMs} 毫秒内没有返回结果，转人工审批。`
         : '复审请求失败，转人工审批。');
     } finally {
       clearTimeout(timer);
+    }
+    settleBudget();
+    reportUsage(collected, built.input.system, built.input.user, onUsage);
+    if (toolCall !== undefined) {
+      failures += 1;
+      logger?.('reviewer tried to call a tool', { tool: toolCall });
+      return askHuman('review_reply_invalid', '复审返回了工具调用，转人工审批。');
     }
     if (reasoned) logger?.('reviewer returned reasoning text');
     const parsed = parseReviewReply(text);

@@ -69,9 +69,12 @@ function cacheUsage(value: unknown): ProviderCacheUsage | undefined {
     providerInputIncludesCache: item.providerInputIncludesCache, consistent: item.consistent as boolean | null };
 }
 
-export function usageEvent(request: ModelRequest, events: unknown[]): {
-  kind: 'usage'; ignorable: true; input: number | null; output: number | null; estimated: number; measurement: 'request-v1';
-  cache?: ProviderCacheUsage;
+// 用量事件按用途分开记账：主 Agent 的模型调用与可选复审（Reviewer）不能混在一起统计。
+export type UsagePurpose = 'agent' | 'reviewer';
+
+export function usageEvent(request: ModelRequest, events: unknown[], purpose: UsagePurpose = 'agent'): {
+  kind: 'usage'; ignorable: true; purpose: UsagePurpose; input: number | null; output: number | null;
+  estimated: number; measurement: 'request-v1'; cache?: ProviderCacheUsage;
 } | null {
   const raw = [...events].reverse().find((event) => typeof event === 'object' && event !== null
     && !Array.isArray(event) && (event as { type?: unknown }).type === 'usage');
@@ -85,6 +88,7 @@ export function usageEvent(request: ModelRequest, events: unknown[]): {
   return {
     kind: 'usage',
     ignorable: true,
+    purpose,
     input,
     output,
     estimated: estimateRequest(request),

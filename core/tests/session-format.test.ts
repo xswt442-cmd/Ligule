@@ -159,8 +159,6 @@ test('a review decision is stored as skippable audit and rejects malformed recor
       reasonCode: 'review_timeout',
       make: 'session-reviewer',
       durationMs: 12.5,
-      inputTokens: 120,
-      outputTokens: 0,
     };
     await writeFile(path, `${tool(0, 'one')}\n${JSON.stringify(review)}\n`);
     const log = createSessionLog({ directory, id: 'review' });
@@ -179,7 +177,6 @@ test('a review decision is stored as skippable audit and rejects malformed recor
       { ...review, review: 'allow-always' },
       { ...review, tool: '' },
       { ...review, durationMs: 'soon' },
-      { ...review, inputTokens: -1 },
       { ...review, reasonCode: 'NOT A CODE' },
     ]) {
       await writeFile(path, `${tool(0, 'one')}\n${JSON.stringify(broken)}\n`);
@@ -188,6 +185,24 @@ test('a review decision is stored as skippable audit and rejects malformed recor
         return true;
       });
     }
+  });
+});
+
+test('a usage event keeps its purpose and refuses one it cannot explain', async () => {
+  await withDirectory(async (directory) => {
+    const path = join(directory, 'usage.jsonl');
+    const usage = { seq: 1, kind: 'usage', ignorable: true, purpose: 'reviewer', input: 120, output: 8, estimated: 140, measurement: 'request-v1' };
+    await writeFile(path, `${tool(0, 'one')}\n${JSON.stringify(usage)}\n`);
+    const events = await createSessionLog({ directory, id: 'usage' }).read();
+    assert.equal(events.filter((event) => event.kind === 'usage').length, 1);
+    assert.equal((await createSessionLog({ directory, id: 'usage' }).modelView()).length, 1, '用量不进入模型投影');
+
+    // 用途决定记在谁的账上；解释不了的用途必须拒绝，不能默认算成主 Agent。
+    await writeFile(path, `${tool(0, 'one')}\n${JSON.stringify({ ...usage, purpose: 'subagent' })}\n`);
+    await assert.rejects(() => createSessionLog({ directory, id: 'usage' }).read(), (error) => {
+      assert.equal((error as { code?: string }).code, 'session_usage_event_invalid');
+      return true;
+    });
   });
 });
 
@@ -272,7 +287,7 @@ test('a usage event keeps unknown totals null instead of coercing null or absenc
     hitInputTokens: 12, missInputTokens: null, creationInputTokens: null,
     uncachedInputTokens: null, providerInputIncludesCache: false, consistent: null,
   } }]), {
-    kind: 'usage', ignorable: true, input: null, output: null,
+    kind: 'usage', ignorable: true, purpose: 'agent', input: null, output: null,
     estimated: estimateRequest(request),
     measurement: 'request-v1', cache: {
       source: 'anthropic-messages', sourceFields: [{ field: 'cache_read_input_tokens', tokens: 12 }],

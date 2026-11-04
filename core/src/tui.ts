@@ -15,6 +15,7 @@ export { discoverSkills, skillDirectories } from './kernel/skills.js';
 export { createSessionLog } from './session/session.js';
 export { listWorkspaceSessions, sessionDirectories, type SessionSummary } from './session/list.js';
 export { summarizeVerdicts } from './session/verdicts.js';
+export { summarizeUsage, type UsageBucket, type UsageSummary } from './session/usage-summary.js';
 export { minimalPlugin } from './tools/minimal.js';
 export { networkPlugin } from './tools/network.js';
 export { createHost, providerFromConfig, hostProviderFromConfig, serveHost } from './host/host.js';

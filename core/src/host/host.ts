@@ -54,6 +54,9 @@ import { sessionWriterActive } from '../session/lock.js';
 import { requestAgentControl, TRUSTED_AGENT_CONTROL_ORIGIN, type AgentControlRequest } from './agent-control-runtime.js';
 import { controllerScopeOf, mayRecordHumanRun, maySetPermission, requirePermissionControl, requireTrustedUi, runChannelOf, runOriginBasis, runScopesOf, type ControlTrust } from './capabilities.js';
 import { usageEvent } from '../session/usage.js';
+import { summarizeUsage } from '../session/usage-summary.js';
+import { readSessionRecord } from '../session/record.js';
+import { REVIEW_INSTRUCTION_LIMIT, recentReviewInstructions } from './review-instructions.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel, readPolicyOverride } from '../session/format.js';
 import { SPILL_NAME } from '../session/spill.js';
@@ -244,8 +247,8 @@ function policyRuleKey(rule: Pick<PolicyRule, 'tool' | 'match' | 'target' | 'pat
 interface HostSessionBase {
   taskBudget?: TaskBudget;
   lastTask?: ReturnType<TaskBudget['snapshot']>;
-  /** 最近一次用户回合的原文，供复审装配“用户仍然有效的指令”；不参与主 Agent 投影。 */
-  lastInstruction?: string;
+  /** 复审装配用的“用户仍然有效的指令”：最近几条用户原文，不参与主 Agent 投影。 */
+  reviewInstructions?: string[];
   /** 配置启用时才存在；未启用时 `auto` 行为与 P9.5 完全一致。 */
   reviewer?: SessionReviewer;
   activeRunId?: string;
@@ -1840,7 +1843,7 @@ export function createHost({
           workspaceTrusted,
           ...(request.reason === undefined ? {} : { reason: request.reason }),
           // 用户原文只作事实，不会进入主 Agent 的模型投影。
-          userInstructions: state.lastInstruction === undefined ? [] : [state.lastInstruction],
+          userInstructions: state.reviewInstructions ?? [],
           rules: [
             ...state.sessionPolicyRules.map((rule) => ({
               tool: rule.tool, decision: rule.decision, source: 'session' as const,
@@ -1863,22 +1866,25 @@ export function createHost({
         logger: (message, detail) => {
           try { logger?.log?.(message, { ...detail, sessionId: id }); } catch { /* 记录失败不影响审批结果 */ }
         },
+        onUsage: (event) => {
+          // 复审用量单独成账（purpose=reviewer），与主 Agent 的 usage 事件分开统计。
+          if (event === null) return;
+          void session.append(event).catch((error: unknown) => {
+            try { logger?.log?.('failed to record reviewer usage', { sessionId: id, session_error: String(error) }); } catch { /* 忽略 */ }
+          });
+        },
       });
     })();
 
     if (reviewer !== undefined) state.reviewer = reviewer;
-    // 复审结论写入会话审计（不影响模型投影）：只记录结论、原因码和耗时，token 取两次计数的差值，
-    // 计量不可用时留空而不是填 0。
+    // 复审结论写入会话审计（不影响模型投影）：只记录结论、原因码和耗时。
+    // 用量由独立的 `purpose: 'reviewer'` usage 事件记账，审计事件不再重复记 token。
     const recordReview = reviewer === undefined ? undefined : async (request: PolicyReviewRequest): Promise<PolicyReviewRecord> => {
-      const before = reviewer.usage();
       const startedAt = Date.now();
+      // 每次复审前刷新“仍然有效的指令”，避免只拿最后一条（早期约束会因此丢失）。
+      const instructions = await recentReviewInstructions(session);
+      if (instructions !== undefined) state.reviewInstructions = instructions;
       const outcome = await reviewer.review(request);
-      const after = reviewer.usage();
-      const delta = (left: number | null, right: number | null): number | undefined => (
-        left === null || right === null || right < left ? undefined : right - left
-      );
-      const inputDelta = delta(before.inputTokens, after.inputTokens);
-      const outputDelta = delta(before.outputTokens, after.outputTokens);
       try {
         await session.append({
           kind: 'policyReview',
@@ -1889,8 +1895,6 @@ export function createHost({
           reasonCode: outcome.reasonCode,
           make: 'session-reviewer',
           durationMs: Date.now() - startedAt,
-          ...(inputDelta === undefined ? {} : { inputTokens: inputDelta }),
-          ...(outputDelta === undefined ? {} : { outputTokens: outputDelta }),
           ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
         });
       } catch (error) {
@@ -2419,7 +2423,8 @@ export function createHost({
           });
         }
         // 复审装配把用户原文当作仍然有效的指令；它不会进入主 Agent 的模型投影。
-        state.lastInstruction = input;
+        state.reviewInstructions = [...(state.reviewInstructions ?? []), input]
+          .slice(-REVIEW_INSTRUCTION_LIMIT);
         const result = await loop.run(input, {
           signal: budget.signal,
           task: budget,
@@ -3741,6 +3746,11 @@ export function createHost({
               tools: state.kernel.manifest().map((entry) => entry.name),
             };
           });
+        }
+        case 'usage.get': {
+          // 只读聚合：用途分开记账，未知保持未知，缓存不重复计入输入。
+          const record = await readSessionRecord(recordPathOf(sessionId));
+          return { sessionId, summary: summarizeUsage(record.events) };
         }
         case 'status.get': {
           const state = open(sessionId);
