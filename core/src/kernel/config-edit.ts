@@ -36,7 +36,7 @@ export type WriteRequest = {
 /** 可写配置字段及其文件路径和允许的值类型。 */
 export type EditableField = {
   readonly path: readonly [string, string];
-  readonly kind: 'string' | 'enum' | 'url' | 'envName' | 'rules' | 'services' | 'selection' | 'positiveInteger' | 'mcpServer';
+  readonly kind: 'string' | 'enum' | 'url' | 'envName' | 'rules' | 'services' | 'selection' | 'positiveInteger' | 'boolean' | 'mcpServer';
   readonly oneOf?: readonly string[];
 };
 
@@ -52,6 +52,17 @@ export const EDITABLE: Readonly<Record<string, EditableField>> = {
   'policy.mode': { path: ['policy', 'mode'], kind: 'enum', oneOf: POLICY_MODES },
   'policy.rules': { path: ['policy', 'rules'], kind: 'rules' },
   'mcp.servers': { path: ['mcp', 'servers'], kind: 'mcpServer' },
+  // 复审默认关闭；启用后才在 `auto` 无法确定性放行时调用一次模型复审。
+  'reviewer.enabled': { path: ['reviewer', 'enabled'], kind: 'boolean' },
+  'reviewer.api': { path: ['reviewer', 'api'], kind: 'enum', oneOf: ['messages', 'chat-completions'] },
+  'reviewer.model': { path: ['reviewer', 'model'], kind: 'string' },
+  'reviewer.baseURL': { path: ['reviewer', 'baseURL'], kind: 'url' },
+  'reviewer.apiKeyEnv': { path: ['reviewer', 'apiKeyEnv'], kind: 'envName' },
+  'reviewer.maxInputTokens': { path: ['reviewer', 'maxInputTokens'], kind: 'positiveInteger' },
+  'reviewer.maxOutputTokens': { path: ['reviewer', 'maxOutputTokens'], kind: 'positiveInteger' },
+  'reviewer.timeoutMs': { path: ['reviewer', 'timeoutMs'], kind: 'positiveInteger' },
+  'reviewer.maxPerRun': { path: ['reviewer', 'maxPerRun'], kind: 'positiveInteger' },
+  'reviewer.maxTotalTokens': { path: ['reviewer', 'maxTotalTokens'], kind: 'positiveInteger' },
 };
 
 export function editableField(field: unknown): EditableField {
@@ -63,6 +74,12 @@ export function editableField(field: unknown): EditableField {
 
 /** 校验字段值，并返回用于 TOML 写入和回读比较的表示。 */
 export function encodeValue(field: EditableField, value: unknown): { literal: string; value: unknown } {
+  if (field.kind === 'boolean') {
+    if (typeof value !== 'boolean') {
+      throw new KernelError('config_field_value', { detail: 'takes true or false' });
+    }
+    return { literal: value ? 'true' : 'false', value };
+  }
   if (field.kind === 'positiveInteger') {
     if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
       throw new KernelError('config_field_value', { detail: 'takes a positive safe integer' });

@@ -103,6 +103,9 @@ import type { PolicyRule } from '../kernel/config-edit.js';
 import type { ToolDefinition } from '../kernel/kernel.js';
 import { adoptSessionMode, type SessionModeState } from './session-mode.js';
 import { providerFromConfig, hostProviderFromConfig, type HostGenerationOptions, type HostProvider } from './provider.js';
+import { createSessionReviewer, reviewerSettings, type SessionReviewer } from './reviewer.js';
+import type { PolicyReviewRecord, PolicyReviewRequest } from '../kernel/policy.js';
+import type { ReviewFacts } from '../kernel/reviewer.js';
 import { approvalArgsDigest, summarizeApproval } from './approval.js';
 import { runAcceptanceScope, runReceiptView, withinRunWindows } from './run-records.js';
 import { parseInitialGenerationSettings } from './session-initial-settings.js';
@@ -241,6 +244,10 @@ function policyRuleKey(rule: Pick<PolicyRule, 'tool' | 'match' | 'target' | 'pat
 interface HostSessionBase {
   taskBudget?: TaskBudget;
   lastTask?: ReturnType<TaskBudget['snapshot']>;
+  /** 最近一次用户回合的原文，供复审装配“用户仍然有效的指令”；不参与主 Agent 投影。 */
+  lastInstruction?: string;
+  /** 配置启用时才存在；未启用时 `auto` 行为与 P9.5 完全一致。 */
+  reviewer?: SessionReviewer;
   activeRunId?: string;
   readonly id: string;
   readonly search: SearchStatus;
@@ -1806,12 +1813,98 @@ export function createHost({
               confirmedPartialWorkspaceWrite: initial.permission.confirmedPartialWorkspaceWrite,
             });
     }
+    // 复审只在配置显式启用时存在；未启用时 `auto` 与 P9.5 行为一致。
+    const reviewSettings = reviewerSettings(config as unknown as Record<string, unknown>);
+    const reviewer = reviewSettings === undefined ? undefined : (() => {
+      const base = modelConfigOf(config);
+      const overridden: Record<string, unknown> = {
+        ...base,
+        ...(reviewSettings.model === undefined ? {} : { model: reviewSettings.model }),
+        ...(reviewSettings.baseURL === undefined ? {} : { baseURL: reviewSettings.baseURL }),
+        ...(reviewSettings.api === undefined ? {} : { api: reviewSettings.api }),
+        ...(reviewSettings.apiKeyEnv === undefined ? {} : { apiKeyEnv: reviewSettings.apiKeyEnv }),
+      };
+      // 复审使用独立路由时不能继承主模型的 service 选择，否则会被解析回主模型。
+      delete overridden.selection;
+      return createSessionReviewer({
+        settings: reviewSettings,
+        provider: deriveProvider({ ...config, model: overridden }, { outputTokens: reviewSettings.maxOutputTokens }),
+        factsOf: (request: PolicyReviewRequest): ReviewFacts => ({
+          tool: request.tool,
+          args: request.input,
+          ...(request.command === undefined ? {} : { command: request.command }),
+          policyMode: request.policy,
+          permission: { profile: state.permission.profile, network: state.permission.network },
+          boundary: env.projectRoot,
+          workingDirectory: env.projectRoot,
+          workspaceTrusted,
+          ...(request.reason === undefined ? {} : { reason: request.reason }),
+          // 用户原文只作事实，不会进入主 Agent 的模型投影。
+          userInstructions: state.lastInstruction === undefined ? [] : [state.lastInstruction],
+          rules: [
+            ...state.sessionPolicyRules.map((rule) => ({
+              tool: rule.tool, decision: rule.decision, source: 'session' as const,
+              ...(rule.match === undefined ? {} : { match: rule.match }),
+            })),
+            ...(policy?.rules ?? []).map((rule) => ({
+              tool: rule.tool, decision: rule.decision, source: 'config' as const,
+              ...(rule.match === undefined ? {} : { match: rule.match }),
+            })),
+          ],
+          ...(captureGrant === undefined ? {} : {
+            grant: {
+              id: captureGrant.id,
+              active: true,
+              scope: captureGrant.projectRoot,
+              ...(captureGrant.allowedPolicies === undefined ? {} : { allowedPolicies: captureGrant.allowedPolicies }),
+            },
+          }),
+        }),
+        logger: (message, detail) => {
+          try { logger?.log?.(message, { ...detail, sessionId: id }); } catch { /* 记录失败不影响审批结果 */ }
+        },
+      });
+    })();
+
+    if (reviewer !== undefined) state.reviewer = reviewer;
+    // 复审结论写入会话审计（不影响模型投影）：只记录结论、原因码和耗时，token 取两次计数的差值，
+    // 计量不可用时留空而不是填 0。
+    const recordReview = reviewer === undefined ? undefined : async (request: PolicyReviewRequest): Promise<PolicyReviewRecord> => {
+      const before = reviewer.usage();
+      const startedAt = Date.now();
+      const outcome = await reviewer.review(request);
+      const after = reviewer.usage();
+      const delta = (left: number | null, right: number | null): number | undefined => (
+        left === null || right === null || right < left ? undefined : right - left
+      );
+      const inputDelta = delta(before.inputTokens, after.inputTokens);
+      const outputDelta = delta(before.outputTokens, after.outputTokens);
+      try {
+        await session.append({
+          kind: 'policyReview',
+          ignorable: true,
+          at: new Date().toISOString(),
+          tool: request.tool,
+          review: outcome.decision,
+          reasonCode: outcome.reasonCode,
+          make: 'session-reviewer',
+          durationMs: Date.now() - startedAt,
+          ...(inputDelta === undefined ? {} : { inputTokens: inputDelta }),
+          ...(outputDelta === undefined ? {} : { outputTokens: outputDelta }),
+          ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+        });
+      } catch (error) {
+        logger?.log?.('failed to record the review decision', { sessionId: id, session_error: String(error) });
+      }
+      return outcome;
+    };
     const chain = createDecisionChain({
       ...policy,
       rules: mergePolicyRules([
         { source: 'session', rules: state.sessionPolicyRules },
         { source: 'config', rules: policy?.rules ?? [] },
       ]).rules as PolicyRule[],
+      ...(recordReview === undefined ? {} : { review: recordReview }),
       ask: async ({ tool, input, command, reason, shell, executable, policy, policySource, policyForced, rememberable, scriptBinding, callId, identityDigest }): Promise<PolicyAskResult> => {
         const telemetryContext = telemetryEnabled(telemetry) ? currentTelemetryContext() : undefined;
         const telemetryApprovalRunId = telemetryContext?.runId
@@ -2325,6 +2418,8 @@ export function createHost({
             maxBytes: MAX_DELEGATION_SCHEMA_BYTES + 1024,
           });
         }
+        // 复审装配把用户原文当作仍然有效的指令；它不会进入主 Agent 的模型投影。
+        state.lastInstruction = input;
         const result = await loop.run(input, {
           signal: budget.signal,
           task: budget,

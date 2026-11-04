@@ -96,7 +96,7 @@ function checkedSessionHeader(event: SessionEvent, version: number): SessionHead
 const WRITTEN_KINDS = [
   'session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection',
   'sessionGeneration', 'sessionLoopIterations', 'sessionPermission', 'sessionPolicy', 'sessionMcpTrust', 'sessionPolicyRule',
-  'compaction', 'todoWrite', 'image', 'screenCapture',
+  'compaction', 'todoWrite', 'image', 'screenCapture', 'policyReview',
 ];
 
 // 会话里保存的审批档位。返回 `unknown` 表示值无法解释，调用方必须拒绝该记录。
@@ -269,6 +269,21 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
         || (rule.target !== undefined && (rule.match !== undefined || rule.argsHash !== undefined))
         || (typeof rule.path === 'string' && !(/^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/])/u.test(rule.path) || rule.path.startsWith('/')))) {
         throw new KernelRuntimeError('session_policy_rule_event_invalid');
+      }
+    }
+    if (kind === 'policyReview') {
+      // 复审记录只作审计：它不进入模型投影，旧读取方可以安全跳过。
+      if (event.ignorable !== true
+        || typeof event.tool !== 'string' || event.tool.trim() === ''
+        || (event.review !== 'allow' && event.review !== 'deny' && event.review !== 'ask-human')
+        || typeof event.at !== 'string' || !Number.isFinite(Date.parse(event.at))
+        || (event.inputTokens !== undefined && (!Number.isSafeInteger(event.inputTokens) || (event.inputTokens as number) < 0))
+        || (event.outputTokens !== undefined && (!Number.isSafeInteger(event.outputTokens) || (event.outputTokens as number) < 0))
+        || (event.reasonCode !== undefined && (typeof event.reasonCode !== 'string' || !/^[a-z0-9_]{1,60}$/u.test(event.reasonCode)))
+        || typeof event.durationMs !== 'number' || !Number.isFinite(event.durationMs)
+        || (event.reason !== undefined && typeof event.reason !== 'string')
+        || (event.make !== undefined && typeof event.make !== 'string')) {
+        throw new KernelRuntimeError('session_policy_review_event_invalid');
       }
     }
     events.push(event);

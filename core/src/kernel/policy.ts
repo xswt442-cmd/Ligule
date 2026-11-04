@@ -104,11 +104,45 @@ export type PolicyAskResult =
 export type PolicyAsk = (question: PolicyQuestion) => boolean | PolicyAskResult | Promise<boolean | PolicyAskResult>;
 export type PolicyGuard = (call: { readonly tool: string; readonly input: unknown; readonly command: string | undefined }) => string | undefined;
 
+/**
+ * 复审请求只包含当前动作本身。可信事实（用户约束、规则、Grant、边界）由 Host 侧闭包持有，
+ * Kernel 不把会话内容交给模型。
+ */
+export interface PolicyReviewRequest {
+  readonly tool: string;
+  readonly input: unknown;
+  readonly command: string | undefined;
+  readonly reason: string | undefined;
+  readonly policy: PolicyMode;
+  readonly callId?: string;
+  readonly identityDigest?: string;
+  readonly shell?: string;
+  readonly executable?: string;
+  readonly scriptBinding?: ScriptBinding;
+}
+
+export interface PolicyReviewRecord {
+  readonly decision: 'allow' | 'deny' | 'ask-human';
+  readonly reasonCode?: string;
+  readonly fingerprint?: string;
+  readonly inputVersion?: number;
+  readonly reason?: string;
+}
+
+export type PolicyReviewOutcome = PolicyReviewRecord;
+
+/**
+ * 复审只在这四种结果间做选择：允许、拒绝、转人工、不可用。
+ * 不可用（模型/JSON/超时/预算失败）与转人工都继续走原有审批通道，绝不当成放行。
+ */
+export type PolicyReview = (request: PolicyReviewRequest) => PolicyReviewOutcome | Promise<PolicyReviewOutcome>;
+
 export interface DecisionChainOptions {
   readonly mode?: PolicyMode;
   readonly rules?: PolicyRule[];
   readonly thresholds?: PolicyThresholds;
   readonly ask?: PolicyAsk;
+  readonly review?: PolicyReview;
 }
 
 export interface PolicyVerdict {
@@ -123,6 +157,7 @@ export interface PolicyVerdict {
   answer?: string;
   segments?: string[];
   scriptBinding?: ScriptBinding;
+  review?: PolicyReviewRecord;
 }
 
 export interface DecisionChain {
@@ -170,7 +205,7 @@ export interface PolicyCall {
 export const DEFAULT_THRESHOLDS: PolicyThresholds = Object.freeze({ consecutive: 3, total: 20 });
 
 // 明确列出写入记录的判定字段，避免后续增加的内部数据意外进入记录。
-export const VERDICT_FIELDS = Object.freeze(['capability', 'decision', 'via', 'level', 'forced', 'rule', 'answer'] as const);
+export const VERDICT_FIELDS = Object.freeze(['capability', 'decision', 'via', 'level', 'forced', 'rule', 'answer', 'review'] as const);
 
 // 用户提问使用独立的请求和答复流程，不属于工具审批。
 const UNASKED = new Set(['ask_user_question']);
@@ -248,7 +283,7 @@ function askReason(parsed: ParsedCommand | undefined, target: NetworkTarget | un
 }
 
 // `ask` 是 Host 注入的用户审批通道。未提供该通道时，所有需要审批的调用都会被拒绝。
-export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEFAULT_THRESHOLDS, ask }: DecisionChainOptions = {}): DecisionChain {
+export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEFAULT_THRESHOLDS, ask, review }: DecisionChainOptions = {}): DecisionChain {
   if (!isPolicyMode(mode)) throw new KernelError('policy_mode_unknown');
   if (!(thresholds.consecutive >= 1) || !(thresholds.total >= 1)) throw new KernelError('policy_thresholds_required');
 
@@ -446,17 +481,21 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         requiresManualApproval = true;
         manualApprovalReason = askedRule.reason ?? `${named} requires approval by its policy rule`;
       }
+      // 复审只处理“确定性策略认不出命令形状”这一类不确定；规则询问属于强制人工检查点。
+      let reviewable = false;
       if (command !== undefined) {
         if (segments === undefined || !canAutoApprove(inspection)) {
           requiresManualApproval = true;
           rememberable = false;
           manualApprovalReason ??= askReason(parsed, target, shell) ?? '命令使用脚本解释器或包装器，需要逐次审批';
+          reviewable = manualApprovalRequired !== true && access !== 'external' && access !== 'unknown';
         }
         const classified = await classifyDangerousCommand(command, kind, inspection, commandCwd(input));
         if (classified?.kind === 'hard-deny') return hardDeny(classified.reason);
         if (classified?.kind === 'approval') {
           requiresManualApproval = true;
           rememberable = false;
+          reviewable = false;
           manualApprovalReason ??= parsed?.kind === 'segments'
             ? classified.reason
             : askReason(parsed, target, shell) ?? classified.reason;
@@ -473,6 +512,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       const loopOrPrivate = target?.class === 'loopback' || target?.class === 'private';
       if (loopOrPrivate) {
         rememberable = false;
+        reviewable = false;
         manualApprovalReason ??= askReason(parsed, target, shell);
       }
 
@@ -526,6 +566,35 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       if (requiresManualApproval) covered = undefined;
       if (covered !== undefined) {
         return covered === null ? answer('auto') : answer('rules', covered);
+      }
+
+      // `auto` 下只有“命令形状认不出”这一种不确定可以交给配置好的复审；
+      // 规则询问、强制人审、外部进程、无法分类的工具与私有网络都不交模型改判。
+      // 复审不可用（未配置、超时、超预算、回复不合法）都退回人工审批，绝不当成放行。
+      if (typeof review === 'function' && effective === 'auto' && reviewable) {
+        let outcome: PolicyReviewRecord | undefined;
+        try {
+          outcome = await review({
+            tool: named,
+            input,
+            command,
+            reason: manualApprovalReason,
+            policy: effective,
+            ...(callId === undefined ? {} : { callId }),
+            ...(identityDigest === undefined ? {} : { identityDigest }),
+            ...(shell === undefined ? {} : { shell: shell.kind, executable: shell.executable }),
+            ...(scriptBinding === undefined ? {} : { scriptBinding }),
+          });
+        } catch {
+          outcome = undefined;
+        }
+        if (outcome !== undefined && outcome.decision === 'allow') {
+          recordApproval();
+          return { ...answer('auto-reviewer'), review: outcome };
+        }
+        if (outcome !== undefined && outcome.decision === 'deny') {
+          return refuse(outcome.reasonCode ?? 'reviewer_denied', 'auto-reviewer', outcome.reason ?? '复审拒绝了这一次调用', undefined, 'deny');
+        }
       }
 
       // 自动策略无法识别命令时转为逐次审批，并返回无法自动放行的原因。

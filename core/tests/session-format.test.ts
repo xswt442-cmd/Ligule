@@ -146,6 +146,51 @@ test('a record from a newer format is refused instead of half read', async () =>
   });
 });
 
+test('a review decision is stored as skippable audit and rejects malformed records', async () => {
+  await withDirectory(async (directory) => {
+    const path = join(directory, 'review.jsonl');
+    const review = {
+      seq: 1,
+      kind: 'policyReview',
+      ignorable: true,
+      at: '2026-11-04T00:00:00.000Z',
+      tool: 'exec',
+      review: 'ask-human',
+      reasonCode: 'review_timeout',
+      make: 'session-reviewer',
+      durationMs: 12.5,
+      inputTokens: 120,
+      outputTokens: 0,
+    };
+    await writeFile(path, `${tool(0, 'one')}\n${JSON.stringify(review)}\n`);
+    const log = createSessionLog({ directory, id: 'review' });
+    const events = await log.read();
+    assert.equal(events.filter((event) => event.kind === 'policyReview').length, 1);
+    assert.equal((await log.modelView()).length, 1, '复审记录不进入模型投影');
+
+    // 没有 ignorable 的记录会让旧读取方无法判断，必须拒绝而不是猜。
+    await writeFile(path, `${tool(0, 'one')}\n${JSON.stringify({ ...review, ignorable: false })}\n`);
+    await assert.rejects(() => createSessionLog({ directory, id: 'review' }).read(), (error) => {
+      assert.equal((error as { code?: string }).code, 'session_policy_review_event_invalid');
+      return true;
+    });
+
+    for (const broken of [
+      { ...review, review: 'allow-always' },
+      { ...review, tool: '' },
+      { ...review, durationMs: 'soon' },
+      { ...review, inputTokens: -1 },
+      { ...review, reasonCode: 'NOT A CODE' },
+    ]) {
+      await writeFile(path, `${tool(0, 'one')}\n${JSON.stringify(broken)}\n`);
+      await assert.rejects(() => createSessionLog({ directory, id: 'review' }).read(), (error) => {
+        assert.equal((error as { code?: string }).code, 'session_policy_review_event_invalid');
+        return true;
+      });
+    }
+  });
+});
+
 test('an event kind this build does not know is refused unless the record says it may be skipped', async () => {
   await withDirectory(async (directory) => {
     const path = join(directory, 'kind.jsonl');
