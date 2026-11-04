@@ -53,7 +53,7 @@ Windows 路径示例：
 - `ligule_run_status`：查询当前进程内操作的运行、完成、失败或取消状态。
 - `ligule_run_await`：等待已知 `operationId`；超时同样不会取消运行。
 - `ligule_session_read`：分页读取会话记录。
-- `ligule_usage_get`：读取本控制器拥有的会话的 Token 用量，按主 Agent 与复审两份账返回。
+- `ligule_usage_get`：读取本控制器拥有的会话的 Token 用量，按主 Agent 与复审两份账返回。（返回的是已报告数值的合计：`requests` 计所有请求，缺报的请求只进 `unknownInputRequests`/`unknownOutputRequests`，两者都为 0 时这两个数才算完整。）
 - `ligule_run_cancel`：按 `operationId` 取消相应任务。
 
 推荐顺序是开始或继续工作前先创建或接回会话，再读取 `ligule_session_configure`。若希望服务端等待，可用 `ligule_run`；若要立即取回控制权，则用 `ligule_run_start`，之后通过 `ligule_run_await` 等待或用 `ligule_run_status` 轮询。两种等待超时都不会取消任务；根据 `phase`、`waitingFor` 和 `pendingInteractions` 继续等待或审阅后答复。完成后用 `ligule_session_read` 查看新增记录。状态通知通过 MCP logging 尽力发送；通知不可用时轮询仍可读取同一状态。需要停止时调用 `ligule_run_cancel`。工具参数以运行中的 `tools/list` schema 为准。进程重启后，可直接使用已有 `sessionId` 和 `runId`（或 `requestKey`）调用 `ligule_run_get`；无需先 `ligule_session_open`，也不会取得 Session 写锁。

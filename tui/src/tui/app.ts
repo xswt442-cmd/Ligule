@@ -2275,8 +2275,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     }
     if (name === 'usage') {
       // 用量按用途分开读：主机返回只读聚合，TUI 不自己累加事件。
+      // 记录按会话所属项目定位：别的项目的会话不在本进程默认目录里。
+      const root = info.boundary ?? '';
       void (async () => {
-        const measured = await client.request('usage.get', { sessionId })
+        const measured = await client.request('usage.get', root === '' ? { sessionId } : { sessionId, projectRoot: root })
           .catch((error: unknown) => requestFailure(error, 'usage_read_failed'));
         if (measured === null || typeof measured !== 'object' || 'code' in measured) {
           const code = measured !== null && typeof measured === 'object' && 'code' in measured
@@ -2301,7 +2303,15 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           return t(`${label}：${bucket.requests} 次请求，${input}${cached}，${output}`, `${label}: ${bucket.requests} calls, ${input}${cached}, ${output}`);
         };
         // 最近一次复审也从会话记录里读，TUI 不自己推断裁决。
-        const page = await client.request('session.read', { sessionId }).catch(() => null);
+        // 外控会话由别的 Host 持有写入锁，`session.read` 会报 `session_not_open`；
+        // 这时改用不取锁的 `session.observe`，否则用量读到了、复审却永远显示不出来。
+        const readRecord = async () => {
+          const direct = await client.request('session.read', { sessionId }).catch((error: unknown) => ({ code: errorCode(error) ?? 'session_read_failed' }));
+          if (!('code' in direct)) return direct;
+          return client.request('session.observe', { projectRoot: info.boundary ?? '', sessionId, limit: 400 }).catch(() => null);
+        };
+        const page = await readRecord();
+        if (activeSession.current !== sessionId) return;
         const reviews = (page?.events ?? []).filter((event) => (event as { kind?: string }).kind === 'policyReview');
         const last = reviews[reviews.length - 1] as { review?: string; reasonCode?: string; evidenceSeqs?: number[] } | undefined;
         const lines = [
