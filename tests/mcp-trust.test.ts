@@ -62,7 +62,7 @@ test('MCP accepts the existing TUI trust document through a real stdio client', 
   await fixture(async ({ project, home }) => {
     await setTrusted(project, true, join(home, 'tui-trust.json'));
     const server = await connectMcp({ cliPath, projectRoot: project, dataRoot: home, sdkRoot, apiKeyName: 'MCP_TRUST_TEST_KEY', apiKey: 'unused' });
-    try { assert.equal((await server.client.listTools()).tools.length, 14); }
+    try { assert.equal((await server.client.listTools()).tools.length, 15); }
     finally { await server.close(); }
   });
 });

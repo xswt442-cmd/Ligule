@@ -115,9 +115,16 @@ export function providerFromConfig(config: ConfigSnapshot, generation: HostGener
       return providerFromConfig({ ...config, model: { ...selectedConfig, selection: { provider: serviceId, model: next } } }, generation);
     },
     withGeneration(next: HostGenerationOptions) {
+      // 现有限额只会收紧新请求：复审要求 400 时不能因为会话本身是 8192 就放大回 8192。
+      const ceilings = [next.outputTokensCeiling, generation.outputTokensCeiling]
+        .filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
+      const ceiling = ceilings.length === 0 ? undefined : Math.min(...ceilings);
+      const unusable = next.outputTokensCeiling ?? generation.outputTokensCeiling;
+      // 会话的其它生成参数（思考档等）必须跟着走，只有输出上限可以被收紧。
       return providerFromConfig({ ...config, model: selectedConfig }, {
+        ...generation,
         ...next,
-        ...(generation.outputTokensCeiling === undefined ? {} : { outputTokensCeiling: generation.outputTokensCeiling }),
+        ...(ceiling !== undefined ? { outputTokensCeiling: ceiling } : unusable === undefined ? {} : { outputTokensCeiling: unusable }),
       });
     },
   });

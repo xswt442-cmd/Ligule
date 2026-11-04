@@ -2275,8 +2275,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     }
     if (name === 'usage') {
       // 用量按用途分开读：主机返回只读聚合，TUI 不自己累加事件。
+      // 记录按会话所属项目定位：别的项目的会话不在本进程默认目录里。
+      const root = info.boundary ?? '';
       void (async () => {
-        const measured = await client.request('usage.get', { sessionId })
+        const measured = await client.request('usage.get', root === '' ? { sessionId } : { sessionId, projectRoot: root })
           .catch((error: unknown) => requestFailure(error, 'usage_read_failed'));
         if (measured === null || typeof measured !== 'object' || 'code' in measured) {
           const code = measured !== null && typeof measured === 'object' && 'code' in measured
@@ -2300,10 +2302,61 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           const cached = bucket.cachedInput === 0 ? '' : t(`，其中缓存 ${bucket.cachedInput}`, ` (${bucket.cachedInput} cached)`);
           return t(`${label}：${bucket.requests} 次请求，${input}${cached}，${output}`, `${label}: ${bucket.requests} calls, ${input}${cached}, ${output}`);
         };
-        push({ kind: 'meta', text: [
+        // 最近一次复审也从会话记录里读，TUI 不自己推断裁决。
+        // 外控会话由别的 Host 持有写入锁，`session.read` 会报 `session_not_open`；
+        // 这时改用不取锁的 `session.observe`，并按 `before` 向更早的页翻，
+        // 否则复审早于最新一页时，命令会把“存在但没翻到”说成“没有复审”。
+        interface ReviewEvent { kind?: string; seq?: number; review?: string; reasonCode?: string; evidenceSeqs?: readonly number[] }
+        const readReviews = async (): Promise<{ reviews: readonly ReviewEvent[] } | { code: string } | { incomplete: true }> => {
+          const direct = await client.request('session.read', { sessionId }).catch((error: unknown) => ({ code: errorCode(error) ?? 'session_read_failed' }));
+          if (!('code' in direct)) {
+            return { reviews: (direct.events as readonly ReviewEvent[]).filter((event) => event.kind === 'policyReview') };
+          }
+          let cursor: number | undefined;
+          for (let page = 0; page < 50; page += 1) {
+            const params: { projectRoot: string; sessionId: string; limit: number; before?: number } = {
+              projectRoot: info.boundary ?? '', sessionId, limit: 400,
+            };
+            if (cursor !== undefined) params.before = cursor;
+            const observed = await client.request('session.observe', params).catch((error: unknown) => ({ code: errorCode(error) ?? 'session_observe_failed' }));
+            if ('code' in observed) return { code: observed.code };
+            const events = observed.events as readonly ReviewEvent[];
+            const found = events.filter((event) => event.kind === 'policyReview');
+            if (found.length > 0) return { reviews: found };
+            const oldest = events[0];
+            // 空页或已经翻到 seq 1 才说明真的没有更早的记录；否则只是还没翻到。
+            if (oldest?.seq === undefined || oldest.seq <= 1) return { reviews: [] };
+            cursor = oldest.seq;
+          }
+          // 翻到页数上限仍未找到：结论是“没查完”，不是“没有复审”。
+          return { incomplete: true };
+        };
+        const page = await readReviews();
+        if (activeSession.current !== sessionId) return;
+        const lines = [
           line(t('主 Agent', 'Agent'), summary.agent),
           line(t('复审', 'Reviewer'), summary.reviewer),
-        ].join('\n') });
+        ];
+        // 记录读不出来时不能把“读不到”说成“没有复审”：用量那本账仍然照实显示，
+        // 但复审这一行必须明确报错，否则用户会以为这段时间一次复审都没发生。
+        if ('code' in page) {
+          push({ kind: 'meta', text: lines.join('\n') });
+          push({ kind: 'error', text: t(`无法读取会话记录，最近复审未知：${page.code}`, `Cannot read the session log, so the last review is unknown: ${page.code}`) });
+          return;
+        }
+        // 翻到页数上限也没找到复审：只能报“没查完”，不能声称一次复审都没有。
+        if ('incomplete' in page) {
+          push({ kind: 'meta', text: lines.join('\n') });
+          push({ kind: 'error', text: t('查询未完成（已向前翻 50 页仍未找到复审），最近复审未知', 'The lookup stopped before the session start, so the last review is unknown') });
+          return;
+        }
+        const last = page.reviews[page.reviews.length - 1];
+        if (last?.review !== undefined) {
+          const code = last.reasonCode ?? 'review_unspecified';
+          const count = last.evidenceSeqs?.length ?? 0;
+          lines.push(t(`最近复审：${last.review}（${code}，证据 ${count} 条）`, `Last review: ${last.review} (${code}, ${count} evidence items)`));
+        }
+        push({ kind: 'meta', text: lines.join('\n') });
       })();
       return;
     }

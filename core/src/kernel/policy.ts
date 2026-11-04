@@ -119,6 +119,8 @@ export interface PolicyReviewRequest {
   readonly shell?: string;
   readonly executable?: string;
   readonly scriptBinding?: ScriptBinding;
+  // Run 的取消信号：复审请求必须随 Run 一起中止，取消后到达的结论作废。
+  readonly signal?: AbortSignal;
 }
 
 export interface PolicyReviewRecord {
@@ -127,6 +129,8 @@ export interface PolicyReviewRecord {
   readonly fingerprint?: string;
   readonly inputVersion?: number;
   readonly reason?: string;
+  /** 实际进入复审提示词的事件序号；预算丢掉的历史不在其中。 */
+  readonly includedSeqs?: readonly number[];
 }
 
 export type PolicyReviewOutcome = PolicyReviewRecord;
@@ -199,6 +203,8 @@ export interface PolicyCall {
   readonly workingDirectory?: string;
   readonly callId?: string;
   readonly identityDigest?: string;
+  // 这次调用所属 Run 的取消信号；复审要跟着它一起及时停下。
+  readonly signal?: AbortSignal;
 }
 
 // 拒绝阈值和默认策略由配置层提供。
@@ -390,7 +396,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
     },
 
     async evaluate({ tool, input, target, shell, capability, access, command: composedCommand, scriptBinding, scriptBindingError, requiresManualApproval: manualApprovalRequired,
-      fileBoundary, workingDirectory, callId, identityDigest }: PolicyCall): Promise<PolicyVerdict> {
+      fileBoundary, workingDirectory, callId, identityDigest, signal }: PolicyCall): Promise<PolicyVerdict> {
       if (typeof tool !== 'string' || tool === '') throw new KernelError('policy_call_tool_required');
       // 使用工具声明的实际能力名称进行判定。MCP 调用使用 `mcp:<服务器>/<工具>`，而不是通用工具名 `mcp.call`。
       const named = capability ?? tool;
@@ -423,7 +429,9 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         catch { /* Invalid paths cannot match a remembered allow and remain subject to the tool's path check. */ }
       }
       const argsHash = policyArgsHash(input, identityDigest);
-      const candidates = !applyRules ? [] : currentRules.filter((item) => {
+      // 一条规则是否作用于这一次调用：工具、文件/工作区范围与参数指纹都要对上。
+      // 复审返回后重验拒绝规则时也用它，范围规则不会被漏掉。
+      const inScope = (item: PolicyRule): boolean => {
         if (item.tool !== named) return false;
         if (item.target !== undefined || item.path !== undefined) {
           if (currentFilePath === undefined || item.path === undefined || !isAbsolute(item.path)) return false;
@@ -433,7 +441,8 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         }
         if (item.argsHash !== undefined) return item.argsHash === argsHash;
         return true;
-      });
+      };
+      const candidates = !applyRules ? [] : currentRules.filter(inScope);
       // 先按 Host 选择的语法解析命令，再逐段应用规则。解析不完整时将整条命令视为无法确认。
       const kind = shell?.kind ?? 'bash';
       const inspection = command === undefined ? undefined : await inspectCommand(command, kind);
@@ -572,6 +581,10 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       // 规则询问、强制人审、外部进程、无法分类的工具与私有网络都不交模型改判。
       // 复审不可用（未配置、超时、超预算、回复不合法）都退回人工审批，绝不当成放行。
       if (typeof review === 'function' && effective === 'auto' && reviewable) {
+        // 复审是异步请求；期间的策略切换或规则变更会让结论失效，先留一份签名用于复核。
+        // 拒绝阈值也会收紧语义：连续拒绝后 `forcedToAsk` 生效，mode 仍然是 auto。
+        const modeSignature = `${current}:${forcedToAsk}`;
+        const rulesSignature = JSON.stringify(currentRules);
         let outcome: PolicyReviewRecord | undefined;
         try {
           outcome = await review({
@@ -584,9 +597,22 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
             ...(identityDigest === undefined ? {} : { identityDigest }),
             ...(shell === undefined ? {} : { shell: shell.kind, executable: shell.executable }),
             ...(scriptBinding === undefined ? {} : { scriptBinding }),
+            ...(signal === undefined ? {} : { signal }),
           });
         } catch {
           outcome = undefined;
+        }
+        // 过期结论必须作废：回到确定性与人工审批路径，而不是拿旧判定放行或拒绝。
+        // 复审抛错时同样要重验：异常不能让等待期间新增的拒绝规则失效。
+        // Run 被取消后到达的结论同样作废——那次调用已经不该执行了。
+        const changed = `${current}:${forcedToAsk}` !== modeSignature || JSON.stringify(currentRules) !== rulesSignature
+          || signal?.aborted === true;
+        if (changed) {
+          outcome = undefined;
+          // 作废不等于忽略新规则：等待期间新增的 deny 要当场生效，否则会落到可被批准的分支。
+          const tightened = currentRules.filter(inScope).find((item) => item.decision === 'deny'
+            && (matches(command, item.match) || (segments ?? []).some((segment) => matches(segment, item.match))));
+          if (tightened !== undefined) return refuse('policy_denied', 'rule', tightened.reason ?? '等待复审期间规则表收紧了这一次调用', tightened.match);
         }
         if (outcome !== undefined && outcome.decision === 'allow') {
           recordApproval();
@@ -595,6 +621,12 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         if (outcome !== undefined && outcome.decision === 'deny') {
           return refuse(outcome.reasonCode ?? 'reviewer_denied', 'auto-reviewer', outcome.reason ?? '复审拒绝了这一次调用', undefined, 'deny');
         }
+      }
+
+      // 复审期间 Run 被取消时不再发起新的审批：取消只结清当时已经登记的请求，
+      // 之后登记的审批可能永远等不到人回答，Run 也就无法及时结束。
+      if (signal?.aborted === true) {
+        return refuse('run_cancelled', 'ask', 'Run 已取消，这次调用不再执行', undefined, 'cancelled', false);
       }
 
       // 自动策略无法识别命令时转为逐次审批，并返回无法自动放行的原因。

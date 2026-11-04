@@ -454,7 +454,7 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
     const toolNames = listed.tools.map((tool: { name: string }) => tool.name).sort();
     assert.deepEqual(toolNames, [
       'ligule_interaction_reply', 'ligule_run', 'ligule_run_await', 'ligule_run_cancel', 'ligule_run_get', 'ligule_run_start', 'ligule_run_status', 'ligule_session_close', 'ligule_session_configure', 'ligule_session_create',
-      'ligule_session_list', 'ligule_session_open', 'ligule_session_read', 'ligule_session_send',
+      'ligule_session_list', 'ligule_session_open', 'ligule_session_read', 'ligule_session_send', 'ligule_usage_get',
     ]);
     const readSchema = listed.tools.find((tool: { name: string }) => tool.name === 'ligule_session_read').inputSchema;
     assert.ok(readSchema.properties.at && readSchema.properties.offset, 'tools/list publishes bounded exact-event chunk reads');
@@ -821,7 +821,7 @@ test('operator tools configure real sessions, answer Host interactions, and run 
   context.client.setNotificationHandler(LoggingMessageNotificationSchema, (notification: unknown) => { notifications.push(notification); });
   try {
     const names = (await context.client.listTools()).tools.map((tool: { name: string }) => tool.name).sort();
-    assert.equal(names.length, 14);
+    assert.equal(names.length, 15);
     const project = await realpath(projectRoot);
     const invalidInitialModel = await context.client.callTool({ name: 'ligule_session_create', arguments: {
       projectRoot: project, initial: { model: { provider: 'legacy', model: 'not-in-this-config' } },

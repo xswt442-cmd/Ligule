@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { providerFromConfig } from '../dist/host/provider.js';
+import { hostProviderFromConfig, providerFromConfig } from '../dist/host/provider.js';
 import { createConfig } from '../dist/kernel/config.js';
 import { editableField, encodeValue } from '../dist/kernel/config-edit.js';
 import { createServer } from 'node:http';
@@ -22,6 +22,27 @@ test('the official DeepSeek root URL keeps its verified output limit', () => {
   const rootEndpoint = { ...official, baseURL: 'https://api.deepseek.com' };
   assert.equal(providerFromConfig({ model: rootEndpoint }).outputTokens, 8192);
   assert.equal(providerFromConfig({ model: { ...rootEndpoint, outputTokens: 32768 } }).outputTokens, 32768);
+});
+
+test('a later generation can only lower the output ceiling', () => {
+  // 复审拿 400 的上限时必须真的生效：会话本身 8192 不能把它盖回去。
+  const session = hostProviderFromConfig({ model: { ...official, outputTokens: 8192 } }, { outputTokensCeiling: 8192 });
+  assert.equal(session.withGeneration({ outputTokensCeiling: 400 }).outputTokens, 400);
+  assert.equal(session.withGeneration({ outputTokensCeiling: 1_024 }).outputTokens, 1_024);
+  // 没有会话上限时，新上限就是唯一的上限。
+  const plain = hostProviderFromConfig({ model: { ...official, outputTokens: 8192 } });
+  assert.equal(plain.withGeneration({ outputTokensCeiling: 400 }).outputTokens, 400);
+});
+
+test('a later generation keeps the session settings it does not name', () => {
+  // 复审只收紧输出上限；会话的思考档必须跟着走，不能被重建时的默认值抹掉。
+  const session = hostProviderFromConfig(
+    { model: { ...official, outputTokens: 8192 } },
+    { outputTokensCeiling: 8192, thinkingEffort: 'low' },
+  );
+  const narrowed = session.withGeneration({ outputTokensCeiling: 400 });
+  assert.equal(narrowed.outputTokens, 400);
+  assert.equal(narrowed.thinkingEffort, 'low');
 });
 
 test('output budgets fail explicitly when unsupported or invalid', () => {

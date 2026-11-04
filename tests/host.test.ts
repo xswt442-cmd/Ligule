@@ -244,7 +244,8 @@ test('a client over stdio drives one round, answers one approval and watches the
     const events = notifications.filter((message) => message.notify === 'event').map((message) => message.event);
     // 模式事件先记录本轮使用的工具清单。
     // 轮次完成事件跟在最后一条助手事件之后，且不会进入模型投影。
-    assert.deepEqual(events.map((event) => event.kind), ['sessionPermission', 'mode', 'user', 'turnContext', 'assistant', 'sessionPolicy', 'tool', 'assistant', 'turn']);
+    // 这个假端点一条用量都没报，所以每次请求仍留一条只有次数的用量记录。
+    assert.deepEqual(events.map((event) => event.kind), ['sessionPermission', 'mode', 'user', 'turnContext', 'usage', 'assistant', 'sessionPolicy', 'tool', 'usage', 'assistant', 'turn']);
     assert.equal(events.find((event) => event.kind === 'tool')!.result.content.text, 'the body', 'the tool result the client saw is the file content');
 
     // 客户端收到的事件与会话记录中的事件一致，通知也包含相同的序号。
@@ -350,7 +351,7 @@ test('a second Host process opens the same record, so the session lives in the H
       const reopened = await second.client.request('session.read', { sessionId }) as Recorded;
       assert.equal(reopened.sessionId, sessionId);
       // 第二个进程加载同一清单并读取记录，不应改变会话文件。
-      assert.deepEqual(reopened.events.map((event) => event.kind), ['sessionPermission', 'mode', 'user', 'turnContext', 'assistant', 'sessionPolicy', 'tool', 'assistant', 'turn']);
+      assert.deepEqual(reopened.events.map((event) => event.kind), ['sessionPermission', 'mode', 'user', 'turnContext', 'usage', 'assistant', 'sessionPolicy', 'tool', 'usage', 'assistant', 'turn']);
       assert.equal(reopened.events.find((event) => event.kind === 'tool')!.result.content.text, 'the body');
       const status = await second.client.request('status.get', { sessionId }) as Status;
       assert.equal(status.running, false);
@@ -1246,7 +1247,7 @@ test('config.set writes one whitelisted field and reports a concurrent edit inst
       assert.equal(user.exists, true);
       assert.equal(local.version, '', '那一份项目本机覆盖还没写过：版本是空串');
       assert.ok(!JSON.stringify(first.layers).includes(home), '帧里没有文件路径：那格只说层名与版本');
-      assert.deepEqual(first.sources, { 'model.api': 'user', 'model.model': 'user', 'model.baseURL': 'none', 'model.apiKeyEnv': 'none', 'model.services': 'none', 'model.selection': 'none', 'model.outputTokens': 'none', 'policy.mode': 'none', 'policy.rules': 'none', 'mcp.servers': 'none', 'reviewer.enabled': 'none', 'reviewer.api': 'none', 'reviewer.model': 'none', 'reviewer.baseURL': 'none', 'reviewer.apiKeyEnv': 'none', 'reviewer.maxInputTokens': 'none', 'reviewer.maxOutputTokens': 'none', 'reviewer.timeoutMs': 'none', 'reviewer.maxPerRun': 'none', 'reviewer.maxTotalTokens': 'none' }, '来源包含当前全部可写字段，未写的字段为 none');
+      assert.deepEqual(first.sources, { 'model.api': 'user', 'model.model': 'user', 'model.baseURL': 'none', 'model.apiKeyEnv': 'none', 'model.services': 'none', 'model.selection': 'none', 'model.outputTokens': 'none', 'policy.mode': 'none', 'policy.rules': 'none', 'mcp.servers': 'none', 'reviewer.enabled': 'none', 'reviewer.maxInputTokens': 'none', 'reviewer.maxOutputTokens': 'none', 'reviewer.timeoutMs': 'none', 'reviewer.maxPerRun': 'none', 'reviewer.maxTotalTokens': 'none' }, '来源包含当前全部可写字段，未写的字段为 none');
 
       const written = await connection.request('config.set', { field: 'model.model', value: '新的', layer: 'user', version: user.version }) as Write;
       assert.equal(written.created, false);

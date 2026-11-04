@@ -69,6 +69,32 @@ function isProcessGroupAlive(pid: unknown): boolean {
   }
 }
 
+/**
+ * Windows 上父进程退出后 PID 会被系统回收，进程组也不存在，只能靠 WMI 里仍然保留的
+ * `ParentProcessId` 找回后代。只收掉创建时间晚于本次启动的那些，避免误杀复用同一 PID 的无关进程。
+ */
+function stopWindowsDescendants(pid: number, spawnedAt: number): void {
+  const script = [
+    `$root = ${pid}`,
+    `$since = [DateTimeOffset]::FromUnixTimeMilliseconds(${spawnedAt})`,
+    '$all = @()',
+    '$frontier = @($root)',
+    'for ($i = 0; $i -lt 5; $i++) {',
+    '  $next = @()',
+    '  foreach ($parent in $frontier) {',
+    '    foreach ($child in (Get-CimInstance Win32_Process -Filter "ParentProcessId=$parent" -ErrorAction SilentlyContinue)) {',
+    '      if ($child.CreationDate -ge $since) { $next += $child.ProcessId; $all += $child.ProcessId }',
+    '    }',
+    '  }',
+    '  $frontier = $next',
+    '}',
+    'foreach ($target in $all) { Stop-Process -Id $target -Force -ErrorAction SilentlyContinue }',
+  ].join('; ');
+  try {
+    spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], { stdio: 'ignore', timeout: 20_000, windowsHide: true });
+  } catch { /* 清理是尽力而为：失败不应改变 Run 的结论 */ }
+}
+
 export async function runProcess(
   command: string,
   args: readonly string[],
@@ -81,6 +107,8 @@ export async function runProcess(
   },
 ): Promise<ProcessResult> {
   return new Promise((resolveRun) => {
+    // 记录启动时刻：Windows 上清理后代时用它把“本次的子进程”和复用同一 PID 的无关进程区分开。
+    const spawnedAt = Date.now();
     const child = spawn(command, [...args], {
       cwd,
       env,
@@ -100,6 +128,7 @@ export async function runProcess(
     let exitSignal: NodeJS.Signals | null = null;
     let exited = false;
     let drainTimer: NodeJS.Timeout | undefined;
+    let descendantTimer: NodeJS.Timeout | undefined;
     const append = (current: string, chunk: Buffer): string => {
       const next = current + chunk.toString('utf8');
       return next.length > maxBytes ? next.slice(next.length - maxBytes) : next;
@@ -110,6 +139,7 @@ export async function runProcess(
       if (settled) return;
       settled = true;
       if (drainTimer !== undefined) clearTimeout(drainTimer);
+      if (descendantTimer !== undefined) clearTimeout(descendantTimer);
       process.off('SIGINT', onInterrupt);
       process.off('SIGTERM', onInterrupt);
       resolveRun({ pid: child.pid, status, signal, stdout, stderr, timedOut, interrupted, terminationPending, ...(terminationError === undefined ? {} : { terminationError }), ...(error === undefined ? {} : { error }) });
@@ -157,9 +187,18 @@ export async function runProcess(
       // 进程已经退出，别再让它去 taskkill 一个可能被系统复用的 PID。
       clearTimeout(timer);
       // 父进程退出不代表后代退出：它们仍持有管道，可能继续消耗模型额度。
-      // 在 POSIX 上父进程是这个进程组的组长，按组收掉；Windows 上 PID 已失效，只能靠排空兜底。
-      if (process.platform !== 'win32' && child.pid !== undefined && isProcessGroupAlive(child.pid)) {
-        try { process.kill(-child.pid, 'SIGKILL'); } catch { /* the group is already gone */ }
+      // POSIX 上父进程是进程组组长，按组收掉；Windows 没有进程组，按 WMI 里的父子关系收掉。
+      if (child.pid !== undefined) {
+        if (process.platform === 'win32') {
+          // 正常退出的进程没有后代占管道，close 会很快触发；只有它还迟迟不来才值得启动一次
+          // PowerShell 去查父子关系，避免每次评测都多付一份进程启动开销。
+          descendantTimer = setTimeout(() => {
+            if (!settled && child.pid !== undefined) stopWindowsDescendants(child.pid, spawnedAt);
+          }, 250);
+          descendantTimer.unref();
+        } else if (isProcessGroupAlive(child.pid)) {
+          try { process.kill(-child.pid, 'SIGKILL'); } catch { /* the group is already gone */ }
+        }
       }
       // 进程已退出但管道可能仍被后代持有，close 因而永不触发：留一点排空时间后强制收口。
       drainTimer = setTimeout(() => {

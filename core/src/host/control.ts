@@ -977,6 +977,16 @@ export function createControl(host: Host, projectRoot: string, options: ControlO
         provisionalOutputError: result.provisionalOutputError ?? null,
       };
     },
+    async usage(sessionId: string) {
+      // 只读接口：仍然要求这个控制器拥有该会话，避免拿到别人的用量。
+      owned(sessionId);
+      const result = record(await tracked(host.handle({ method: 'usage.get', params: { sessionId } }, connection)));
+      if (result.summary === undefined || result.summary === null || typeof result.summary !== 'object') {
+        throw new KernelError('host_response_invalid');
+      }
+      return { sessionId, summary: result.summary as Record<string, unknown> };
+    },
+
     release(): Promise<void> {
       if (closing !== undefined) return closing;
       closing = (async () => {

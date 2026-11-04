@@ -2259,6 +2259,153 @@ test('/usage reads the Host aggregate and keeps the two accounts apart', options
     await waitFor(() => requests.some((request) => request.method === 'usage.get'), { read: () => strip(painted).slice(-700) });
     await waitFor(() => strip(painted).includes('主 Agent：暂无调用') && strip(painted).includes('复审：暂无调用'),
       { read: () => strip(painted).slice(-700) });
+    // 没有复审记录时不能凭空写“最近复审”。
+    assert.equal(strip(painted).includes('最近复审'), false, 'usage must not invent a review that never happened');
+  } finally {
+    instance.unmount();
+  }
+}));
+
+test('/usage says the log is unreadable instead of implying no review happened', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { App } = await import('../dist/tui/app.js');
+  const stdout = new PassThrough() as unknown as FakeOutput;
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
+  // 用量读得到、记录读不到：只有外控会话才会这样，界面必须报错而不是画成“没有复审”。
+  const blind = new Proxy(client as TuiClient, {
+    get(target, property, receiver) {
+      if (property === 'request') {
+        return (method: string, params?: unknown) => (method === 'session.read' || method === 'session.observe')
+          ? Promise.reject(Object.assign(new Error('no access'), { code: 'session_not_open' }))
+          : target.request(method as never, params as never);
+      }
+      return Reflect.get(target, property, receiver) as unknown;
+    },
+  });
+  const instance = render(createElement(App, {
+    client: blind, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const strip = (text: string) => text.replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '').replace(/[\r\n]+/g, '');
+  const lastFrame = () => completeFrame(painted);
+  try {
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
+    stdin.write('/usage');
+    await waitFor(() => lastFrame().includes('› /usage'), { within: 10_000, read: lastFrame });
+    stdin.write('\r');
+    await waitFor(() => strip(painted).includes('无法读取会话记录') && strip(painted).includes('session_not_open'),
+      { read: () => strip(painted).slice(-700) });
+    assert.equal(strip(painted).includes('最近复审：'), false, 'an unreadable log must not be drawn as a review that never happened');
+    assert.equal(strip(painted).includes('主 Agent：暂无调用'), true, 'the usage account still shows');
+  } finally {
+    instance.unmount();
+  }
+}));
+
+test('/usage pages back to a review that is older than the newest events', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { App } = await import('../dist/tui/app.js');
+  const stdout = new PassThrough() as unknown as FakeOutput;
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
+  // 外控会话：`session.read` 拿不到锁，`session.observe` 一页 400 条；复审落在更早的一页里。
+  const observed: (number | undefined)[] = [];
+  const review = { kind: 'policyReview', seq: 500, review: 'deny', reasonCode: 'review_external_write', evidenceSeqs: [3, 500, 501] };
+  const paged = new Proxy(client as TuiClient, {
+    get(target, property, receiver) {
+      if (property === 'request') {
+        return (method: string, params?: { before?: number }) => {
+          if (method === 'session.read') {
+            return Promise.reject(Object.assign(new Error('locked'), { code: 'session_not_open' }));
+          }
+          if (method === 'session.observe') {
+            observed.push(params?.before);
+            if (params?.before === undefined) {
+              const events = Array.from({ length: 400 }, (_unused, index) => ({ kind: 'tool', seq: 601 + index }));
+              return Promise.resolve({ sessionId, events });
+            }
+            if (params.before === 601) return Promise.resolve({ sessionId, events: [review, { kind: 'tool', seq: 499 }] });
+            return Promise.resolve({ sessionId, events: [] });
+          }
+          return target.request(method as never, params as never);
+        };
+      }
+      return Reflect.get(target, property, receiver) as unknown;
+    },
+  });
+  const instance = render(createElement(App, {
+    client: paged, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const strip = (text: string) => text.replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '').replace(/[\r\n]+/g, '');
+  const lastFrame = () => completeFrame(painted);
+  try {
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
+    stdin.write('/usage');
+    await waitFor(() => lastFrame().includes('› /usage'), { within: 10_000, read: lastFrame });
+    stdin.write('\r');
+    await waitFor(() => strip(painted).includes('最近复审：deny'), { read: () => strip(painted).slice(-700) });
+    assert.equal(strip(painted).includes('证据 3 条'), true, 'the review line carries its evidence count');
+    assert.deepEqual(observed, [undefined, 601], 'the command walks back one page to find the review');
+  } finally {
+    instance.unmount();
+  }
+}));
+
+test('/usage says the lookup stopped instead of claiming there was no review', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { App } = await import('../dist/tui/app.js');
+  const stdout = new PassThrough() as unknown as FakeOutput;
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
+  // 每页都没有复审，而且永远翻不到开头：只能报“没查完”，不能声称一次复审都没有。
+  const pages: (number | undefined)[] = [];
+  const paged = new Proxy(client as TuiClient, {
+    get(target, property, receiver) {
+      if (property === 'request') {
+        return (method: string, params?: { before?: number }) => {
+          if (method === 'session.read') {
+            return Promise.reject(Object.assign(new Error('locked'), { code: 'session_not_open' }));
+          }
+          if (method === 'session.observe') {
+            pages.push(params?.before);
+            const oldest = 100_000 - pages.length * 400;
+            const events = Array.from({ length: 400 }, (_unused, index) => ({ kind: 'tool', seq: oldest - index }));
+            return Promise.resolve({ sessionId, events });
+          }
+          return target.request(method as never, params as never);
+        };
+      }
+      return Reflect.get(target, property, receiver) as unknown;
+    },
+  });
+  const instance = render(createElement(App, {
+    client: paged, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const strip = (text: string) => text.replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '').replace(/[\r\n]+/g, '');
+  const lastFrame = () => completeFrame(painted);
+  try {
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
+    stdin.write('/usage');
+    await waitFor(() => lastFrame().includes('› /usage'), { within: 10_000, read: lastFrame });
+    stdin.write('\r');
+    await waitFor(() => strip(painted).includes('查询未完成'), { within: 20_000, read: () => strip(painted).slice(-700) });
+    assert.equal(strip(painted).includes('最近复审：'), false, '翻不到就不能画出一条“没有复审”的结论');
+    assert.equal(pages.length, 50, 'the command stops at the page cap instead of looping forever');
   } finally {
     instance.unmount();
   }

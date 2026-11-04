@@ -133,7 +133,8 @@ test('pressure over the line compacts once and the next request carries the summ
     assert.equal(sent.messages.at(-1)!.text, '再问一句', 'the input of this round is still there');
 
     const after = await readFile(join(directory, `${id}.jsonl`), 'utf8');
-    assert.equal(after.trim().split('\n').length, lines + 4, '这一轮加用户、助手、轮次完成与压缩事实那四条，块文件本身一条都不进日志');
+    // 本轮加用户、助手、轮次完成、压缩事实与一条“端点没报用量”的记录，块文件本身一条都不进日志。
+    assert.equal(after.trim().split('\n').length, lines + 5, 'the round adds its own events plus one unknown usage record and no block content');
     const numbers = logged.find((entry) => entry.message === 'session compacted') as unknown as { tokensBefore: number; tokensAfter: number };
     assert.ok(numbers.tokensBefore > numbers.tokensAfter, 'a summary removes more than it adds');
   });
@@ -440,10 +441,15 @@ test('the usage an endpoint reports lands in the record and never in the project
     assert.equal(usage.measurement, 'request-v1');
     // 投影里没有它的位置：它不是模型说过的话，也不是工具结果。
     assert.deepEqual((await session.modelView()).map((entry) => (entry as { role?: string }).role), ['user', 'assistant', 'user', 'assistant']);
-    // 一条都没报回时不再多写一条：0 不是「用量是零」，是「没说」。
+    // 一条都没报回时仍留一条未知记录：次数要算得清，数值保持 null，绝不当成 0。
     const before = (await session.read()).length;
     await compaction.observe({ messages } as unknown as LoopCompactionRequest, [{ type: 'text', text: 'no usage here' }]);
-    assert.equal((await session.read()).length, before);
+    const after = await session.read();
+    assert.equal(after.length, before + 1, 'a request without reported usage still leaves one record');
+    const unknown = after.at(-1) as Recorded;
+    assert.equal(unknown.kind, 'usage');
+    assert.equal(unknown.purpose, 'agent');
+    assert.deepEqual([unknown.input, unknown.output], [null, null], 'missing numbers stay unknown instead of becoming zero');
   });
 });
 

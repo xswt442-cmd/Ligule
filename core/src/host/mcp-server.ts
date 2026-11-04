@@ -281,6 +281,17 @@ const replyOutput = object({ requestId: id, sessionId: id, operationId: id, type
   decision: { type: 'string', enum: ['allow', 'deny'] }, answered: { type: 'integer' }, resolved: { type: 'boolean' },
   source: { type: 'string', enum: ['human', 'controller'] } },
 ['requestId', 'sessionId', 'operationId', 'type', 'resolved']);
+const usageBucket = object({
+  requests: { type: 'integer' },
+  input: { type: 'integer' },
+  output: { type: 'integer' },
+  cachedInput: { type: 'integer' },
+  uncachedInput: { type: ['integer', 'null'] },
+  estimatedInput: { type: 'integer' },
+  unknownInputRequests: { type: 'integer' },
+  unknownOutputRequests: { type: 'integer' },
+}, ['requests', 'input', 'output', 'cachedInput', 'uncachedInput', 'estimatedInput', 'unknownInputRequests', 'unknownOutputRequests']);
+
 const tools: Tool[] = [
   { name: 'ligule_session_create', description: 'Create a writable session in the authorized project. Returns its sessionId. At most 64 open sessions per server. Optional initial settings, including the per-turn loop limit, require --operator and are applied before the session is returned.',
     inputSchema: object({ projectRoot: root, initial: initialSettings }, ['projectRoot']), outputSchema: sessionOutput },
@@ -321,6 +332,11 @@ const tools: Tool[] = [
   { name: 'ligule_session_read', description: 'Read real persistent records, newest page first (records inside a page are chronological). Use nextBefore as before for older pages. Each json field is a record JSON fragment, at most 8192 UTF-16 characters. If nextOffset is non-null, call with at=that seq and offset=nextOffset until null, concatenating fragments before JSON.parse. at and before are exclusive. This preserves complete large records without unbounded responses.',
     inputSchema: object({ sessionId: id, limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 }, before: { type: 'integer', minimum: 1 }, at: { type: 'integer', minimum: 1 }, offset: { type: 'integer', minimum: 0, default: 0 } }, ['sessionId']),
     outputSchema: object({ sessionId: id, nextBefore: { type: ['integer', 'null'] }, hasMore: { type: 'boolean' }, provisionalOutput, provisionalOutputError: { type: ['string', 'null'] }, records: { type: 'array', maxItems: 50, items: object({ seq: { type: 'integer' }, kind: { type: 'string' }, json: { type: 'string', maxLength: 8192 }, offset: { type: 'integer' }, nextOffset: { type: ['integer', 'null'] }, totalCharacters: { type: 'integer' } }, ['seq', 'kind', 'json', 'offset', 'nextOffset', 'totalCharacters']) } }, ['sessionId', 'records', 'nextBefore', 'hasMore']) },
+  { name: 'ligule_usage_get', description: 'Read this session’s token usage, split into the agent account and the reviewer account. Every number is a partial sum of what the endpoints reported: requests counts every request, while input and output add up only the requests that reported a figure and may therefore read 0 on their own; unknownInputRequests and unknownOutputRequests count the requests that reported nothing, so treat a bucket as complete only when both are 0. cachedInput is the reported subset of input and uncachedInput stays null unless every request that reported input also reported a cache figure. Only the calling controller may read an owned session.',
+    inputSchema: object({ sessionId: id }, ['sessionId']),
+    outputSchema: object({ sessionId: id, summary: object({
+      agent: usageBucket, reviewer: usageBucket,
+    }, ['agent', 'reviewer']) }, ['sessionId', 'summary']) },
 ];
 
 interface Arguments {
@@ -464,6 +480,7 @@ export async function serveMcp({ projectRoot, version, flags = [], modeName, ope
         case 'ligule_run_await': result = await control.await(input.operationId!, input.timeoutMs ?? 60_000); break;
         case 'ligule_run_cancel': result = await control.cancel(input.operationId!); break;
         case 'ligule_session_read': result = await control.read(input.sessionId!, input.before, input.limit ?? 20, input.at, input.offset); break;
+  case 'ligule_usage_get': result = await control.usage(input.sessionId!); break;
         default: throw new KernelError('tool_unknown');
       }
       const outputValid = outputs.get(request.params.name)!(result);
