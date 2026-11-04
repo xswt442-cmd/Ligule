@@ -429,7 +429,10 @@ test('Desktop human input and question answers reach the single MCP-owned real H
       // 用量是只读汇总：没有配置复审时复审账必须为空，主 Agent 账要能读出来。
       const usage = await callTool(client, 'ligule_usage_get', { sessionId });
       assert.equal(usage.isError ?? false, false, JSON.stringify(usage));
-      const summary = usage.structuredContent.summary as { agent: { requests: number }; reviewer: { requests: number } };
+      const summary = (usage.structuredContent as unknown as {
+        summary?: { agent: { requests: number }; reviewer: { requests: number } };
+      }).summary;
+      assert.ok(summary !== undefined, 'usage.get 必须带回汇总');
       assert.equal(typeof summary.agent.requests, 'number');
       assert.equal(summary.reviewer.requests, 0, '没有配置复审时不应出现复审用量');
       const foreign = await callTool(client, 'ligule_usage_get', { sessionId: '00000000-0000-4000-8000-000000000000' });
