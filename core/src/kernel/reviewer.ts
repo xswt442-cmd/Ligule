@@ -70,7 +70,7 @@ export interface ReviewInput {
 }
 
 export type ReviewBuildResult =
-  | { readonly ok: true; readonly input: ReviewInput }
+  | { readonly ok: true; readonly input: ReviewInput; readonly includedSeqs: readonly number[] }
   | { readonly ok: false; readonly code: 'review_input_over_budget' | 'review_evidence_missing'; readonly estimatedInputTokens: number; readonly detail?: string };
 
 const SYSTEM_PROMPT = [
@@ -168,6 +168,17 @@ export function estimateTokens(text: string): number {
   return Math.ceil(narrow / 4 + wide / 1.5);
 }
 
+/** 只回报真正进入提示词的事件序号：预算丢了历史，审计就不能声称看过它们。 */
+function includedSeqsOf(facts: ReviewFacts, options: { readonly history: boolean }): readonly number[] {
+  const evidence = facts.evidence;
+  if (evidence === undefined) return [];
+  return [
+    ...evidence.constraints.map((item) => item.seq),
+    ...evidence.revoked.map((item) => item.seq),
+    ...(options.history ? evidence.history.map((item) => item.seq) : []),
+  ];
+}
+
 /**
  * 组装复审输入。预算不够时先丢掉历史（历史只是证据，不是授权），仍然不够就直接失败：
  * 绝不截断用户约束、压缩实参或改写授权来省 token。
@@ -188,14 +199,14 @@ export function buildReviewInput(facts: ReviewFacts, budget: { readonly maxInput
   const full = estimateTokens(system) + estimateTokens(withHistory);
   if (full <= budget.maxInputTokens) {
     const fingerprint = createHash('sha256').update(canonical({ tool: facts.tool, args: facts.args, command: facts.command })).digest('hex');
-    return { ok: true, input: { system, user: withHistory, fingerprint, inputVersion: REVIEW_INPUT_VERSION, estimatedInputTokens: full } };
+    return { ok: true, input: { system, user: withHistory, fingerprint, inputVersion: REVIEW_INPUT_VERSION, estimatedInputTokens: full }, includedSeqs: includedSeqsOf(facts, { history: true }) };
   }
   // 先只去掉历史，再判断是否仍然超预算。
   const withoutHistory = `${staticSection(facts)}\n\n${dynamicSection(facts, { history: false })}`;
   const trimmed = estimateTokens(system) + estimateTokens(withoutHistory);
   if (trimmed <= budget.maxInputTokens) {
     const fingerprint = createHash('sha256').update(canonical({ tool: facts.tool, args: facts.args, command: facts.command })).digest('hex');
-    return { ok: true, input: { system, user: withoutHistory, fingerprint, inputVersion: REVIEW_INPUT_VERSION, estimatedInputTokens: trimmed } };
+    return { ok: true, input: { system, user: withoutHistory, fingerprint, inputVersion: REVIEW_INPUT_VERSION, estimatedInputTokens: trimmed }, includedSeqs: includedSeqsOf(facts, { history: false }) };
   }
   return {
     ok: false,
@@ -290,8 +301,8 @@ function duplicateTopLevelKey(text: string): string | undefined {
   let depth = 0;
   let inString = false;
   let escaped = false;
-  let pending = '';
-  let collecting = false;
+  let raw = '';
+  let keyStart = -1;
   for (let index = 0; index < text.length; index += 1) {
     const character = text[index] as string;
     if (inString) {
@@ -299,23 +310,27 @@ function duplicateTopLevelKey(text: string): string | undefined {
       else if (character === '\\') escaped = true;
       else if (character === '"') {
         inString = false;
-        if (collecting && depth === 1) {
-          const key = pending;
-          collecting = false;
-          pending = '';
+        if (keyStart >= 0 && depth === 1) {
+          raw = text.slice(keyStart, index);
+          keyStart = -1;
           // 只有后面紧跟冒号的字符串才是键名。
-          const rest = text.slice(index + 1).trimStart();
-          if (rest.startsWith(':')) {
+          if (text.slice(index + 1).trimStart().startsWith(':')) {
+            // 解码后再比较：`"\\u0064ecision"` 与 `"decision"` 是同一个键。
+            let key = raw;
+            try {
+              const decoded: unknown = JSON.parse(`"${raw}"`);
+              if (typeof decoded === 'string') key = decoded;
+            } catch { /* 保留原文比较 */ }
             if (seen.has(key)) return key;
             seen.add(key);
           }
         }
-      } else if (collecting) pending += character;
+      }
       continue;
     }
     if (character === '"') {
       inString = true;
-      if (depth === 1) collecting = true;
+      if (depth === 1) keyStart = index + 1;
       continue;
     }
     if (character === '{' || character === '[') depth += 1;

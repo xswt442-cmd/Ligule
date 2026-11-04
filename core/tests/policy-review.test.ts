@@ -105,6 +105,28 @@ test('a verdict that arrives after the rules changed is discarded', async () => 
   chain = built;
   const verdict = await built.evaluate(interpreterCall);
   assert.notEqual(verdict.decision, 'allow', '规则收紧后旧结论必须作废');
-  assert.equal(asked.length, 1, '作废后回到人工审批');
+  // 作废不是忽略：等待期间新增的 deny 必须当场生效，而不是退回可被批准的路径。
+  assert.equal(verdict.decision, 'deny', 'waiting for the reviewer must not skip a new deny rule');
+  assert.equal(verdict.rule, 'python3 *');
+  assert.equal(asked.length, 0, 'a matching deny does not need to ask the human');
+  assert.equal(verdict.review, undefined);
+});
+
+test('a verdict with an unrelated rule change still falls back to the human', async () => {
+  const asked: PolicyQuestion[] = [];
+  let chain: ReturnType<typeof createDecisionChain> | undefined;
+  const built = createDecisionChain({
+    mode: 'auto',
+    ask: async (question) => { asked.push(question); return false; },
+    review: async () => {
+      // 收紧的规则与这一次调用无关：结论作废，但不必由它来拒绝。
+      chain?.setRules([{ tool: 'exec', decision: 'deny', match: 'rm -rf *' }]);
+      return { decision: 'allow', reasonCode: 'read_only_python', fingerprint: 'f', inputVersion: 2 };
+    },
+  });
+  chain = built;
+  const verdict = await built.evaluate(interpreterCall);
+  assert.equal(verdict.decision, 'deny');
+  assert.equal(asked.length, 1, 'an unrelated change drops the review and asks the human');
   assert.equal(verdict.review, undefined);
 });

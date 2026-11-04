@@ -71,7 +71,7 @@ test('a later narrowing of permission is recorded as withdrawn evidence', async 
     user(2, '可以联网查资料。'),
     { kind: 'sessionPermission', seq: 4, profile: 'full-access', network: 'unrestricted' },
     { kind: 'sessionPermission', seq: 6, profile: 'workspace-write', network: 'restricted' },
-    { kind: 'sessionPolicyRule', seq: 8, tool: 'exec', decision: 'deny', match: 'curl *' },
+    { kind: 'sessionPolicyRule', seq: 8, rule: { tool: 'exec', decision: 'deny', match: 'curl *' } },
   ];
   const evidence = await selectReviewEvidence(sessionOf(events), { tool: 'exec' });
   assert.deepEqual(evidence?.revoked.map((item) => item.seq), [6, 8]);
@@ -133,4 +133,17 @@ test('history is dropped first when the input does not fit the budget', async ()
   if (!tight.ok) return;
   assert.doesNotMatch(tight.input.user, /<relatedActions/u, '预算不足时先丢历史，不丢约束');
   assert.match(tight.input.user, /只允许读取这个目录/u);
+  // 审计只能声称看过真正送进提示词的事件。
+  assert.deepEqual([...tight.includedSeqs], [2], 'budget-dropped history must not be claimed as evidence');
+  assert.deepEqual([...wide.includedSeqs], [2, 10, 11, 12], 'the wide prompt keeps the history it sent');
+});
+
+test('lowering write access to read-only counts as withdrawn evidence too', async () => {
+  const events: Event[] = [
+    user(2, '可以写工作区。'),
+    { kind: 'sessionPermission', seq: 4, profile: 'workspace-write', network: 'policy' },
+    { kind: 'sessionPermission', seq: 6, profile: 'read-only', network: 'policy' },
+  ];
+  const evidence = await selectReviewEvidence(sessionOf(events), { tool: 'exec' });
+  assert.deepEqual(evidence?.revoked.map((item) => item.seq), [6], 'workspace-write to read-only is a narrowing');
 });

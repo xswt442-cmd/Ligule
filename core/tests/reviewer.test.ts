@@ -84,6 +84,8 @@ test('the reply parser accepts exactly one JSON object and nothing else', () => 
   assert.equal(parseReviewReply('["allow"]').ok, false);
   // 重复键、未知字段、不合规的 reasonCode 一律拒绝，不做静默降级。
   assert.equal(parseReviewReply('{"decision":"allow","decision":"deny"}').ok, false);
+  // 转义写法的键名解码后是同一个键：`\u0064ecision` 就是 `decision`，不能借转义绕过去。
+  assert.equal(parseReviewReply('{"decision":"allow","\\u0064ecision":"deny"}').ok, false, 'an escaped duplicate key is still a duplicate');
   assert.equal(parseReviewReply('{"decision":"allow","extra":1}').ok, false);
   assert.equal(parseReviewReply('{"decision":"ask-human","reasonCode":"NOT VALID!"}').ok, false);
   // 缺 reasonCode 时用固定值，而不是把模型原文当代码使用。

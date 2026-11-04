@@ -127,6 +127,8 @@ export interface PolicyReviewRecord {
   readonly fingerprint?: string;
   readonly inputVersion?: number;
   readonly reason?: string;
+  /** 实际进入复审提示词的事件序号；预算丢掉的历史不在其中。 */
+  readonly includedSeqs?: readonly number[];
 }
 
 export type PolicyReviewOutcome = PolicyReviewRecord;
@@ -594,6 +596,10 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         if (outcome !== undefined && (current !== modeSignature || JSON.stringify(currentRules) !== rulesSignature)) {
           // 过期结论必须作废：回到确定性与人工审批路径，而不是拿旧判定放行或拒绝。
           outcome = undefined;
+          // 作废不等于忽略新规则：等待期间新增的 deny 要当场生效，否则会落到可被批准的分支。
+          const added = currentRules.find((item) => item.decision === 'deny'
+            && (matches(command, item.match) || (segments ?? []).some((segment) => matches(segment, item.match))));
+          if (added !== undefined) return refuse('policy_denied', 'rule', added.reason ?? '等待复审期间规则表收紧了这一次调用', added.match);
         }
         if (outcome !== undefined && outcome.decision === 'allow') {
           recordApproval();

@@ -236,6 +236,7 @@ export function createSessionReviewer({ settings, provider, factsOf, logger, onU
       reasonCode: parsed.reasonCode,
       fingerprint: built.input.fingerprint,
       inputVersion: built.input.inputVersion,
+      includedSeqs: built.includedSeqs,
       ...(parsed.reason === undefined ? {} : { reason: parsed.reason }),
     };
     logger?.('reviewer decided', { decision: record.decision, reasonCode: record.reasonCode, fingerprint: record.fingerprint });

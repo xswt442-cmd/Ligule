@@ -44,6 +44,10 @@ function summarizeToolParams(params: unknown): string {
  * 从原始记录里挑出复审需要的证据。读取失败返回 `undefined`：调用方应保留上一份快照，
  * 而不是把“读不出来”当成“没有约束”。
  */
+/** 权限等级：数值越大越宽松；只用于判断“这一次是不是收紧”。 */
+const PROFILE_LEVEL: Record<string, number> = { 'read-only': 0, 'workspace-write': 1, 'full-access': 2 };
+const NETWORK_LEVEL: Record<string, number> = { disabled: 0, policy: 1, unrestricted: 2 };
+
 export async function selectReviewEvidence(
   session: SessionLog,
   options: ReviewEvidenceOptions = {},
@@ -77,10 +81,15 @@ export async function selectReviewEvidence(
     if (kind === 'sessionPermission') {
       const profile = event.profile;
       const network = event.network;
-      // 权限降档就是一次可机器判定的“撤销”：早期允许联网的约束在这里被收紧。
+      // 权限降档就是一次可机器判定的“撤销”：按等级比较，workspace-write → read-only 也算收紧。
+      const lowered = (rank: Record<string, number>, before: unknown, after: unknown): boolean => {
+        const from = typeof before === 'string' ? rank[before] : undefined;
+        const to = typeof after === 'string' ? rank[after] : undefined;
+        return from !== undefined && to !== undefined && to < from;
+      };
       const narrowed = previousPermission !== undefined
-        && ((previousPermission.network === 'unrestricted' && network !== 'unrestricted')
-          || (previousPermission.profile === 'full-access' && profile !== 'full-access'));
+        && (lowered(NETWORK_LEVEL, previousPermission.network, network)
+          || lowered(PROFILE_LEVEL, previousPermission.profile, profile));
       if (narrowed) {
         revoked.push({ seq, source: 'permission', text: `permission narrowed to profile=${String(profile)} network=${String(network)}` });
       }
@@ -88,11 +97,15 @@ export async function selectReviewEvidence(
       continue;
     }
     if (kind === 'sessionPolicyRule') {
-      if (event.decision === 'deny') {
+      // 记录里规则嵌在 `rule` 对象下（见 session/format.ts 的 sessionPolicyRule 校验）。
+      const rule = typeof event.rule === 'object' && event.rule !== null && !Array.isArray(event.rule)
+        ? event.rule as Record<string, unknown>
+        : undefined;
+      if (rule?.decision === 'deny') {
         revoked.push({
           seq,
           source: 'policy',
-          text: `rule ${String(event.tool)}${typeof event.match === 'string' ? ` match=${event.match}` : ''} denies`,
+          text: `rule ${String(rule.tool)}${typeof rule.match === 'string' ? ` match=${rule.match}` : ''} denies`,
         });
       }
       continue;

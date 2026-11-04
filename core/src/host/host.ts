@@ -1923,14 +1923,8 @@ export function createHost({
           reasonCode: outcome.reasonCode,
           make: 'session-reviewer',
           durationMs: Date.now() - startedAt,
-          // 证据来源可回查：审计里留下这次判定用到的原始事件序号。
-          ...(state.reviewEvidence === undefined ? {} : {
-            evidenceSeqs: [
-              ...state.reviewEvidence.constraints.map((item) => item.seq),
-              ...state.reviewEvidence.revoked.map((item) => item.seq),
-              ...state.reviewEvidence.history.map((item) => item.seq),
-            ],
-          }),
+          // 证据来源可回查：只记真正送进提示词的序号，预算丢掉的历史不冒领。
+          ...(outcome.includedSeqs === undefined || outcome.includedSeqs.length === 0 ? {} : { evidenceSeqs: [...outcome.includedSeqs] }),
           ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
         });
       } catch (error) {
