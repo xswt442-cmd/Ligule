@@ -39,7 +39,7 @@ test('a usable reply becomes a recorded allow with its fingerprint', async () =>
     provider: () => providerOf([
       { type: 'text', text: '{"decision":"allow","reasonCode":"read_only_python","reason":"只读取文件。"}' },
       { type: 'usage', input: 150, output: 20 },
-      { type: 'finish' },
+      { type: 'finish', reason: 'stop' },
     ]),
     factsOf: () => facts,
   });
@@ -56,7 +56,7 @@ test('a usable reply becomes a recorded allow with its fingerprint', async () =>
 
 test('every unusable reply turns into ask-human instead of an approval', async () => {
   const invalid = createSessionReviewer({
-    settings, provider: () => providerOf([{ type: 'text', text: 'sure, go ahead' }]), factsOf: () => facts,
+    settings, provider: () => providerOf([{ type: 'text', text: 'sure, go ahead' }, { type: 'finish', reason: 'stop' }]), factsOf: () => facts,
   });
   const unusable = await invalid.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
   assert.equal(unusable.decision, 'ask-human');
@@ -65,7 +65,7 @@ test('every unusable reply turns into ask-human instead of an approval', async (
   assert.equal(invalid.usage().failures, 1);
 
   const truncated = createSessionReviewer({
-    settings, provider: () => providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"' }]), factsOf: () => facts,
+    settings, provider: () => providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"' }, { type: 'finish', reason: 'stop' }]), factsOf: () => facts,
   });
   const cut = await truncated.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
   assert.equal(cut.decision, 'ask-human');
@@ -110,7 +110,7 @@ test('a failing or hanging provider reports ask-human and keeps counting failure
 test('the per-run budget and the input budget stop calls before they are made', async () => {
   const reviewer = createSessionReviewer({
     settings,
-    provider: () => providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }]),
+    provider: () => providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }, { type: 'finish', reason: 'stop' }]),
     factsOf: () => facts,
   });
   assert.equal((await reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined })).decision, 'allow');
@@ -138,7 +138,7 @@ test('the reviewer reports its own usage once, whatever the endpoint says', asyn
     provider: () => providerOf([
       { type: 'text', text: '{"decision":"allow","reasonCode":"read_only_python"}' },
       { type: 'usage', input: 80, output: 5 },
-      { type: 'finish' },
+      { type: 'finish', reason: 'stop' },
     ]),
     factsOf: () => facts,
     onUsage: (event) => { recorded.push(event as { purpose?: string; input?: number | null; output?: number | null }); },
@@ -156,7 +156,7 @@ test('the reviewer reports its own usage once, whatever the endpoint says', asyn
 test('a reply without usage still counts the estimate exactly once', async () => {
   const reviewer = createSessionReviewer({
     settings: { ...settings, maxTotalTokens: 40_000 },
-    provider: () => providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }, { type: 'finish' }]),
+    provider: () => providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }, { type: 'finish', reason: 'stop' }]),
     factsOf: () => facts,
   });
   const first = await reviewer.review({ tool: 'exec', input: facts.args, command: 'python3 script.py', policy: 'auto', reason: undefined });
@@ -172,7 +172,7 @@ test('a reply without usage still counts the estimate exactly once', async () =>
 test('the per-run limit is reset by beginRun, not exhausted by the whole session', async () => {
   const reviewer = createSessionReviewer({
     settings: { ...settings, maxPerRun: 1 },
-    provider: () => providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }]),
+    provider: () => providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }, { type: 'finish', reason: 'stop' }]),
     factsOf: () => facts,
   });
   assert.equal((await reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined })).decision, 'allow');
@@ -191,7 +191,7 @@ test('output tokens count against the total budget, not just the input', async (
     provider: () => providerOf([
       { type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' },
       { type: 'usage', input: 100, output: 5_000 },
-      { type: 'finish' },
+      { type: 'finish', reason: 'stop' },
     ]),
     factsOf: () => facts,
   });
@@ -205,7 +205,7 @@ test('a request whose endpoint reports nothing still shows up with unknown count
   const recorded: { purpose?: string; input?: number | null; output?: number | null }[] = [];
   const reviewer = createSessionReviewer({
     settings,
-    provider: () => providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }, { type: 'finish' }]),
+    provider: () => providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }, { type: 'finish', reason: 'stop' }]),
     factsOf: () => facts,
     onUsage: (event) => { recorded.push(event as { purpose?: string; input?: number | null; output?: number | null }); },
   });
@@ -256,7 +256,7 @@ test('every review asks the host for the current session route', async () => {
         name,
         stream: async function* () {
           yield { type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' } as never;
-          yield { type: 'finish' } as never;
+          yield { type: 'finish', reason: 'stop' } as never;
         },
       } as unknown as ModelProvider;
     },
@@ -276,7 +276,7 @@ test('a pending review holds its budget so a parallel one cannot overspend', asy
       await gate;
       yield { type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' } as never;
       yield { type: 'usage', input: 1, output: 1 } as never;
-      yield { type: 'finish' } as never;
+      yield { type: 'finish', reason: 'stop' } as never;
     },
   } as unknown as ModelProvider;
   const reviewer = createSessionReviewer({
@@ -292,6 +292,41 @@ test('a pending review holds its budget so a parallel one cannot overspend', asy
   release?.();
   assert.equal((await first).decision, 'allow');
 });
+
+test('only a reply that finished with stop may become a verdict', async () => {
+  const cases = [
+    { name: 'length', events: [{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }, { type: 'finish', reason: 'length' }], code: 'review_reply_truncated' },
+    { name: 'max_tokens', events: [{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }, { type: 'finish', reason: 'max_tokens' }], code: 'review_reply_truncated' },
+    // 结束原因是 tool_calls，但流里没有工具调用事件：同样不能当成裁决。
+    { name: 'tool_calls', events: [{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }, { type: 'finish', reason: 'tool_calls' }], code: 'review_reply_invalid' },
+    // 流直接结束，没有任何 finish：回复可能被拦腰截断。
+    { name: 'no finish', events: [{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }], code: 'review_incomplete' },
+  ] as const;
+  for (const item of cases) {
+    const recorded: unknown[] = [];
+    // 用量事件按真实 Provider 的顺序放在结束事件之前。
+    const events: unknown[] = [...item.events];
+    events.splice(events.length - 1, 0, { type: 'usage', input: 120, output: 9 });
+    const reviewer = createSessionReviewer({
+      settings,
+      provider: () => providerOf(events),
+      factsOf: () => facts,
+      onUsage: (event) => recorded.push(event),
+    });
+    const outcome = await reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
+    assert.equal(outcome.decision, 'ask-human', `${item.name} 不能变成自动放行`);
+    assert.equal(outcome.reasonCode, item.code, `${item.name} 要报出为什么转人工`);
+    // 用量照记：被截断的回复也真的花了钱。
+    assert.equal(recorded.length, 1, `${item.name} 仍要留下真实用量`);
+    assert.equal((recorded[0] as { purpose?: string }).purpose, 'reviewer');
+    assert.equal((recorded[0] as { input?: number }).input, 120);
+    assert.equal((recorded[0] as { output?: number }).output, 9);
+    assert.equal(reviewer.usage().inputTokens, 120);
+    assert.equal(reviewer.usage().outputTokens, 9);
+    assert.equal(reviewer.usage().failures, 1);
+  }
+});
+
 
 test('a route that fails before the request never spends budget', async () => {
   const reviewer = createSessionReviewer({

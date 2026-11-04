@@ -183,6 +183,10 @@ export function createSessionReviewer({ settings, provider, factsOf, logger, onU
     let text = '';
     let reasoned = false;
     let toolCall: string | undefined;
+    // 只有明确收到 finish.reason === 'stop' 才算完整说完。截断、触顶、工具调用中止或流直接结束
+    // 都意味着回复后半段可能缺失，绝不能把这样的文本当成裁决使用。
+    let finishReason: string | undefined;
+    let finished = false;
     // 端点用量要按用途记账：先收集本次复审的全部流事件，结束后写成 purpose=reviewer 的用量事件。
     const collected: unknown[] = [];
     try {
@@ -203,7 +207,11 @@ export function createSessionReviewer({ settings, provider, factsOf, logger, onU
           toolCall = event.name;
           break;
         }
-        if (event.type === 'finish') break;
+        if (event.type === 'finish') {
+          finishReason = event.reason;
+          finished = true;
+          break;
+        }
       }
     } catch (error) {
       failures += 1;
@@ -223,6 +231,20 @@ export function createSessionReviewer({ settings, provider, factsOf, logger, onU
       failures += 1;
       logger?.('reviewer tried to call a tool', { tool: toolCall });
       return askHuman('review_reply_invalid', '复审返回了工具调用，转人工审批。');
+    }
+    // 用量已经记完再判完整性：被截断的回复也要留下这一次真实消耗。
+    if (!finished) {
+      failures += 1;
+      logger?.('reviewer reply had no finish event');
+      return askHuman('review_incomplete', '复审回复没有正常结束（缺少结束事件），转人工审批。');
+    }
+    if (finishReason !== 'stop') {
+      failures += 1;
+      const truncated = finishReason === 'length' || finishReason === 'max_tokens';
+      logger?.('reviewer reply ended early', { reason: finishReason });
+      return askHuman(truncated ? 'review_reply_truncated' : 'review_reply_invalid', truncated
+        ? `复审回复被截断（结束原因 ${finishReason}），转人工审批。`
+        : `复审回复没有正常完成（结束原因 ${finishReason}），转人工审批。`);
     }
     if (reasoned) logger?.('reviewer returned reasoning text');
     const parsed = parseReviewReply(text);
