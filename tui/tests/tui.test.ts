@@ -2234,6 +2234,36 @@ test('/think explains when the selected model declares no thinking levels', opti
   }
 }));
 
+test('/usage reads the Host aggregate and keeps the two accounts apart', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory, requests }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { App } = await import('../dist/tui/app.js');
+  const stdout = new PassThrough() as unknown as FakeOutput;
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
+  const instance = render(createElement(App, {
+    client: client as TuiClient, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const strip = (text: string) => text.replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '').replace(/[\r\n]+/g, '');
+  const lastFrame = () => completeFrame(painted);
+  try {
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
+    stdin.write('/usage');
+    await waitFor(() => lastFrame().includes('› /usage'), { within: 10_000, read: lastFrame });
+    stdin.write('\r');
+    // 界面只呈现 Host 的只读汇总：新会话里两份账都还没有调用。
+    await waitFor(() => requests.some((request) => request.method === 'usage.get'), { read: () => strip(painted).slice(-700) });
+    await waitFor(() => strip(painted).includes('主 Agent：暂无调用') && strip(painted).includes('复审：暂无调用'),
+      { read: () => strip(painted).slice(-700) });
+  } finally {
+    instance.unmount();
+  }
+}));
+
 test('a narrow terminal keeps a pending approval operable when the settings line is already covered', options, async (t) => {
   const permission = await measuredPermissionContext('full-access', 'unrestricted');
   if (permission.capabilities.process !== 'full') return t.skip('the platform process ownership backend is unavailable');

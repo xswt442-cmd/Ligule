@@ -28,7 +28,7 @@ import { activeRunBudgetSegment, buildStatusLine, contextSegment } from './statu
 import { controlPresets, textOf as chooseText, type Locale } from '@ligule/core/tui.js';
 import type { TerminalAction } from './keymap.js';
 import { controlGrantRequest, parseControlWizardInput, type ControlWizard, type ControlWizardValues } from './control-wizard.js';
-import type { AskAnswer, AskQuestion, Connection, HostRequest, SessionEvent, SessionHeader, SessionSummary } from '@ligule/core/tui.js';
+import type { AskAnswer, AskQuestion, Connection, HostRequest, SessionEvent, SessionHeader, SessionSummary, UsageBucket, UsageSummary } from '@ligule/core/tui.js';
 import type { TemplateCommand } from './commands.js';
 import type { EditorOutcome } from './editor.js';
 import type { SavedInput } from './input-store.js';
@@ -375,6 +375,7 @@ interface TuiRequestResults {
   readonly 'run.start': LoopResult;
   readonly 'run.cancel': { readonly cancelled: boolean };
   readonly 'status.get': TuiStatus;
+  readonly 'usage.get': { readonly sessionId: string; readonly summary: UsageSummary };
   readonly 'permission.set': { readonly sessionId: string; readonly permission: NonNullable<TuiStatus['permission']>; readonly applies: 'now' | 'unchanged' };
   readonly 'model.select': { readonly model: string | null; readonly serviceId: string; readonly when: 'now' | 'round' };
   readonly 'session.configure': { readonly applies: 'now' | 'next_round' | 'unchanged'; readonly [key: string]: unknown };
@@ -2269,6 +2270,40 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         push({ kind: 'meta', text: current === null ? t('无法读取状态', 'Could not read status')
           : t(`工具模式 ${current.mode ?? '-'} · 审批 ${current.policy} · 连续拒绝 ${current.denials.consecutive} / 累计 ${current.denials.total} · ${current.eventCount} 条记录`, `Mode ${current.mode ?? '-'} · approvals ${current.policy} · denials ${current.denials.consecutive} consecutive / ${current.denials.total} total · ${current.eventCount} events`)
             + permission + (context === '' ? '' : ` · ${context}`) + task });
+      })();
+      return;
+    }
+    if (name === 'usage') {
+      // 用量按用途分开读：主机返回只读聚合，TUI 不自己累加事件。
+      void (async () => {
+        const measured = await client.request('usage.get', { sessionId })
+          .catch((error: unknown) => requestFailure(error, 'usage_read_failed'));
+        if (measured === null || typeof measured !== 'object' || 'code' in measured) {
+          const code = measured !== null && typeof measured === 'object' && 'code' in measured
+            ? String((measured as { code: unknown }).code) : 'usage_read_failed';
+          push({ kind: 'error', text: t(`无法读取用量：${code}`, `Could not read usage: ${code}`) });
+          return;
+        }
+        const summary = (measured as { summary?: UsageSummary }).summary;
+        if (summary === undefined) {
+          push({ kind: 'error', text: t('无法读取用量：返回里没有汇总', 'Could not read usage: the reply has no summary') });
+          return;
+        }
+        const line = (label: string, bucket: UsageBucket): string => {
+          if (bucket.requests === 0) return t(`${label}：暂无调用`, `${label}: no calls yet`);
+          const input = bucket.unknownInputRequests === 0
+            ? t(`输入 ${bucket.input}`, `input ${bucket.input}`)
+            : t(`输入未知（${bucket.unknownInputRequests} 次未报）`, `input unknown (${bucket.unknownInputRequests} unreported)`);
+          const output = bucket.unknownOutputRequests === 0
+            ? t(`输出 ${bucket.output}`, `output ${bucket.output}`)
+            : t(`输出未知（${bucket.unknownOutputRequests} 次未报）`, `output unknown (${bucket.unknownOutputRequests} unreported)`);
+          const cached = bucket.cachedInput === 0 ? '' : t(`，其中缓存 ${bucket.cachedInput}`, ` (${bucket.cachedInput} cached)`);
+          return t(`${label}：${bucket.requests} 次请求，${input}${cached}，${output}`, `${label}: ${bucket.requests} calls, ${input}${cached}, ${output}`);
+        };
+        push({ kind: 'meta', text: [
+          line(t('主 Agent', 'Agent'), summary.agent),
+          line(t('复审', 'Reviewer'), summary.reviewer),
+        ].join('\n') });
       })();
       return;
     }
