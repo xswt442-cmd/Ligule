@@ -264,7 +264,7 @@ function reviewRuleOf(rule: PolicyRule, source: 'session' | 'config'): NonNullab
 interface HostSessionBase {
   taskBudget?: TaskBudget;
   lastTask?: ReturnType<TaskBudget['snapshot']>;
-  /** 复审装配用的可信证据快照（带事件 seq），不参与主 Agent 投影；读取失败时保留上一份。 */
+  /** 复审装配用的可信证据快照（带事件 seq），不参与主 Agent 投影；读取失败时清空并转人工。 */
   reviewEvidence?: ReviewEvidence;
   /** 配置启用时才存在；未启用时 `auto` 行为与 P9.5 完全一致。 */
   reviewer?: SessionReviewer;

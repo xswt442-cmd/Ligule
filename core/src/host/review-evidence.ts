@@ -70,8 +70,8 @@ function summarizeToolParams(params: unknown): string {
 }
 
 /**
- * 从原始记录里挑出复审需要的证据。读取失败返回 `undefined`：调用方应保留上一份快照，
- * 而不是把“读不出来”当成“没有约束”。
+ * 从原始记录里挑出复审需要的证据。读取失败返回 `undefined`：调用方必须放弃自动放行，
+ * 绝不能沿用上一份快照，也不能把“读不出来”当成“没有约束”。
  */
 /** 权限等级：数值越大越宽松；只用于判断“这一次是不是收紧”。 */
 const PROFILE_LEVEL: Record<string, number> = { 'read-only': 0, 'workspace-write': 1, 'full-access': 2 };
@@ -113,6 +113,10 @@ export function inactiveGrantOutcome(): InactiveGrantOutcome {
   };
 }
 
+/**
+ * 从原始记录里挑出复审需要的证据。读取失败返回 `undefined`：调用方必须放弃自动放行，
+ * 绝不能沿用上一份快照，也不能把“读不出来”当成“没有约束”。
+ */
 export async function selectReviewEvidence(
   session: SessionLog,
   options: ReviewEvidenceOptions = {},
@@ -128,7 +132,6 @@ export async function selectReviewEvidence(
   const constraints: EvidenceItem[] = [];
   const revoked: EvidenceItem[] = [];
   const history: EvidenceItem[] = [];
-  let task: EvidenceItem | undefined;
   let previousPermission: { profile?: unknown; network?: unknown } | undefined;
 
   for (const event of events) {
@@ -142,7 +145,6 @@ export async function selectReviewEvidence(
       // 不能和人类禁令并列为授权事实。
       const item: EvidenceItem = { seq, source: constraintSource(event), text };
       constraints.push(item);
-      task = item;
       continue;
     }
     if (kind === 'sessionPermission') {
@@ -195,10 +197,5 @@ export async function selectReviewEvidence(
     const last = events.reduce<number | undefined>((found, event) => seqOf(event) ?? found, undefined);
     revoked.push({ seq: last ?? 0, source: 'grant', text: 'the operator grant is not active' });
   }
-  return {
-    constraints,
-    revoked,
-    history,
-    ...(task === undefined ? {} : { task }),
-  };
+  return { constraints, revoked, history };
 }

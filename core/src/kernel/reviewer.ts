@@ -30,8 +30,6 @@ export interface ReviewEvidence {
   readonly revoked: readonly EvidenceItem[];
   /** 与待决调用相关的执行历史。 */
   readonly history: readonly EvidenceItem[];
-  /** 当前任务：最后一条用户原文。 */
-  readonly task?: EvidenceItem;
 }
 
 export interface ReviewFacts {
