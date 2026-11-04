@@ -1246,7 +1246,7 @@ test('config.set writes one whitelisted field and reports a concurrent edit inst
       assert.equal(user.exists, true);
       assert.equal(local.version, '', '那一份项目本机覆盖还没写过：版本是空串');
       assert.ok(!JSON.stringify(first.layers).includes(home), '帧里没有文件路径：那格只说层名与版本');
-      assert.deepEqual(first.sources, { 'model.api': 'user', 'model.model': 'user', 'model.baseURL': 'none', 'model.apiKeyEnv': 'none', 'model.services': 'none', 'model.selection': 'none', 'model.outputTokens': 'none', 'policy.mode': 'none', 'policy.rules': 'none', 'mcp.servers': 'none' }, '来源包含当前全部可写字段，未写的字段为 none');
+      assert.deepEqual(first.sources, { 'model.api': 'user', 'model.model': 'user', 'model.baseURL': 'none', 'model.apiKeyEnv': 'none', 'model.services': 'none', 'model.selection': 'none', 'model.outputTokens': 'none', 'policy.mode': 'none', 'policy.rules': 'none', 'mcp.servers': 'none', 'reviewer.enabled': 'none', 'reviewer.api': 'none', 'reviewer.model': 'none', 'reviewer.baseURL': 'none', 'reviewer.apiKeyEnv': 'none', 'reviewer.maxInputTokens': 'none', 'reviewer.maxOutputTokens': 'none', 'reviewer.timeoutMs': 'none', 'reviewer.maxPerRun': 'none', 'reviewer.maxTotalTokens': 'none' }, '来源包含当前全部可写字段，未写的字段为 none');
 
       const written = await connection.request('config.set', { field: 'model.model', value: '新的', layer: 'user', version: user.version }) as Write;
       assert.equal(written.created, false);
