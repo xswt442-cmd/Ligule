@@ -268,6 +268,8 @@ export default function reviewHint(host) {
 
 需要时可以在用户或项目配置里增加 `[reviewer]` 表启用「复审」：它默认关闭，只在 `auto` 且确定性策略认不出命令形状时，把这一次调用交给一个独立的模型做一次只读判断。可用键为 `enabled`（必须是 `true` 才启用）、`model`、`baseURL`、`api`（`messages` 或 `chat-completions`）、`apiKeyEnv`，以及预算键 `maxInputTokens`（默认 2000）、`maxOutputTokens`（默认 400）、`timeoutMs`（默认 20000）、`maxPerRun`（默认 8）、`maxTotalTokens`（默认 40000）。复审只能回答 `allow`、`deny` 或 `ask-human`：`deny` 与 `ask-human` 都不执行，超时、超预算、请求失败或回复不合规一律转人工审批，绝不当成放行；规则拒绝、规则要求审批、系统硬拒绝、强制人审、私有网络与外部访问永远不会交给模型改判。每次复审的结论、原因码与耗时写入会话 JSONL 的 `policyReview` 事件（标为可跳过，不进入模型上下文）。没有 `[reviewer]` 表或 `enabled` 不为真时，`auto` 的行为与之前完全一致。
 
+终端界面用 `/usage` 查看本会话的 Token 用量，主 Agent 与复审分开显示。缓存命中是输入的子集，不会重复计入输入；端点没有报回的输入或输出显示为未知，而不是记成 0。桌面端与外部控制可以读取同一份汇总（Host 的 `usage.get`），不需要各自再算一遍。
+
 Permission 单独控制会话可访问的操作系统资源，Policy 决定允许的操作是否需要审批或必须拒绝。在 TUI 输入 `/permission`，或在桌面版输入区打开权限菜单，可以查看和更改当前会话的 Permission；新会话也可在发送第一条消息前选择文件/命令档位与网络模式。`read-only` 禁止文件工具写入；`workspace-write` 允许文件工具在配置的路径边界内写入；`full-access` 放宽命令的操作系统隔离，启用时需要再次确认。内置文件工具仍受路径边界约束。网络也单独设置为 `policy`、`disabled` 或 `unrestricted`；不受限网络需要再次确认。新会话创建时由 Host 应用所选档位；需要确认的升档由 Host 校验并记录可信界面的确认来源。Permission 状态显示平台的文件读写、网络与进程隔离能力，以及当前 Shell 是否可用。
 
 Node/Python 脚本不能由自动策略直接放行。逐次审批会显示脚本路径、SHA-256、解释器、工作区和 Permission；审批等待期间相关内容发生变化时，Host 会拒绝执行。无法安全绑定的 Shell 脚本、包装器、复合命令或动态命令也会被拒绝。Git 命令需要先信任工作区，并且每次执行都要审批，因为仓库配置可能运行 Hook、辅助程序或别名。旧格式会话仍可读取，但不能修改 Permission 或 Policy；新建会话即可调整这些设置。
