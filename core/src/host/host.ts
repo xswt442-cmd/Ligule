@@ -56,7 +56,7 @@ import { controllerScopeOf, mayRecordHumanRun, maySetPermission, requirePermissi
 import { usageEvent } from '../session/usage.js';
 import { summarizeUsage } from '../session/usage-summary.js';
 import { readSessionRecord } from '../session/record.js';
-import { isGrantActive, selectReviewEvidence, staleReviewOutcome } from './review-evidence.js';
+import { inactiveGrantOutcome, isGrantActive, selectReviewEvidence, staleReviewOutcome } from './review-evidence.js';
 import type { ReviewEvidence } from '../kernel/reviewer.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel, readPolicyOverride } from '../session/format.js';
@@ -1966,6 +1966,13 @@ export function createHost({
         return stale;
       }
       state.reviewEvidence = evidence;
+      // Grant 的有效性由 Host 判定，不交给模型：撤销、到期或重读失败都必须直接拦下，
+      // 否则失效的授权只能作为提示词里的一条事实，仍然可能被复审放行。
+      if (grantCheckFailed || (liveGrant !== undefined && !isGrantActive(liveGrant))) {
+        const inactive = inactiveGrantOutcome();
+        await appendAudit(inactive);
+        return inactive;
+      }
       const outcome = await reviewer.review(request);
       await appendAudit(outcome);
       return outcome;

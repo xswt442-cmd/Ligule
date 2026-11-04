@@ -623,6 +623,12 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         }
       }
 
+      // 复审期间 Run 被取消时不再发起新的审批：取消只结清当时已经登记的请求，
+      // 之后登记的审批可能永远等不到人回答，Run 也就无法及时结束。
+      if (signal?.aborted === true) {
+        return refuse('run_cancelled', 'ask', 'Run 已取消，这次调用不再执行', undefined, 'cancelled', false);
+      }
+
       // 自动策略无法识别命令时转为逐次审批，并返回无法自动放行的原因。
       const reason = requiresManualApproval
         ? manualApprovalReason

@@ -34,6 +34,21 @@ test('auto hands an unrecognised command shape to the reviewer and uses its allo
   assert.equal(requests[0].command, 'python3 script.py');
 });
 
+test('a cancelled run never opens an approval after the review', async () => {
+  const asked: PolicyQuestion[] = [];
+  const controller = new AbortController();
+  const review = async (): Promise<PolicyReviewRecord> => {
+    // 复审还在等模型时，Run 被取消；结论照常返回，但这次调用不能执行，也不能再问人。
+    controller.abort();
+    return { decision: 'allow', reasonCode: 'read_only_python' };
+  };
+  const chain = createDecisionChain({ mode: 'auto', review, ask: async (question) => { asked.push(question); return true; } });
+  const verdict = await chain.evaluate({ ...interpreterCall, signal: controller.signal });
+  assert.equal(verdict.decision, 'deny');
+  assert.equal(verdict.code, 'run_cancelled');
+  assert.equal(asked.length, 0, '已取消的 Run 不应再登记人工审批');
+});
+
 test('a reviewer deny stays a deny and never becomes an approval', async () => {
   const { review } = reviewer({ decision: 'deny', reasonCode: 'writes_outside_tests' });
   const chain = createDecisionChain({ mode: 'auto', review, ask: async () => true });

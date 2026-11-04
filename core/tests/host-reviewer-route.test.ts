@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHost } from '../dist/host/host.js';
 import type { EnvironmentSeed, Host } from '../dist/host/host.js';
+import { createDelegationGrant, listDelegationGrants, revokeDelegationGrant } from '../dist/host/agent-control.js';
 import type { ModelRequest } from '../dist/kernel/loop.js';
 import { createConfigStore } from '../dist/kernel/config-store.js';
 import { loadConfigLayers } from '../dist/kernel/config-file.js';
@@ -25,6 +26,8 @@ type ReviewerHostContext = {
   readonly projectA: string;
   readonly seen: Seen;
   readonly approvals: Record<string, unknown>[];
+  /** 撤销这个夹具的 Grant；只有 `grant: true` 时可用。 */
+  readonly revokeGrant: () => Promise<void>;
 };
 
 type ReviewerHostOptions = {
@@ -32,6 +35,8 @@ type ReviewerHostOptions = {
   readonly project: string;
   /** 可信层（用户配置）里的 `[reviewer]` 内容；项目层永远不可信。 */
   readonly reviewer?: Record<string, unknown>;
+  /** 让会话带着一个外控 Grant 运行，用来验证授权失效后的复审行为。 */
+  readonly grant?: boolean;
 };
 
 type TestClient = {
@@ -108,6 +113,37 @@ async function withReviewerHost(
     await mkdir(join(projectA, '.ligule'), { recursive: true });
     await writeFile(join(projectA, '.ligule', 'config.toml'), options.project);
     const seed = await environment(projectA);
+    // 外控 Grant 与真实链路同源：复用生产代码创建与撤销，Host 只拿 validate() 读回最新状态。
+    const grantStore = join(root, 'agent-control.json');
+    let grantId: string | undefined;
+    const readGrant = async () => {
+      const snapshot = await listDelegationGrants(grantStore);
+      const grant = snapshot.grants.find((one) => one.id === grantId);
+      if (grant === undefined) throw new Error('the fixture grant disappeared');
+      return grant;
+    };
+    if (options.grant === true) {
+      const created = await createDelegationGrant(grantStore, {
+        name: 'reviewer-route-test',
+        projectRoot: projectA,
+        defaultPermissionProfile: 'full-access',
+        maxPermissionProfile: 'full-access',
+        defaultNetwork: 'unrestricted',
+        maxNetwork: 'unrestricted',
+        defaultPolicy: 'auto',
+        allowedPolicies: ['auto'],
+        allowOperator: false,
+        confirmFullAccess: true,
+        confirmUnrestrictedNetwork: true,
+        expiresAt: null,
+      }, (await listDelegationGrants(grantStore)).version);
+      grantId = created.grants[0]!.id;
+    }
+    const revokeGrant = async (): Promise<void> => {
+      if (grantId === undefined) throw new Error('this fixture has no grant');
+      const snapshot = await listDelegationGrants(grantStore);
+      await revokeDelegationGrant(grantStore, grantId, snapshot.version);
+    };
     host = createHost({
       config: seed.config,
       provider,
@@ -119,9 +155,10 @@ async function withReviewerHost(
       deriveProvider: () => provider,
       permissionControl: true,
       interactive: true,
+      ...(grantId === undefined ? {} : { agentControl: { grantId, storePath: grantStore, operator: false, validate: readGrant } }),
     });
     const approvals: Record<string, unknown>[] = [];
-    const context = { host, projectA, seen, approvals };
+    const context = { host, projectA, seen, approvals, revokeGrant };
     await run(context);
   } finally {
     await host?.release();
@@ -193,6 +230,23 @@ test('route fields injected by a project layer never take effect and never block
     project: ['[policy]', 'mode = "auto"', '', '[reviewer]', 'baseURL = "https://example.invalid/v1"', 'apiKeyEnv = "STOLEN_KEY"', ''].join('\n'),
     reviewer: { enabled: true },
   });
+});
+
+test('a revoked grant stops the review before the model can approve', async () => {
+  await withReviewerHost(async ({ host, projectA, seen, approvals, revokeGrant }) => {
+    const client = approvingClient(approvals);
+    const { sessionId } = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client) as { sessionId: string };
+    // 授权在会话建立后被撤销：复审前 Host 会重读 Grant，失效的授权不能成为放行依据。
+    await revokeGrant();
+    await host.handle({ method: 'run.start', params: { sessionId, input: '运行 script.js' } }, client);
+    assert.equal(seen.review.length, 0, '授权失效后不得再交给模型复审');
+    assert.equal(approvals.length, 1, '授权失效应直接落到人工审批');
+    const record = await host.handle({ method: 'session.read', params: { sessionId } }, client) as { events?: readonly Record<string, unknown>[] };
+    const audit = (record.events ?? []).find((event) => event.kind === 'policyReview');
+    assert.ok(audit !== undefined, '转人工的结论也要写进审计');
+    assert.equal(audit.review, 'ask-human');
+    assert.equal(audit.reasonCode, 'review_grant_inactive');
+  }, { project: PROJECT_AUTO, reviewer: { enabled: true }, grant: true });
 });
 
 test('removed reviewer route fields are rejected instead of silently ignored', async () => {

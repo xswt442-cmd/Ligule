@@ -93,6 +93,22 @@ export function staleReviewOutcome(): StaleReviewOutcome {
   return { decision: 'ask-human', reasonCode: 'review_evidence_unavailable', reason: REVIEW_EVIDENCE_UNAVAILABLE_REASON };
 }
 
+/**
+ * Grant 失效时的固定结论。撤销、到期或重读失败都由 Host 判定，
+ * 提示词里的 `active="false"` 只是事实，不能成为自动放行的依据。
+ */
+export const REVIEW_GRANT_INACTIVE_REASON = 'the grant behind this session is revoked, expired or unreadable';
+
+export type InactiveGrantOutcome = {
+  readonly decision: 'ask-human';
+  readonly reasonCode: 'review_grant_inactive';
+  readonly reason: string;
+};
+
+export function inactiveGrantOutcome(): InactiveGrantOutcome {
+  return { decision: 'ask-human', reasonCode: 'review_grant_inactive', reason: REVIEW_GRANT_INACTIVE_REASON };
+}
+
 export async function selectReviewEvidence(
   session: SessionLog,
   options: ReviewEvidenceOptions = {},
