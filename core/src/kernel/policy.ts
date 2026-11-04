@@ -119,6 +119,8 @@ export interface PolicyReviewRequest {
   readonly shell?: string;
   readonly executable?: string;
   readonly scriptBinding?: ScriptBinding;
+  // Run 的取消信号：复审请求必须随 Run 一起中止，取消后到达的结论作废。
+  readonly signal?: AbortSignal;
 }
 
 export interface PolicyReviewRecord {
@@ -201,6 +203,8 @@ export interface PolicyCall {
   readonly workingDirectory?: string;
   readonly callId?: string;
   readonly identityDigest?: string;
+  // 这次调用所属 Run 的取消信号；复审要跟着它一起及时停下。
+  readonly signal?: AbortSignal;
 }
 
 // 拒绝阈值和默认策略由配置层提供。
@@ -392,7 +396,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
     },
 
     async evaluate({ tool, input, target, shell, capability, access, command: composedCommand, scriptBinding, scriptBindingError, requiresManualApproval: manualApprovalRequired,
-      fileBoundary, workingDirectory, callId, identityDigest }: PolicyCall): Promise<PolicyVerdict> {
+      fileBoundary, workingDirectory, callId, identityDigest, signal }: PolicyCall): Promise<PolicyVerdict> {
       if (typeof tool !== 'string' || tool === '') throw new KernelError('policy_call_tool_required');
       // 使用工具声明的实际能力名称进行判定。MCP 调用使用 `mcp:<服务器>/<工具>`，而不是通用工具名 `mcp.call`。
       const named = capability ?? tool;
@@ -593,13 +597,16 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
             ...(identityDigest === undefined ? {} : { identityDigest }),
             ...(shell === undefined ? {} : { shell: shell.kind, executable: shell.executable }),
             ...(scriptBinding === undefined ? {} : { scriptBinding }),
+            ...(signal === undefined ? {} : { signal }),
           });
         } catch {
           outcome = undefined;
         }
         // 过期结论必须作废：回到确定性与人工审批路径，而不是拿旧判定放行或拒绝。
         // 复审抛错时同样要重验：异常不能让等待期间新增的拒绝规则失效。
-        const changed = `${current}:${forcedToAsk}` !== modeSignature || JSON.stringify(currentRules) !== rulesSignature;
+        // Run 被取消后到达的结论同样作废——那次调用已经不该执行了。
+        const changed = `${current}:${forcedToAsk}` !== modeSignature || JSON.stringify(currentRules) !== rulesSignature
+          || signal?.aborted === true;
         if (changed) {
           outcome = undefined;
           // 作废不等于忽略新规则：等待期间新增的 deny 要当场生效，否则会落到可被批准的分支。

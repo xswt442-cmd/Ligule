@@ -1,4 +1,4 @@
-﻿// Host 管理会话、Agent 循环、工具和策略状态；客户端通过协议与它通信。
+// Host 管理会话、Agent 循环、工具和策略状态；客户端通过协议与它通信。
 // 模型提供方与策略由外部注入，会话事件通过会话记录接口持久化。
 import { randomUUID } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
@@ -56,7 +56,7 @@ import { controllerScopeOf, mayRecordHumanRun, maySetPermission, requirePermissi
 import { usageEvent } from '../session/usage.js';
 import { summarizeUsage } from '../session/usage-summary.js';
 import { readSessionRecord } from '../session/record.js';
-import { selectReviewEvidence, staleReviewOutcome } from './review-evidence.js';
+import { isGrantActive, selectReviewEvidence, staleReviewOutcome } from './review-evidence.js';
 import type { ReviewEvidence } from '../kernel/reviewer.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel, readPolicyOverride } from '../session/format.js';
@@ -1725,6 +1725,10 @@ export function createHost({
     const cleanup = [];
     try {
     const captureGrant = await activeDelegation();
+    // Grant 会在会话存续期间被撤销或过期：复审前重新读一次，本次复审的事实与证据共用这份快照。
+    let liveGrant: typeof captureGrant = captureGrant;
+    // 重读失败说明授权状态未知：按失效处理，别让空白被读成“没有约束”。
+    let grantCheckFailed = false;
     const initialCapture = agentControl === undefined ? screenCaptureConsent : captureGrant?.allowScreenCapture === true;
     if (initialCapture) {
       if (recover && ((await session.header())?.formatVersion ?? 0) < 1) throw new KernelError('session_screen_capture_format_unsupported');
@@ -1887,12 +1891,12 @@ export function createHost({
               ...(rule.argsHash === undefined ? {} : { argsHash: rule.argsHash }),
             })),
           ],
-          ...(captureGrant === undefined ? {} : {
+          ...(liveGrant === undefined ? {} : {
             grant: {
-              id: captureGrant.id,
-              active: true,
-              scope: captureGrant.projectRoot,
-              ...(captureGrant.allowedPolicies === undefined ? {} : { allowedPolicies: captureGrant.allowedPolicies }),
+              id: liveGrant.id,
+              active: !grantCheckFailed && isGrantActive(liveGrant),
+              scope: liveGrant.projectRoot,
+              ...(liveGrant.allowedPolicies === undefined ? {} : { allowedPolicies: liveGrant.allowedPolicies }),
             },
           }),
         }),
@@ -1914,10 +1918,20 @@ export function createHost({
     // 用量由独立的 `purpose: 'reviewer'` usage 事件记账，审计事件不再重复记 token。
     const recordReview = reviewer === undefined ? undefined : async (request: PolicyReviewRequest): Promise<PolicyReviewRecord> => {
       const startedAt = Date.now();
+      // 复审前重新读一次 Grant：会话创建时的那份快照无法反映之后的撤销与到期。
+      // 重读失败说明授权状态未知：保留旧记录但按失效处理，让复审转人工而不是沿用旧放行依据。
+      if (agentControl !== undefined) {
+        try {
+          liveGrant = await activeDelegation();
+          grantCheckFailed = false;
+        } catch {
+          grantCheckFailed = true;
+        }
+      }
       // 每次复审前从原始 Session 事件重建可信证据：早期约束、撤销与收紧、相关历史都带 seq。
       const evidence = await selectReviewEvidence(session, {
         tool: request.tool,
-        ...(captureGrant === undefined ? {} : { grantActive: captureGrant.revokedAt === null }),
+        ...(liveGrant === undefined ? {} : { grantActive: !grantCheckFailed && isGrantActive(liveGrant) }),
       });
       const appendAudit = async (record: {
         readonly decision: 'allow' | 'deny' | 'ask-human';

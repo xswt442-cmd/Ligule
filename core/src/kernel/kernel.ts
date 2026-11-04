@@ -486,6 +486,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
             ? { fileBoundary: boundaryOf(config), workingDirectory: workingDirectoryOf(config) }
             : {}),
           ...(requiresManualApproval ? { requiresManualApproval: true } : {}),
+          ...(options.signal === undefined ? {} : { signal: options.signal }),
           ...(scriptBindingError === undefined ? {} : { scriptBindingError: { code: scriptBindingError.code, detail: scriptBindingError.detail ?? scriptBindingError.code } }),
         });
         if (session?.header !== undefined && policy.snapshot !== undefined) {

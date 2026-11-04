@@ -140,6 +140,8 @@ export function createSessionReviewer({ settings, provider, factsOf, logger, onU
 
   const review: PolicyReview = async (request: PolicyReviewRequest): Promise<PolicyReviewOutcome> => {
     if (runCalls >= settings.maxPerRun) return askHuman('review_budget_exhausted', 'Review 次数已达本次运行上限，转人工审批。');
+    // Run 已经取消时不再发请求：等待一个不会执行的调用的复审没有意义，也不该再花预算。
+    if (request.signal?.aborted === true) return askHuman('review_cancelled', 'Run 已取消，复审不再等待。');
     const built = buildReviewInput(factsOf(request), { maxInputTokens: settings.maxInputTokens });
     if (!built.ok) {
       failures += 1;
@@ -186,6 +188,10 @@ export function createSessionReviewer({ settings, provider, factsOf, logger, onU
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), settings.timeoutMs);
     timer.unref?.();
+    // Run 的取消信号要和复审自己的超时并联：取消后网络请求立刻中止，而不是等满超时。
+    const runSignal = request.signal;
+    const onRunAbort = (): void => { controller.abort(); };
+    runSignal?.addEventListener('abort', onRunAbort, { once: true });
     let text = '';
     let reasoned = false;
     let toolCall: string | undefined;
@@ -222,17 +228,25 @@ export function createSessionReviewer({ settings, provider, factsOf, logger, onU
     } catch (error) {
       failures += 1;
       const aborted = controller.signal.aborted;
-      logger?.('reviewer request failed', { code: aborted ? 'review_timeout' : 'review_failed' });
+      const cancelled = runSignal?.aborted === true;
+      logger?.('reviewer request failed', { code: cancelled ? 'review_cancelled' : aborted ? 'review_timeout' : 'review_failed' });
       settleBudget();
       reportUsage(collected, built.input.system, built.input.user, onUsage);
+      if (cancelled) return askHuman('review_cancelled', 'Run 已取消，复审不再等待。');
       return askHuman(aborted ? 'review_timeout' : 'review_failed', aborted
         ? `复审在 ${settings.timeoutMs} 毫秒内没有返回结果，转人工审批。`
         : '复审请求失败，转人工审批。');
     } finally {
       clearTimeout(timer);
+      runSignal?.removeEventListener('abort', onRunAbort);
     }
     settleBudget();
     reportUsage(collected, built.input.system, built.input.user, onUsage);
+    // 中途被取消的复审即使已经拼出文本，也不能再作为裁决使用。
+    if (runSignal?.aborted === true) {
+      failures += 1;
+      return askHuman('review_cancelled', 'Run 已取消，复审结论作废。');
+    }
     if (toolCall !== undefined) {
       failures += 1;
       logger?.('reviewer tried to call a tool', { tool: toolCall });

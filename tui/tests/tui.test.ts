@@ -2361,6 +2361,56 @@ test('/usage pages back to a review that is older than the newest events', optio
   }
 }));
 
+test('/usage says the lookup stopped instead of claiming there was no review', options, async () => withTuiHost(async ({ client, sessionId, projectDirectory }) => {
+  const { createElement } = await import('react');
+  const { render } = await import('ink');
+  const { PassThrough } = await import('node:stream');
+  const { App } = await import('../dist/tui/app.js');
+  const stdout = new PassThrough() as unknown as FakeOutput;
+  stdout.columns = 120;
+  stdout.isTTY = true;
+  let painted = '';
+  stdout.on('data', (chunk) => { painted += chunk; });
+  const stdin = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref: () => {}, unref: () => {} }) as unknown as FakeInput;
+  // 每页都没有复审，而且永远翻不到开头：只能报“没查完”，不能声称一次复审都没有。
+  const pages: (number | undefined)[] = [];
+  const paged = new Proxy(client as TuiClient, {
+    get(target, property, receiver) {
+      if (property === 'request') {
+        return (method: string, params?: { before?: number }) => {
+          if (method === 'session.read') {
+            return Promise.reject(Object.assign(new Error('locked'), { code: 'session_not_open' }));
+          }
+          if (method === 'session.observe') {
+            pages.push(params?.before);
+            const oldest = 100_000 - pages.length * 400;
+            const events = Array.from({ length: 400 }, (_unused, index) => ({ kind: 'tool', seq: oldest - index }));
+            return Promise.resolve({ sessionId, events });
+          }
+          return target.request(method as never, params as never);
+        };
+      }
+      return Reflect.get(target, property, receiver) as unknown;
+    },
+  });
+  const instance = render(createElement(App, {
+    client: paged, sessionId, info: { boundary: projectDirectory }, interactive: true,
+  }), { stdout, stdin, exitOnCtrlC: false, patchConsole: false, interactive: true });
+  const strip = (text: string) => text.replace(/\x1B\[[0-9;?]*[A-Za-z]/g, '').replace(/[\r\n]+/g, '');
+  const lastFrame = () => completeFrame(painted);
+  try {
+    await waitFor(() => lastFrame().includes('描述任务'), { read: lastFrame });
+    stdin.write('/usage');
+    await waitFor(() => lastFrame().includes('› /usage'), { within: 10_000, read: lastFrame });
+    stdin.write('\r');
+    await waitFor(() => strip(painted).includes('查询未完成'), { within: 20_000, read: () => strip(painted).slice(-700) });
+    assert.equal(strip(painted).includes('最近复审：'), false, '翻不到就不能画出一条“没有复审”的结论');
+    assert.equal(pages.length, 50, 'the command stops at the page cap instead of looping forever');
+  } finally {
+    instance.unmount();
+  }
+}));
+
 test('a narrow terminal keeps a pending approval operable when the settings line is already covered', options, async (t) => {
   const permission = await measuredPermissionContext('full-access', 'unrestricted');
   if (permission.capabilities.process !== 'full') return t.skip('the platform process ownership backend is unavailable');

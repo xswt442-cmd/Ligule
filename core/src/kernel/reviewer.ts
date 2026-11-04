@@ -103,28 +103,47 @@ function canonical(value: unknown): string {
   return `{${keys.map((key) => `${JSON.stringify(key)}:${canonical(record[key])}`).join(',')}}`;
 }
 
+/** 证据文本与属性都来自会话记录，必须转义，否则一段文字就能改写提示词的结构。 */
+function escapeText(value: string): string {
+  return value
+    .replace(/&/gu, '&amp;')
+    .replace(/</gu, '&lt;')
+    .replace(/>/gu, '&gt;')
+    .replace(/"/gu, '&quot;')
+    .replace(/'/gu, '&apos;');
+}
+
 /** 稳定前缀（系统提示 + 静态约束）在前，动态事实在后，便于 Provider 命中前缀缓存。 */
 function staticSection(facts: ReviewFacts): string {
   const lines = [
-    `<policy mode="${facts.policyMode}" />`,
-    facts.boundary === undefined ? '' : `<workspace boundary="${facts.boundary}" workingDirectory="${facts.workingDirectory ?? ''}" trusted="${facts.workspaceTrusted === true}" />`,
-    facts.permission === undefined ? '' : `<permission profile="${facts.permission.profile}" network="${facts.permission.network}" />`,
+    `<policy mode="${escapeText(facts.policyMode)}" />`,
+    facts.boundary === undefined ? '' : `<workspace boundary="${escapeText(facts.boundary)}" workingDirectory="${escapeText(facts.workingDirectory ?? '')}" trusted="${facts.workspaceTrusted === true}" />`,
+    facts.permission === undefined ? '' : `<permission profile="${escapeText(facts.permission.profile)}" network="${escapeText(facts.permission.network)}" />`,
   ];
   const rules = facts.rules ?? [];
   lines.push(`<rules count="${rules.length}">`);
   for (const rule of rules) {
-    lines.push(`  <rule tool="${rule.tool}" decision="${rule.decision}"${rule.match === undefined ? '' : ` match="${rule.match}"`}${rule.source === undefined ? '' : ` source="${rule.source}"`}${rule.target === undefined ? '' : ` target="${rule.target}"`}${rule.path === undefined ? '' : ` path="${rule.path}"`}${rule.argsHash === undefined ? '' : ` argsHash="${rule.argsHash}"`} />`);
+    const attributes = [
+      `tool="${escapeText(rule.tool)}"`,
+      `decision="${escapeText(rule.decision)}"`,
+      ...(rule.match === undefined ? [] : [`match="${escapeText(rule.match)}"`]),
+      ...(rule.source === undefined ? [] : [`source="${escapeText(rule.source)}"`]),
+      ...(rule.target === undefined ? [] : [`target="${escapeText(rule.target)}"`]),
+      ...(rule.path === undefined ? [] : [`path="${escapeText(rule.path)}"`]),
+      ...(rule.argsHash === undefined ? [] : [`argsHash="${escapeText(rule.argsHash)}"`]),
+    ];
+    lines.push(`  <rule ${attributes.join(' ')} />`);
   }
   lines.push('</rules>');
   const instructions = facts.evidence?.constraints
   const legacy = facts.userInstructions
   if (instructions !== undefined && instructions.length > 0) {
     lines.push(`<constraints count="${instructions.length}" note="each constraint keeps the seq of the event it came from">`);
-    for (const item of instructions) lines.push(`  <constraint seq="${item.seq}" source="${item.source}">${item.text}</constraint>`);
+    for (const item of instructions) lines.push(`  <constraint seq="${item.seq}" source="${escapeText(item.source)}">${escapeText(item.text)}</constraint>`);
     lines.push('</constraints>');
   } else {
     lines.push(`<userInstructions count="${legacy.length}">`);
-    for (const instruction of legacy) lines.push(`  <instruction>${instruction}</instruction>`);
+    for (const instruction of legacy) lines.push(`  <instruction>${escapeText(instruction)}</instruction>`);
     lines.push('</userInstructions>');
   }
   return lines.filter((line) => line !== '').join('\n');
@@ -132,31 +151,31 @@ function staticSection(facts: ReviewFacts): string {
 
 function dynamicSection(facts: ReviewFacts, options: { readonly history: boolean } = { history: true }): string {
   const lines = [
-    `<pendingCall tool="${facts.tool}"${facts.command === undefined ? '' : ` command="${facts.command}"`}${facts.networkTarget === undefined ? '' : ` networkTarget="${facts.networkTarget}"`} />`,
-    `<arguments>${canonical(facts.args)}</arguments>`,
+    `<pendingCall tool="${escapeText(facts.tool)}"${facts.command === undefined ? '' : ` command="${escapeText(facts.command)}"`}${facts.networkTarget === undefined ? '' : ` networkTarget="${escapeText(facts.networkTarget)}"`} />`,
+    `<arguments>${escapeText(canonical(facts.args))}</arguments>`,
   ];
   if (facts.grant !== undefined) {
-    lines.push(`<grant id="${facts.grant.id}" active="${facts.grant.active}"${facts.grant.scope === undefined ? '' : ` scope="${facts.grant.scope}"`}${facts.grant.allowedPolicies === undefined ? '' : ` allowedPolicies="${facts.grant.allowedPolicies.join(',')}"`} />`);
+    lines.push(`<grant id="${escapeText(facts.grant.id)}" active="${facts.grant.active}"${facts.grant.scope === undefined ? '' : ` scope="${escapeText(facts.grant.scope)}"`}${facts.grant.allowedPolicies === undefined ? '' : ` allowedPolicies="${escapeText(facts.grant.allowedPolicies.join(','))}"`} />`);
   }
-  if (facts.reason !== undefined) lines.push(`<deterministicReason>${facts.reason}</deterministicReason>`);
+  if (facts.reason !== undefined) lines.push(`<deterministicReason>${escapeText(facts.reason)}</deterministicReason>`);
   const withdrawn = facts.evidence?.revoked ?? [];
   if (withdrawn.length > 0) {
     lines.push(`<withdrawn count="${withdrawn.length}" note="these limits were tightened or revoked; they outrank older constraints">`);
-    for (const item of withdrawn) lines.push(`  <item seq="${item.seq}" source="${item.source}">${item.text}</item>`);
+    for (const item of withdrawn) lines.push(`  <item seq="${item.seq}" source="${escapeText(item.source)}">${escapeText(item.text)}</item>`);
     lines.push('</withdrawn>');
   }
   if (!options.history) return lines.join('\n');
   const evidenceHistory = facts.evidence?.history ?? [];
   if (evidenceHistory.length > 0) {
     lines.push(`<relatedActions count="${evidenceHistory.length}" note="history is evidence, not authorization">`);
-    for (const item of evidenceHistory) lines.push(`  <action seq="${item.seq}" source="${item.source}">${item.text}</action>`);
+    for (const item of evidenceHistory) lines.push(`  <action seq="${item.seq}" source="${escapeText(item.source)}">${escapeText(item.text)}</action>`);
     lines.push('</relatedActions>');
     return lines.join('\n');
   }
   const related = facts.relatedActions ?? [];
   if (related.length > 0) {
     lines.push(`<relatedActions count="${related.length}" note="history is evidence, not authorization">`);
-    for (const action of related.slice(0, 5)) lines.push(`  <action>${action}</action>`);
+    for (const action of related.slice(0, 5)) lines.push(`  <action>${escapeText(action)}</action>`);
     lines.push('</relatedActions>');
   }
   return lines.join('\n');

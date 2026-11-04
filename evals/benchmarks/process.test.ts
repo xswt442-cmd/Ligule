@@ -74,12 +74,9 @@ test('a process that exits while a descendant holds the pipes still settles', as
     // 后代若还活着会继续写 marker：收口之后数值必须停住。
     const first = await markerValue(marker);
     assert.notEqual(first, '');
-    await delay(500);
-    // POSIX 上 runner 按进程组收掉后代；Windows 只能收父进程，后代要由测试自己清掉，
-    // 否则每跑一次测试就会留下一个 Node 进程。
-    if (process.platform !== 'win32') {
-      assert.equal(await markerValue(marker), first, 'a descendant kept running after the parent exited');
-    }
+    await delay(1500);
+    // 收口之后后代必须已经不在了：POSIX 按进程组收，Windows 按 WMI 里的父子关系收。
+    assert.equal(await markerValue(marker), first, 'a descendant kept running after the parent exited');
   } finally {
     await stopDescendant(pidFile);
     await rm(root, { recursive: true, force: true });

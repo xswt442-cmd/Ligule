@@ -1,4 +1,4 @@
-﻿import type { SessionLog } from '../session/session.js';
+import type { SessionLog } from '../session/session.js';
 import type { EvidenceItem, EvidenceSource, ReviewEvidence } from '../kernel/reviewer.js';
 
 /**
@@ -21,9 +21,38 @@ export interface ReviewEvidenceOptions {
 
 type RawEvent = { readonly seq?: unknown; readonly kind?: unknown };
 
+/** 授权是否仍然有效：撤销与到期都算失效，复审只认仍然有效的授权。 */
+export function isGrantActive(grant: { readonly revokedAt: string | null; readonly expiresAt: string | null }, now = Date.now()): boolean {
+  if (grant.revokedAt !== null) return false;
+  if (grant.expiresAt === null) return true;
+  const expires = Date.parse(grant.expiresAt);
+  return Number.isFinite(expires) && expires > now;
+}
+
 function textOf(event: Record<string, unknown>): string | undefined {
+  // 模板展开后 `text` 是项目文件的正文，`raw` 才是用户真正敲进来的那一行；
+  // 只有后者能当授权事实，否则项目文件就能自己给自己授权。
+  const raw = event.raw;
+  if (typeof raw === 'string' && raw.trim() !== '') return raw;
   const text = event.text;
   return typeof text === 'string' && text.trim() !== '' ? text : undefined;
+}
+
+/**
+ * 谁能充当人类约束：只有能证明是人类写的普通消息才算。
+ *
+ * 控制器（`callerScope` 非 human）、旧记录里标了 `origin: 'controller'` 的消息、
+ * 以及根本没法核对来源的记录，一律按“请求”处理——宁可多转人工，也不让一段
+ * 无法追责的文字成为放行依据。
+ */
+function constraintSource(event: Record<string, unknown>): EvidenceSource {
+  const run = typeof event.run === 'object' && event.run !== null && !Array.isArray(event.run)
+    ? event.run as Record<string, unknown>
+    : undefined;
+  const scope = run?.callerScope;
+  if (typeof scope === 'string') return scope === 'human' ? 'user' : 'controller';
+  // 旧记录没有 callerScope，但可能写了 origin；两者都没有就无法确认，按控制器处理。
+  return event.origin === 'human' ? 'user' : 'controller';
 }
 
 function seqOf(event: RawEvent): number | undefined {
@@ -91,9 +120,7 @@ export async function selectReviewEvidence(
       if (text === undefined) continue;
       // 可信本地 UI 记的 Run 是 human；外控（controller:*）写进来的同一段文字只是请求，
       // 不能和人类禁令并列为授权事实。
-      const scope = (event.run as { callerScope?: unknown } | undefined)?.callerScope;
-      const fromController = typeof scope === 'string' && scope !== 'human';
-      const item: EvidenceItem = { seq, source: fromController ? 'controller' : 'user', text };
+      const item: EvidenceItem = { seq, source: constraintSource(event), text };
       constraints.push(item);
       task = item;
       continue;

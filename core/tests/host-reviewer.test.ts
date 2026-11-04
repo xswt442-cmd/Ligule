@@ -344,6 +344,54 @@ test('only a reply that finished with stop may become a verdict', async () => {
 });
 
 
+test('a cancelled run never waits for a verdict', async () => {
+  // 取消前就已经结束的 Run：请求根本不该发出去。
+  let streamed = 0;
+  const abortedBefore = createSessionReviewer({
+    settings,
+    provider: () => ({
+      stream: async function* () {
+        streamed += 1;
+        yield { type: 'finish', reason: 'stop' } as never;
+      },
+    } as unknown as ModelProvider),
+    factsOf: () => facts,
+  });
+  const cancelled = new AbortController();
+  cancelled.abort();
+  const early = await abortedBefore.review({
+    tool: 'exec', input: facts.args, command: 'python3 script.py', policy: 'auto', reason: undefined, signal: cancelled.signal,
+  });
+  assert.equal(early.decision, 'ask-human');
+  assert.equal(early.reasonCode, 'review_cancelled');
+  assert.equal(streamed, 0, 'Run 已取消时不要再去问模型');
+  assert.equal(abortedBefore.usage().calls, 0);
+
+  // 复审进行中被取消：请求必须真的中止，结论不能被采纳成 allow。
+  const provider = {
+    stream: async function* (_request: unknown, options?: { readonly signal?: AbortSignal }) {
+      yield { type: 'text', text: '{"decision":"allow","reasonCode":"safe","reason":"只读。"}' } as never;
+      // 一直不结束，直到 Run 取消。
+      await new Promise<void>((resolve) => {
+        if (options?.signal?.aborted === true) { resolve(); return; }
+        options?.signal?.addEventListener('abort', () => resolve(), { once: true });
+        setTimeout(resolve, 5_000);
+      });
+      yield { type: 'finish', reason: 'stop' } as never;
+    },
+  } as unknown as ModelProvider;
+  const live = createSessionReviewer({ settings, provider: () => provider, factsOf: () => facts });
+  const run = new AbortController();
+  const pending = live.review({ tool: 'exec', input: facts.args, command: 'python3 script.py', policy: 'auto', reason: undefined, signal: run.signal });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  run.abort();
+  const outcome = await pending;
+  assert.equal(outcome.decision, 'ask-human', '被取消的复审不能变成自动放行');
+  assert.equal(outcome.reasonCode, 'review_cancelled');
+  assert.equal(live.usage().calls, 1, '已经发出去的请求仍然算一次');
+  assert.equal(live.usage().failures, 1);
+});
+
 test('a route that fails before the request never spends budget', async () => {
   const reviewer = createSessionReviewer({
     settings,

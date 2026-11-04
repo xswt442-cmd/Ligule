@@ -2307,7 +2307,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         // 这时改用不取锁的 `session.observe`，并按 `before` 向更早的页翻，
         // 否则复审早于最新一页时，命令会把“存在但没翻到”说成“没有复审”。
         interface ReviewEvent { kind?: string; seq?: number; review?: string; reasonCode?: string; evidenceSeqs?: readonly number[] }
-        const readReviews = async (): Promise<{ reviews: readonly ReviewEvent[] } | { code: string }> => {
+        const readReviews = async (): Promise<{ reviews: readonly ReviewEvent[] } | { code: string } | { incomplete: true }> => {
           const direct = await client.request('session.read', { sessionId }).catch((error: unknown) => ({ code: errorCode(error) ?? 'session_read_failed' }));
           if (!('code' in direct)) {
             return { reviews: (direct.events as readonly ReviewEvent[]).filter((event) => event.kind === 'policyReview') };
@@ -2324,10 +2324,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             const found = events.filter((event) => event.kind === 'policyReview');
             if (found.length > 0) return { reviews: found };
             const oldest = events[0];
-            if (oldest?.seq === undefined) return { reviews: [] };
+            // 空页或已经翻到 seq 1 才说明真的没有更早的记录；否则只是还没翻到。
+            if (oldest?.seq === undefined || oldest.seq <= 1) return { reviews: [] };
             cursor = oldest.seq;
           }
-          return { reviews: [] };
+          // 翻到页数上限仍未找到：结论是“没查完”，不是“没有复审”。
+          return { incomplete: true };
         };
         const page = await readReviews();
         if (activeSession.current !== sessionId) return;
@@ -2340,6 +2342,12 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         if ('code' in page) {
           push({ kind: 'meta', text: lines.join('\n') });
           push({ kind: 'error', text: t(`无法读取会话记录，最近复审未知：${page.code}`, `Cannot read the session log, so the last review is unknown: ${page.code}`) });
+          return;
+        }
+        // 翻到页数上限也没找到复审：只能报“没查完”，不能声称一次复审都没有。
+        if ('incomplete' in page) {
+          push({ kind: 'meta', text: lines.join('\n') });
+          push({ kind: 'error', text: t('查询未完成（已向前翻 50 页仍未找到复审），最近复审未知', 'The lookup stopped before the session start, so the last review is unknown') });
           return;
         }
         const last = page.reviews[page.reviews.length - 1];
