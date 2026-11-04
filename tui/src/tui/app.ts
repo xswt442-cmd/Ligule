@@ -2304,13 +2304,32 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         };
         // 最近一次复审也从会话记录里读，TUI 不自己推断裁决。
         // 外控会话由别的 Host 持有写入锁，`session.read` 会报 `session_not_open`；
-        // 这时改用不取锁的 `session.observe`，否则用量读到了、复审却永远显示不出来。
-        const readRecord = async () => {
+        // 这时改用不取锁的 `session.observe`，并按 `before` 向更早的页翻，
+        // 否则复审早于最新一页时，命令会把“存在但没翻到”说成“没有复审”。
+        interface ReviewEvent { kind?: string; seq?: number; review?: string; reasonCode?: string; evidenceSeqs?: readonly number[] }
+        const readReviews = async (): Promise<{ reviews: readonly ReviewEvent[] } | { code: string }> => {
           const direct = await client.request('session.read', { sessionId }).catch((error: unknown) => ({ code: errorCode(error) ?? 'session_read_failed' }));
-          if (!('code' in direct)) return direct;
-          return client.request('session.observe', { projectRoot: info.boundary ?? '', sessionId, limit: 400 }).catch((error: unknown) => ({ code: errorCode(error) ?? 'session_observe_failed' }));
+          if (!('code' in direct)) {
+            return { reviews: (direct.events as readonly ReviewEvent[]).filter((event) => event.kind === 'policyReview') };
+          }
+          let cursor: number | undefined;
+          for (let page = 0; page < 50; page += 1) {
+            const params: { projectRoot: string; sessionId: string; limit: number; before?: number } = {
+              projectRoot: info.boundary ?? '', sessionId, limit: 400,
+            };
+            if (cursor !== undefined) params.before = cursor;
+            const observed = await client.request('session.observe', params).catch((error: unknown) => ({ code: errorCode(error) ?? 'session_observe_failed' }));
+            if ('code' in observed) return { code: observed.code };
+            const events = observed.events as readonly ReviewEvent[];
+            const found = events.filter((event) => event.kind === 'policyReview');
+            if (found.length > 0) return { reviews: found };
+            const oldest = events[0];
+            if (oldest?.seq === undefined) return { reviews: [] };
+            cursor = oldest.seq;
+          }
+          return { reviews: [] };
         };
-        const page = await readRecord();
+        const page = await readReviews();
         if (activeSession.current !== sessionId) return;
         const lines = [
           line(t('主 Agent', 'Agent'), summary.agent),
@@ -2323,8 +2342,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           push({ kind: 'error', text: t(`无法读取会话记录，最近复审未知：${page.code}`, `Cannot read the session log, so the last review is unknown: ${page.code}`) });
           return;
         }
-        const reviews = page.events.filter((event) => (event as { kind?: string }).kind === 'policyReview');
-        const last = reviews[reviews.length - 1] as { review?: string; reasonCode?: string; evidenceSeqs?: number[] } | undefined;
+        const last = page.reviews[page.reviews.length - 1];
         if (last?.review !== undefined) {
           const code = last.reasonCode ?? 'review_unspecified';
           const count = last.evidenceSeqs?.length ?? 0;
