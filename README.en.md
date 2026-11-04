@@ -10,6 +10,8 @@
   </p>
   <p>
     <a href="https://nodejs.org"><img alt="Node.js" src="https://img.shields.io/static/v1?label=node&message=%3E%3D24&color=339933&logo=node.js&logoColor=white"></a>
+    <a href="desktop/README.en.md"><img alt="Windows" src="https://img.shields.io/badge/Windows-4d6bfe?logo=windows&logoColor=white"></a>
+    <a href="desktop/README.en.md"><img alt="Linux" src="https://img.shields.io/badge/Linux-fcc624?logo=linux&logoColor=black"></a>
     <a href="https://img.shields.io/npm/v/ligule"><img alt="npm" src="https://img.shields.io/npm/v/ligule?label=CLI%20%2F%20TUI&color=4d6bfe"></a>
     <a href="https://github.com/xswt442-cmd/ligule/releases/latest"><img alt="Desktop release" src="https://img.shields.io/github/v/release/xswt442-cmd/ligule?label=Desktop&color=657483"></a>
     <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-22c55e.svg"></a>
