@@ -237,6 +237,30 @@ test('the local estimate is corrected by the usage the endpoint reports back', a
   });
 });
 
+// 复审的用量与主 Agent 记进同一份记录：压缩的校准与“最近一次模型用量”只认主 Agent 的账。
+// 旧记录没有 `purpose`，按主 Agent 解释；只有复审用量时不产生校准。
+test('reviewer usage never calibrates the main agent context', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 2);
+    await session.append({ kind: 'usage', ignorable: true, measurement: 'request-v1', input: 12_000, output: 20, estimated: 1_000 });
+    await session.append({ kind: 'usage', ignorable: true, purpose: 'reviewer', measurement: 'request-v1', input: 4_000, output: 10, estimated: 100 });
+    // 新的实例模拟重启：校准与最近用量都只能从记录里读。
+    const restarted = createCompaction({ provider: fakeProvider([]), session, directory, id, limits });
+    const context = await restarted.context();
+    assert.equal(context.factor, 12, '校准来自主 Agent 的那条用量');
+    assert.equal(context.reported?.input, 12_000, '最近一次模型用量仍是主 Agent 的');
+    assert.equal(context.reported?.output, 20);
+  });
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 2);
+    await session.append({ kind: 'usage', ignorable: true, purpose: 'reviewer', measurement: 'request-v1', input: 9_000, output: 10, estimated: 100 });
+    const reviewerOnly = createCompaction({ provider: fakeProvider([]), session, directory, id, limits });
+    const context = await reviewerOnly.context();
+    assert.equal(context.factor, 1, '只有复审用量时不校准');
+    assert.equal(context.reported, null, '主 Agent 还没有用量');
+  });
+});
+
 // 压缩块只保存摘要和事件范围；被压缩的事件仍保留在会话日志中。
 test('the block file carries no disclosure state and the log keeps every event', async () => {
   await withSession(async ({ directory, id, session }) => {
