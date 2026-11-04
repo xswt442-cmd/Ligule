@@ -408,7 +408,8 @@ export function createCompaction({ provider, session, directory, id, limits, log
         estimated: Math.round(estimateRequest({ ...requestPrefix(), messages: view }) * factor),
         factor: Math.round(factor * 100) / 100,
         measurement: 'request-v1',
-        reported: usage === null ? null : {
+        // 端点没报数值时这条记录只用来计次：报回的那一格仍是 null，不能变成 0。
+        reported: usage === null || (input === null && output === null) ? null : {
           seq: Number(usage.seq), input, output,
           ...(usage.cache !== undefined ? { cache: usage.cache as ProviderCacheUsage } : {}),
         },
