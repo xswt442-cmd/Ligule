@@ -281,6 +281,8 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
         || (event.reasonCode !== undefined && (typeof event.reasonCode !== 'string' || !/^[a-z0-9_]{1,60}$/u.test(event.reasonCode)))
         || typeof event.durationMs !== 'number' || !Number.isFinite(event.durationMs)
         || (event.reason !== undefined && typeof event.reason !== 'string')
+        || (event.evidenceSeqs !== undefined && (!Array.isArray(event.evidenceSeqs)
+          || event.evidenceSeqs.some((seq: unknown) => typeof seq !== 'number' || !Number.isInteger(seq) || seq < 0)))
         || (event.make !== undefined && typeof event.make !== 'string')) {
         throw new KernelRuntimeError('session_policy_review_event_invalid');
       }

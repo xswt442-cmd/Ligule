@@ -155,6 +155,14 @@ test('the reviewer reuses the session model instead of its own route', async () 
     // 但请求必须来自同一个 Provider 实例，且没有第二套端点配置存在。
     assert.equal(seen.review[0].model, seen.agent[0].model);
     assert.equal(seen.review[0].maxOutputTokens ?? seen.agent[0].maxOutputTokens, seen.agent[0].maxOutputTokens);
+    // 审计必须能回查证据：policyReview 事件带上这次判定用到的原始事件序号。
+    const record = await host.handle({ method: 'session.read', params: { sessionId } }, client) as { events?: readonly Record<string, unknown>[] };
+    const audit = (record.events ?? []).find((event) => event.kind === 'policyReview');
+    assert.ok(audit !== undefined, '复审结论要写进审计');
+    const seqs = audit.evidenceSeqs;
+    assert.ok(Array.isArray(seqs) && seqs.length > 0, '审计里要有证据序号');
+    assert.ok((seqs as unknown[]).every((seq) => typeof seq === 'number' && Number.isInteger(seq) && seq >= 0));
+    assert.ok((seqs as number[]).includes(1), '第一轮用户消息（seq 1）仍在证据里');
   }, { project: PROJECT_AUTO, reviewer: { enabled: true } });
 });
 

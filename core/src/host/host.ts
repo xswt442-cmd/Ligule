@@ -1,4 +1,4 @@
-// Host 管理会话、Agent 循环、工具和策略状态；客户端通过协议与它通信。
+﻿// Host 管理会话、Agent 循环、工具和策略状态；客户端通过协议与它通信。
 // 模型提供方与策略由外部注入，会话事件通过会话记录接口持久化。
 import { randomUUID } from 'node:crypto';
 import type { Readable, Writable } from 'node:stream';
@@ -56,7 +56,8 @@ import { controllerScopeOf, mayRecordHumanRun, maySetPermission, requirePermissi
 import { usageEvent } from '../session/usage.js';
 import { summarizeUsage } from '../session/usage-summary.js';
 import { readSessionRecord } from '../session/record.js';
-import { REVIEW_INSTRUCTION_LIMIT, recentReviewInstructions } from './review-instructions.js';
+import { selectReviewEvidence } from './review-evidence.js';
+import type { ReviewEvidence } from '../kernel/reviewer.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
 import { foldLabel, readPolicyOverride } from '../session/format.js';
 import { SPILL_NAME } from '../session/spill.js';
@@ -247,8 +248,8 @@ function policyRuleKey(rule: Pick<PolicyRule, 'tool' | 'match' | 'target' | 'pat
 interface HostSessionBase {
   taskBudget?: TaskBudget;
   lastTask?: ReturnType<TaskBudget['snapshot']>;
-  /** 复审装配用的“用户仍然有效的指令”：最近几条用户原文，不参与主 Agent 投影。 */
-  reviewInstructions?: string[];
+  /** 复审装配用的可信证据快照（带事件 seq），不参与主 Agent 投影；读取失败时保留上一份。 */
+  reviewEvidence?: ReviewEvidence;
   /** 配置启用时才存在；未启用时 `auto` 行为与 P9.5 完全一致。 */
   reviewer?: SessionReviewer;
   activeRunId?: string;
@@ -1866,7 +1867,8 @@ export function createHost({
           workspaceTrusted,
           ...(request.reason === undefined ? {} : { reason: request.reason }),
           // 用户原文只作事实，不会进入主 Agent 的模型投影。
-          userInstructions: state.reviewInstructions ?? [],
+          userInstructions: (state.reviewEvidence?.constraints ?? []).map((item) => item.text),
+          ...(state.reviewEvidence === undefined ? {} : { evidence: state.reviewEvidence }),
           rules: [
             ...state.sessionPolicyRules.map((rule) => ({
               tool: rule.tool, decision: rule.decision, source: 'session' as const,
@@ -1904,9 +1906,12 @@ export function createHost({
     // 用量由独立的 `purpose: 'reviewer'` usage 事件记账，审计事件不再重复记 token。
     const recordReview = reviewer === undefined ? undefined : async (request: PolicyReviewRequest): Promise<PolicyReviewRecord> => {
       const startedAt = Date.now();
-      // 每次复审前刷新“仍然有效的指令”，避免只拿最后一条（早期约束会因此丢失）。
-      const instructions = await recentReviewInstructions(session);
-      if (instructions !== undefined) state.reviewInstructions = instructions;
+      // 每次复审前从原始 Session 事件重建可信证据：早期约束、撤销与收紧、相关历史都带 seq。
+      const evidence = await selectReviewEvidence(session, {
+        tool: request.tool,
+        ...(captureGrant === undefined ? {} : { grantActive: captureGrant.revokedAt === undefined }),
+      });
+      if (evidence !== undefined) state.reviewEvidence = evidence;
       const outcome = await reviewer.review(request);
       try {
         await session.append({
@@ -1918,6 +1923,14 @@ export function createHost({
           reasonCode: outcome.reasonCode,
           make: 'session-reviewer',
           durationMs: Date.now() - startedAt,
+          // 证据来源可回查：审计里留下这次判定用到的原始事件序号。
+          ...(state.reviewEvidence === undefined ? {} : {
+            evidenceSeqs: [
+              ...state.reviewEvidence.constraints.map((item) => item.seq),
+              ...state.reviewEvidence.revoked.map((item) => item.seq),
+              ...state.reviewEvidence.history.map((item) => item.seq),
+            ],
+          }),
           ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
         });
       } catch (error) {
@@ -2446,8 +2459,6 @@ export function createHost({
           });
         }
         // 复审装配把用户原文当作仍然有效的指令；它不会进入主 Agent 的模型投影。
-        state.reviewInstructions = [...(state.reviewInstructions ?? []), input]
-          .slice(-REVIEW_INSTRUCTION_LIMIT);
         // `maxPerRun` 是每轮上限：新一轮开始就重置，长会话里复审不会提前失效。
         state.reviewer?.beginRun();
         const result = await loop.run(input, {

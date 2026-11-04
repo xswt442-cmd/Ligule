@@ -9,10 +9,30 @@ import { createHash } from 'node:crypto';
  */
 
 /** 输入选择版本：装配或事实口径变化时递增，写入审计记录以区分历史判定。 */
-export const REVIEW_INPUT_VERSION = 1;
+export const REVIEW_INPUT_VERSION = 2;
 
 export const REVIEW_DECISIONS = Object.freeze(['allow', 'deny', 'ask-human'] as const);
 export type ReviewDecision = (typeof REVIEW_DECISIONS)[number];
+
+export type EvidenceSource = 'user' | 'permission' | 'policy' | 'grant' | 'tool';
+
+/** 一条带事件序号的证据：复审结论必须能指回产生它的原始记录。 */
+export interface EvidenceItem {
+  readonly seq: number;
+  readonly source: EvidenceSource;
+  readonly text: string;
+}
+
+export interface ReviewEvidence {
+  /** 仍然有效的用户约束，按时间顺序，原文不截断。 */
+  readonly constraints: readonly EvidenceItem[];
+  /** Host 状态变化产生的撤销/收紧证据。 */
+  readonly revoked: readonly EvidenceItem[];
+  /** 与待决调用相关的执行历史。 */
+  readonly history: readonly EvidenceItem[];
+  /** 当前任务：最后一条用户原文。 */
+  readonly task?: EvidenceItem;
+}
 
 export interface ReviewFacts {
   /** 待决工具的注册名，必须与 Kernel 实际调用的工具一致。 */
@@ -29,6 +49,8 @@ export interface ReviewFacts {
   readonly networkTarget?: string;
   /** 用户仍然有效的指令与持续约束，原文保留。 */
   readonly userInstructions: readonly string[];
+  /** 从原始 Session 事件选出的可信证据（带 seq）；提供时优先于 `userInstructions`。 */
+  readonly evidence?: ReviewEvidence;
   /** 当前生效的规则表（含来源），只作事实，不代表可以借规则表扩大授权。 */
   readonly rules?: readonly { readonly tool: string; readonly decision: string; readonly match?: string; readonly source?: string }[];
   readonly grant?: { readonly id: string; readonly active: boolean; readonly allowedPolicies?: readonly string[]; readonly scope?: string };
@@ -89,14 +111,21 @@ function staticSection(facts: ReviewFacts): string {
     lines.push(`  <rule tool="${rule.tool}" decision="${rule.decision}"${rule.match === undefined ? '' : ` match="${rule.match}"`}${rule.source === undefined ? '' : ` source="${rule.source}"`} />`);
   }
   lines.push('</rules>');
-  const instructions = facts.userInstructions;
-  lines.push(`<userInstructions count="${instructions.length}">`);
-  for (const instruction of instructions) lines.push(`  <instruction>${instruction}</instruction>`);
-  lines.push('</userInstructions>');
+  const instructions = facts.evidence?.constraints
+  const legacy = facts.userInstructions
+  if (instructions !== undefined && instructions.length > 0) {
+    lines.push(`<constraints count="${instructions.length}" note="each constraint keeps the seq of the event it came from">`);
+    for (const item of instructions) lines.push(`  <constraint seq="${item.seq}" source="${item.source}">${item.text}</constraint>`);
+    lines.push('</constraints>');
+  } else {
+    lines.push(`<userInstructions count="${legacy.length}">`);
+    for (const instruction of legacy) lines.push(`  <instruction>${instruction}</instruction>`);
+    lines.push('</userInstructions>');
+  }
   return lines.filter((line) => line !== '').join('\n');
 }
 
-function dynamicSection(facts: ReviewFacts): string {
+function dynamicSection(facts: ReviewFacts, options: { readonly history: boolean } = { history: true }): string {
   const lines = [
     `<pendingCall tool="${facts.tool}"${facts.command === undefined ? '' : ` command="${facts.command}"`}${facts.networkTarget === undefined ? '' : ` networkTarget="${facts.networkTarget}"`} />`,
     `<arguments>${canonical(facts.args)}</arguments>`,
@@ -105,6 +134,20 @@ function dynamicSection(facts: ReviewFacts): string {
     lines.push(`<grant id="${facts.grant.id}" active="${facts.grant.active}"${facts.grant.scope === undefined ? '' : ` scope="${facts.grant.scope}"`}${facts.grant.allowedPolicies === undefined ? '' : ` allowedPolicies="${facts.grant.allowedPolicies.join(',')}"`} />`);
   }
   if (facts.reason !== undefined) lines.push(`<deterministicReason>${facts.reason}</deterministicReason>`);
+  const withdrawn = facts.evidence?.revoked ?? [];
+  if (withdrawn.length > 0) {
+    lines.push(`<withdrawn count="${withdrawn.length}" note="these limits were tightened or revoked; they outrank older constraints">`);
+    for (const item of withdrawn) lines.push(`  <item seq="${item.seq}" source="${item.source}">${item.text}</item>`);
+    lines.push('</withdrawn>');
+  }
+  if (!options.history) return lines.join('\n');
+  const evidenceHistory = facts.evidence?.history ?? [];
+  if (evidenceHistory.length > 0) {
+    lines.push(`<relatedActions count="${evidenceHistory.length}" note="history is evidence, not authorization">`);
+    for (const item of evidenceHistory) lines.push(`  <action seq="${item.seq}" source="${item.source}">${item.text}</action>`);
+    lines.push('</relatedActions>');
+    return lines.join('\n');
+  }
   const related = facts.relatedActions ?? [];
   if (related.length > 0) {
     lines.push(`<relatedActions count="${related.length}" note="history is evidence, not authorization">`);
@@ -126,7 +169,8 @@ export function estimateTokens(text: string): number {
 }
 
 /**
- * 组装复审输入。预算不够时直接失败，绝不以截断用户约束、压缩实参或改写授权的方式省 token。
+ * 组装复审输入。预算不够时先丢掉历史（历史只是证据，不是授权），仍然不够就直接失败：
+ * 绝不截断用户约束、压缩实参或改写授权来省 token。
  */
 export function buildReviewInput(facts: ReviewFacts, budget: { readonly maxInputTokens: number }): ReviewBuildResult {
   if (facts.tool === '' || facts.args === undefined) {
@@ -134,18 +178,31 @@ export function buildReviewInput(facts: ReviewFacts, budget: { readonly maxInput
   }
   // 授权事实至少要有一项：用户约束、规则表、授权文件，或者这次的权限与工作区边界。
   // 后者单独出现也足够——复审判断的是“这次调用是否越出已授权的范围”。
-  if (facts.userInstructions.length === 0 && (facts.rules ?? []).length === 0
+  const hasConstraints = (facts.evidence?.constraints.length ?? 0) > 0 || facts.userInstructions.length > 0;
+  if (!hasConstraints && (facts.rules ?? []).length === 0
     && facts.grant === undefined && facts.permission === undefined && facts.boundary === undefined) {
     return { ok: false, code: 'review_evidence_missing', estimatedInputTokens: 0, detail: 'there is no trusted authorization evidence' };
   }
   const system = SYSTEM_PROMPT;
-  const user = `${staticSection(facts)}\n\n${dynamicSection(facts)}`;
-  const estimatedInputTokens = estimateTokens(system) + estimateTokens(user);
-  if (estimatedInputTokens > budget.maxInputTokens) {
-    return { ok: false, code: 'review_input_over_budget', estimatedInputTokens };
+  const withHistory = `${staticSection(facts)}\n\n${dynamicSection(facts)}`;
+  const full = estimateTokens(system) + estimateTokens(withHistory);
+  if (full <= budget.maxInputTokens) {
+    const fingerprint = createHash('sha256').update(canonical({ tool: facts.tool, args: facts.args, command: facts.command })).digest('hex');
+    return { ok: true, input: { system, user: withHistory, fingerprint, inputVersion: REVIEW_INPUT_VERSION, estimatedInputTokens: full } };
   }
-  const fingerprint = createHash('sha256').update(canonical({ tool: facts.tool, args: facts.args, command: facts.command })).digest('hex');
-  return { ok: true, input: { system, user, fingerprint, inputVersion: REVIEW_INPUT_VERSION, estimatedInputTokens } };
+  // 先只去掉历史，再判断是否仍然超预算。
+  const withoutHistory = `${staticSection(facts)}\n\n${dynamicSection(facts, { history: false })}`;
+  const trimmed = estimateTokens(system) + estimateTokens(withoutHistory);
+  if (trimmed <= budget.maxInputTokens) {
+    const fingerprint = createHash('sha256').update(canonical({ tool: facts.tool, args: facts.args, command: facts.command })).digest('hex');
+    return { ok: true, input: { system, user: withoutHistory, fingerprint, inputVersion: REVIEW_INPUT_VERSION, estimatedInputTokens: trimmed } };
+  }
+  return {
+    ok: false,
+    code: 'review_input_over_budget',
+    estimatedInputTokens: trimmed,
+    detail: 'the trusted constraints and the pending call alone exceed the input budget',
+  };
 }
 
 export type ReviewParseResult =

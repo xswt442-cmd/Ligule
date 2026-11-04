@@ -1,4 +1,4 @@
-import test from 'node:test';
+﻿import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createSessionReviewer, narrowReviewerSettings, reviewerRouteFields, reviewerSettings } from '../dist/host/reviewer.js';
 import type { ModelProvider } from '../dist/kernel/loop.js';
@@ -46,7 +46,7 @@ test('a usable reply becomes a recorded allow with its fingerprint', async () =>
   const outcome = await reviewer.review({ tool: 'exec', input: facts.args, command: 'python3 script.py', policy: 'auto', reason: undefined });
   assert.equal(outcome.decision, 'allow');
   assert.equal(outcome.reasonCode, 'read_only_python');
-  assert.equal(outcome.inputVersion, 1);
+  assert.equal(outcome.inputVersion, 2);
   assert.equal(outcome.fingerprint?.length, 64);
   const usage = reviewer.usage();
   assert.equal(usage.calls, 1);
