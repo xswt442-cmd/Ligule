@@ -22,6 +22,7 @@ from harbor.models.trajectories import Trajectory
 MANIFEST_SCHEMA = "ligule.eval-manifest.v1"
 REPORT_SCHEMA = "ligule.eval-report.v2"
 HARBOR_VERSION = "0.25.0"
+POLICY_MODES = ("always", "ask", "auto", "never")
 HARBOR_RESULT_SCHEMA = "harbor.models.trial.result.TrialResult@0.25.0"
 MAX_JSON_EVIDENCE_BYTES = 256 * 1024 * 1024
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
@@ -175,7 +176,7 @@ def _check_manifest(raw: Any) -> dict[str, Any]:
         _fail("harbor_version_unsupported")
     for field in ("dataset_id", "dataset_revision", "tool_mode", "expected_evaluation"):
         _text(experiment[field], f"experiment_{field}")
-    if experiment["policy_mode"] != "auto":
+    if experiment["policy_mode"] not in POLICY_MODES:
         _fail("experiment_policy_mode_invalid")
     for field in ("docker_image_digest", "model_id", "provider", "node_version", "os"):
         _nullable_text(experiment[field], f"experiment_{field}")

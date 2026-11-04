@@ -69,22 +69,45 @@ function cacheUsage(value: unknown): ProviderCacheUsage | undefined {
     providerInputIncludesCache: item.providerInputIncludesCache, consistent: item.consistent as boolean | null };
 }
 
-export function usageEvent(request: ModelRequest, events: unknown[]): {
-  kind: 'usage'; ignorable: true; input: number | null; output: number | null; estimated: number; measurement: 'request-v1';
-  cache?: ProviderCacheUsage;
+// 用量事件按用途分开记账：主 Agent 的模型调用与可选复审（Reviewer）不能混在一起统计。
+export type UsagePurpose = 'agent' | 'reviewer';
+
+export function usageEvent(
+  request: ModelRequest,
+  events: unknown[],
+  purpose: UsagePurpose = 'agent',
+  options: { readonly unknownWhenUnreported?: boolean } = {},
+): {
+  kind: 'usage'; ignorable: true; purpose: UsagePurpose; input: number | null; output: number | null;
+  estimated: number; measurement: 'request-v1'; cache?: ProviderCacheUsage;
 } | null {
   const raw = [...events].reverse().find((event) => typeof event === 'object' && event !== null
     && !Array.isArray(event) && (event as { type?: unknown }).type === 'usage');
-  if (raw === undefined || typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
-  const usage = raw as { input?: unknown; output?: unknown; cache?: unknown };
-  const input = tokenCount(usage.input);
-  const output = tokenCount(usage.output);
-  const cache = cacheUsage(usage.cache);
+  const usage = raw !== undefined && typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+    ? raw as { input?: unknown; output?: unknown; cache?: unknown }
+    : undefined;
+  const input = usage === undefined ? null : tokenCount(usage.input);
+  const output = usage === undefined ? null : tokenCount(usage.output);
+  const cache = usage === undefined ? undefined : cacheUsage(usage.cache);
   // Keep null as unknown; Number(null) would turn a missing provider total into a measured zero.
-  if (input === null && output === null && cache === undefined) return null;
+  if (input === null && output === null && cache === undefined) {
+    // 端点完全没报用量时，调用本身仍然发生过：按需记一条「用量未知」的事件，
+    // 让汇总里保留请求数，而不是让这次请求凭空消失。
+    if (options.unknownWhenUnreported !== true) return null;
+    return {
+      kind: 'usage',
+      ignorable: true,
+      purpose,
+      input: null,
+      output: null,
+      estimated: estimateRequest(request),
+      measurement: 'request-v1',
+    };
+  }
   return {
     kind: 'usage',
     ignorable: true,
+    purpose,
     input,
     output,
     estimated: estimateRequest(request),

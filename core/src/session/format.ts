@@ -1,6 +1,7 @@
 // 会话记录首行保存格式版本、项目归属和创建时的模式信息。
 // 未知格式版本必须拒绝读取，避免静默跳过记录并生成错误的模型上下文。
 import { KernelRuntimeError } from '../errors.js';
+import { POLICY_SEMANTICS, isPolicyMode, readPersistedPolicyMode, type PolicyMode } from '../kernel/policy.js';
 import { isCanonicalTodoItems } from './todo.js';
 import { checkedImageReferences } from './media.js';
 import { isRunAcceptance, isRunResultRef } from './run.js';
@@ -95,8 +96,14 @@ function checkedSessionHeader(event: SessionEvent, version: number): SessionHead
 const WRITTEN_KINDS = [
   'session', 'user', 'reasoning', 'assistant', 'tool', 'mode', 'usage', 'turn', 'label', 'turnContext', 'modelSelection',
   'sessionGeneration', 'sessionLoopIterations', 'sessionPermission', 'sessionPolicy', 'sessionMcpTrust', 'sessionPolicyRule',
-  'compaction', 'todoWrite', 'image', 'screenCapture',
+  'compaction', 'todoWrite', 'image', 'screenCapture', 'policyReview',
 ];
+
+// 会话里保存的审批档位。返回 `unknown` 表示值无法解释，调用方必须拒绝该记录。
+export function readPolicyOverride(value: unknown, semantics: unknown): PolicyMode | null | 'unknown' {
+  if (value === null) return null;
+  return readPersistedPolicyMode(value, semantics) ?? 'unknown';
+}
 
 export function createSessionHeader({
   id,
@@ -169,7 +176,14 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
     if (kind === 'sessionPolicy') {
       if (event.ignorable !== true) throw new KernelRuntimeError('session_policy_ignorable_required');
       const override = event.override;
-      if ((override !== null && override !== 'ask' && override !== 'auto' && override !== 'none' && override !== 'never')
+      const semantics = event.semantics;
+      // 没有语义标记的历史事件只有旧四值合法；带标记的事件只接受新四档。
+      const validOverride = override === null
+        || (semantics === undefined
+          ? override === 'ask' || override === 'auto' || override === 'none' || override === 'never'
+          : semantics === POLICY_SEMANTICS && isPolicyMode(override));
+      if ((semantics !== undefined && semantics !== POLICY_SEMANTICS) || !validOverride
+        || readPolicyOverride(override, semantics) === 'unknown'
         || !Number.isSafeInteger(event.consecutive) || (event.consecutive as number) < 0
         || !Number.isSafeInteger(event.total) || (event.total as number) < (event.consecutive as number)
         || typeof event.forcedToAsk !== 'boolean') {
@@ -256,6 +270,25 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
         || (typeof rule.path === 'string' && !(/^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/])/u.test(rule.path) || rule.path.startsWith('/')))) {
         throw new KernelRuntimeError('session_policy_rule_event_invalid');
       }
+    }
+    if (kind === 'policyReview') {
+      // 复审记录只作审计：它不进入模型投影，旧读取方可以安全跳过。
+      // 用量不走这里——复审的 token 记在 purpose=reviewer 的 usage 事件上，避免两套数字打架。
+      if (event.ignorable !== true
+        || typeof event.tool !== 'string' || event.tool.trim() === ''
+        || (event.review !== 'allow' && event.review !== 'deny' && event.review !== 'ask-human')
+        || typeof event.at !== 'string' || !Number.isFinite(Date.parse(event.at))
+        || (event.reasonCode !== undefined && (typeof event.reasonCode !== 'string' || !/^[a-z0-9_]{1,60}$/u.test(event.reasonCode)))
+        || typeof event.durationMs !== 'number' || !Number.isFinite(event.durationMs)
+        || (event.reason !== undefined && typeof event.reason !== 'string')
+        || (event.make !== undefined && typeof event.make !== 'string')) {
+        throw new KernelRuntimeError('session_policy_review_event_invalid');
+      }
+    }
+    if (kind === 'usage' && event.purpose !== undefined
+      && event.purpose !== 'agent' && event.purpose !== 'reviewer') {
+      // 用途决定这条用量记在主 Agent 还是复审账上；无法解释的用途必须拒绝，不能猜。
+      throw new KernelRuntimeError('session_usage_event_invalid');
     }
     events.push(event);
     if (kind === 'user') {

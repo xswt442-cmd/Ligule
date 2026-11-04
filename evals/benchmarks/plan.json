@@ -1,0 +1,37 @@
+{
+  "schema_version": "ligule.agent-benchmark-plan.v1",
+  "dataset": {
+    "name": "terminal-bench",
+    "version": "2.0",
+    "source": "Harbor registry"
+  },
+  "tasks": [
+    { "id": "fix-git", "category": "software-engineering", "covers": "repository state repair" },
+    { "id": "cancel-async-tasks", "category": "software-engineering", "covers": "asynchronous code modification and tests" },
+    { "id": "break-filter-js-from-html", "category": "security", "covers": "adversarial input handling" },
+    { "id": "db-wal-recovery", "category": "file-operations", "covers": "recovering an inconsistent artifact" },
+    { "id": "nginx-request-logging", "category": "system-administration", "covers": "service configuration and verification" },
+    { "id": "openssl-selfsigned-cert", "category": "security", "covers": "cryptographic tooling and file outputs" },
+    { "id": "count-dataset-tokens", "category": "model-training", "covers": "data inspection and exact counting" },
+    { "id": "log-summary-date-ranges", "category": "data-processing", "covers": "multi-file transformation" }
+  ],
+  "attempts_per_task": 1,
+  "concurrency": 3,
+  "timeout_multipliers": {
+    "task": 1.0,
+    "agent": 4.0,
+    "agent_setup": 4.0,
+    "environment_build": 2.0
+  },
+  "model": {
+    "api": "messages",
+    "model_calls": 40,
+    "timeout_ms": 3600000,
+    "request_timeout_ms": 300000
+  },
+  "verifier": {
+    "reward_key": "reward",
+    "pass_threshold": 1.0,
+    "authority": "Harbor task verifier in a separate environment"
+  }
+}

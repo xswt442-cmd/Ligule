@@ -17,7 +17,7 @@ import {
   assertDelegationMcpServer, assertDelegationMcpTool, assertDelegationMode, assertDelegationModelSelection, assertDelegationPermission,
   assertDelegationPolicy, boundedOutputTokens, createDelegationGrant, delegationPathOf,
   listDelegationGrants, recordDelegationEvent, revokeDelegationGrant,
-  type CreateDelegationGrantInput, type DelegationGrant,
+  type CreateDelegationGrantInput, type DelegationGrant, type DelegationPolicy,
 } from './agent-control.js';
 import { listMcpTrust, mcpServerTrust, mcpTrustPathOf, setMcpServerTrust, type McpTrustScope } from './mcp-trust.js';
 import { createPermissionContext, DEFAULT_PERMISSION_CONTEXT, permissionDenial, type PermissionContext, type PermissionContextOptions, type PermissionNetwork, type PermissionProfile } from '../kernel/permission.js';
@@ -35,7 +35,7 @@ import { historyPathOf, loadHistory, rememberHistory } from '../kernel/input-his
 import { parsePrefsJson, prefsPathOf, readPrefs, savePrefs } from '../kernel/desktop-prefs.js';
 import { credentialStatus, deleteCredential, storeCredential } from '../kernel/credentials.js';
 import { modelServices, modelSelection, resolveModel, type ModelSelection } from '../kernel/model-services.js';
-import { createDecisionChain, isPolicyRule, policyArgsHash, type DecisionChain, type PolicyAskResult, type PolicyMode, type PolicyState, type PolicyThresholds } from '../kernel/policy.js';
+import { POLICY_SEMANTICS, createDecisionChain, isPolicyMode, isPolicyRule, policyArgsHash, readPersistedPolicyMode, readPolicyMode, type DecisionChain, type PolicyAskResult, type PolicyMode, type PolicyState, type PolicyThresholds } from '../kernel/policy.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { BASE_SYSTEM_PROMPT } from '../kernel/base-prompt.js';
 import { createSessionLog, type SessionLog } from '../session/session.js';
@@ -54,8 +54,11 @@ import { sessionWriterActive } from '../session/lock.js';
 import { requestAgentControl, TRUSTED_AGENT_CONTROL_ORIGIN, type AgentControlRequest } from './agent-control-runtime.js';
 import { controllerScopeOf, mayRecordHumanRun, maySetPermission, requirePermissionControl, requireTrustedUi, runChannelOf, runOriginBasis, runScopesOf, type ControlTrust } from './capabilities.js';
 import { usageEvent } from '../session/usage.js';
+import { summarizeUsage } from '../session/usage-summary.js';
+import { readSessionRecord } from '../session/record.js';
+import { REVIEW_INSTRUCTION_LIMIT, recentReviewInstructions } from './review-instructions.js';
 import { repairUnresolvedCalls } from '../session/repair.js';
-import { foldLabel } from '../session/format.js';
+import { foldLabel, readPolicyOverride } from '../session/format.js';
 import { SPILL_NAME } from '../session/spill.js';
 import { assertNoLegacyTrashConfig, boundaryOf, limitsOf, workingDirectoryOf } from '../capability/limits.js';
 import { resolveWithin } from '../capability/paths.js';
@@ -103,6 +106,9 @@ import type { PolicyRule } from '../kernel/config-edit.js';
 import type { ToolDefinition } from '../kernel/kernel.js';
 import { adoptSessionMode, type SessionModeState } from './session-mode.js';
 import { providerFromConfig, hostProviderFromConfig, type HostGenerationOptions, type HostProvider } from './provider.js';
+import { createSessionReviewer, reviewerSettings, type SessionReviewer } from './reviewer.js';
+import type { PolicyReviewRecord, PolicyReviewRequest } from '../kernel/policy.js';
+import type { ReviewFacts } from '../kernel/reviewer.js';
 import { approvalArgsDigest, summarizeApproval } from './approval.js';
 import { runAcceptanceScope, runReceiptView, withinRunWindows } from './run-records.js';
 import { parseInitialGenerationSettings } from './session-initial-settings.js';
@@ -241,6 +247,10 @@ function policyRuleKey(rule: Pick<PolicyRule, 'tool' | 'match' | 'target' | 'pat
 interface HostSessionBase {
   taskBudget?: TaskBudget;
   lastTask?: ReturnType<TaskBudget['snapshot']>;
+  /** 复审装配用的“用户仍然有效的指令”：最近几条用户原文，不参与主 Agent 投影。 */
+  reviewInstructions?: string[];
+  /** 配置启用时才存在；未启用时 `auto` 行为与 P9.5 完全一致。 */
+  reviewer?: SessionReviewer;
   activeRunId?: string;
   readonly id: string;
   readonly search: SearchStatus;
@@ -934,11 +944,11 @@ export function createHost({
     let policy: Exclude<PolicyMode, 'default'> | undefined;
     const requestedPolicy = params.initialPolicy ?? grant?.defaultPolicy;
     if (requestedPolicy !== undefined) {
-      if (requestedPolicy !== 'ask' && requestedPolicy !== 'auto' && requestedPolicy !== 'none' && requestedPolicy !== 'never') {
-        throw new KernelError('policy_mode_unknown');
-      }
-      if (grant !== undefined) assertDelegationPolicy(grant, requestedPolicy);
-      policy = requestedPolicy;
+      // 旧客户端的 `none` 只降级为新语义的 `ask`，不会升级成不审批的 `never`。
+      const mode = requestedPolicy === 'none' ? 'ask' : readPolicyMode(requestedPolicy, false);
+      if (mode === undefined) throw new KernelError('policy_mode_unknown');
+      if (grant !== undefined) assertDelegationPolicy(grant, mode);
+      policy = mode;
     }
     const hasInitialPermission = params.initialPermissionProfile !== undefined || params.initialPermissionNetwork !== undefined;
     let initialPermission: InitialSessionSettings['permission'];
@@ -1133,7 +1143,7 @@ export function createHost({
       return { applies };
     }
     if (env.policy?.mode === effective) return { applies: [] };
-    if (effective !== 'ask' && effective !== 'auto' && effective !== 'none' && effective !== 'never') throw new KernelError('policy_mode_unknown');
+    if (!isPolicyMode(effective)) throw new KernelError('policy_mode_unknown');
     const applies: { sessionId: string; when: 'now' }[] = [];
     for (const [id, state] of sessions) {
       if (state.environment !== env) continue;
@@ -1594,7 +1604,7 @@ export function createHost({
         detail: 'session policy changes require a session record with format version 2 or newer',
       });
     }
-    await session.append({ kind: 'sessionPolicy', ignorable: true, ...chain.snapshot(), override });
+    await session.append({ kind: 'sessionPolicy', ignorable: true, ...chain.snapshot(), override, semantics: POLICY_SEMANTICS });
   }
 
   async function build(
@@ -1731,8 +1741,12 @@ export function createHost({
       }
       const savedPolicy = events.filter((event) => event.kind === 'sessionPolicy').at(-1);
       if (savedPolicy !== undefined) {
+        const recoveredOverride = readPolicyOverride(savedPolicy.override, savedPolicy.semantics);
+        if (recoveredOverride === 'unknown') {
+          throw new KernelError('session_policy_event_invalid', { detail: 'the saved approval mode cannot be interpreted' });
+        }
         recoveredPolicyState = {
-          override: savedPolicy.override === null ? null : savedPolicy.override as PolicyMode,
+          override: recoveredOverride,
           consecutive: savedPolicy.consecutive as number,
           total: savedPolicy.total as number,
           forcedToAsk: savedPolicy.forcedToAsk as boolean,
@@ -1802,12 +1816,117 @@ export function createHost({
               confirmedPartialWorkspaceWrite: initial.permission.confirmedPartialWorkspaceWrite,
             });
     }
+    // 复审只在配置显式启用时存在；未启用时 `auto` 与 P9.5 行为一致。
+    const reviewSettings = reviewerSettings(config as unknown as Record<string, unknown>);
+    const reviewer = reviewSettings === undefined ? undefined : (() => {
+      // 复审的默认路由就是用户选中的主模型；先把主模型解析成具体端点，
+      // 再让 `[reviewer]` 覆盖需要的字段——直接删 `selection` 会退回配置文件里的第一个服务。
+      const main = resolveModel(modelConfigOf(config));
+      const route: Record<string, unknown> = {
+        ...(typeof main.api === 'string' ? { api: reviewSettings.api ?? main.api } : {}),
+        ...(reviewSettings.api === undefined ? {} : { api: reviewSettings.api }),
+        ...(reviewSettings.baseURL === undefined
+          ? (typeof main.baseURL === 'string' ? { baseURL: main.baseURL } : {})
+          : { baseURL: reviewSettings.baseURL }),
+        ...(reviewSettings.model === undefined
+          ? (typeof main.model === 'string' ? { model: main.model } : {})
+          : { model: reviewSettings.model }),
+        ...(typeof main.apiKeyEnv === 'string' || reviewSettings.apiKeyEnv !== undefined
+          ? { apiKeyEnv: reviewSettings.apiKeyEnv ?? main.apiKeyEnv }
+          : {}),
+      };
+      // 项目层的 `[reviewer]` 是不可信输入：端点与凭据引用必须是用户配置或命令行绑定过的，
+      // 否则一次复审就能把已保存的密钥发到任意地址。
+      const bindings = Object.keys(env.layers).length === 0 ? undefined
+        : modelConfigOf(createConfig({ user: env.layers.user ?? {}, flag: env.layers.flag ?? {} }));
+      const bound = bindings !== undefined && typeof route.api === 'string' && typeof route.baseURL === 'string'
+        && hasModelCredentialBinding(bindings, route.api, route.baseURL, route.apiKeyEnv ?? 'LIGULE_API_KEY');
+      if (!bound) {
+        try {
+          logger?.log?.('reviewer stays off: its endpoint and credential are not bound', { sessionId: id });
+        } catch { /* 记录失败不影响会话 */ }
+        return undefined;
+      }
+      return createSessionReviewer({
+        settings: reviewSettings,
+        provider: deriveProvider({ ...config, model: route }, { outputTokens: reviewSettings.maxOutputTokens }),
+        factsOf: (request: PolicyReviewRequest): ReviewFacts => ({
+          tool: request.tool,
+          args: request.input,
+          ...(request.command === undefined ? {} : { command: request.command }),
+          policyMode: request.policy,
+          permission: { profile: state.permission.profile, network: state.permission.network },
+          boundary: env.projectRoot,
+          workingDirectory: env.projectRoot,
+          workspaceTrusted,
+          ...(request.reason === undefined ? {} : { reason: request.reason }),
+          // 用户原文只作事实，不会进入主 Agent 的模型投影。
+          userInstructions: state.reviewInstructions ?? [],
+          rules: [
+            ...state.sessionPolicyRules.map((rule) => ({
+              tool: rule.tool, decision: rule.decision, source: 'session' as const,
+              ...(rule.match === undefined ? {} : { match: rule.match }),
+            })),
+            ...(policy?.rules ?? []).map((rule) => ({
+              tool: rule.tool, decision: rule.decision, source: 'config' as const,
+              ...(rule.match === undefined ? {} : { match: rule.match }),
+            })),
+          ],
+          ...(captureGrant === undefined ? {} : {
+            grant: {
+              id: captureGrant.id,
+              active: true,
+              scope: captureGrant.projectRoot,
+              ...(captureGrant.allowedPolicies === undefined ? {} : { allowedPolicies: captureGrant.allowedPolicies }),
+            },
+          }),
+        }),
+        logger: (message, detail) => {
+          try { logger?.log?.(message, { ...detail, sessionId: id }); } catch { /* 记录失败不影响审批结果 */ }
+        },
+        onUsage: (event) => {
+          // 复审用量单独成账（purpose=reviewer），与主 Agent 的 usage 事件分开统计。
+          if (event === null) return;
+          void session.append(event).catch((error: unknown) => {
+            try { logger?.log?.('failed to record reviewer usage', { sessionId: id, session_error: String(error) }); } catch { /* 忽略 */ }
+          });
+        },
+      });
+    })();
+
+    if (reviewer !== undefined) state.reviewer = reviewer;
+    // 复审结论写入会话审计（不影响模型投影）：只记录结论、原因码和耗时。
+    // 用量由独立的 `purpose: 'reviewer'` usage 事件记账，审计事件不再重复记 token。
+    const recordReview = reviewer === undefined ? undefined : async (request: PolicyReviewRequest): Promise<PolicyReviewRecord> => {
+      const startedAt = Date.now();
+      // 每次复审前刷新“仍然有效的指令”，避免只拿最后一条（早期约束会因此丢失）。
+      const instructions = await recentReviewInstructions(session);
+      if (instructions !== undefined) state.reviewInstructions = instructions;
+      const outcome = await reviewer.review(request);
+      try {
+        await session.append({
+          kind: 'policyReview',
+          ignorable: true,
+          at: new Date().toISOString(),
+          tool: request.tool,
+          review: outcome.decision,
+          reasonCode: outcome.reasonCode,
+          make: 'session-reviewer',
+          durationMs: Date.now() - startedAt,
+          ...(outcome.reason === undefined ? {} : { reason: outcome.reason }),
+        });
+      } catch (error) {
+        logger?.log?.('failed to record the review decision', { sessionId: id, session_error: String(error) });
+      }
+      return outcome;
+    };
     const chain = createDecisionChain({
       ...policy,
       rules: mergePolicyRules([
         { source: 'session', rules: state.sessionPolicyRules },
         { source: 'config', rules: policy?.rules ?? [] },
       ]).rules as PolicyRule[],
+      ...(recordReview === undefined ? {} : { review: recordReview }),
       ask: async ({ tool, input, command, reason, shell, executable, policy, policySource, policyForced, rememberable, scriptBinding, callId, identityDigest }): Promise<PolicyAskResult> => {
         const telemetryContext = telemetryEnabled(telemetry) ? currentTelemetryContext() : undefined;
         const telemetryApprovalRunId = telemetryContext?.runId
@@ -2321,6 +2440,11 @@ export function createHost({
             maxBytes: MAX_DELEGATION_SCHEMA_BYTES + 1024,
           });
         }
+        // 复审装配把用户原文当作仍然有效的指令；它不会进入主 Agent 的模型投影。
+        state.reviewInstructions = [...(state.reviewInstructions ?? []), input]
+          .slice(-REVIEW_INSTRUCTION_LIMIT);
+        // `maxPerRun` 是每轮上限：新一轮开始就重置，长会话里复审不会提前失效。
+        state.reviewer?.beginRun();
         const result = await loop.run(input, {
           signal: budget.signal,
           task: budget,
@@ -2490,7 +2614,7 @@ export function createHost({
       pending,
       available: {
         modes,
-        policies: ['ask', 'auto', 'none', 'never', 'default'],
+        policies: ['always', 'ask', 'auto', 'never', 'default'],
         permissionProfiles: ['read-only', 'workspace-write', 'full-access'],
         permissionNetworks: ['policy', 'unrestricted', 'disabled'],
         services,
@@ -2555,10 +2679,12 @@ export function createHost({
         const grant = await activeDelegation();
         if (grant !== undefined) assertDelegationPolicy(grant, state.chain.configuredMode());
         nextOverride = null;
-      } else if (params.policy === 'ask' || params.policy === 'auto' || params.policy === 'none' || params.policy === 'never') {
+      } else if (isPolicyMode(params.policy) || params.policy === 'none') {
+        // 旧客户端发来的 `none` 降级为 `ask`；其余模式按当前契约校验。
+        const mode: PolicyMode = params.policy === 'none' ? 'ask' : params.policy;
         const grant = await activeDelegation();
-        if (grant !== undefined) assertDelegationPolicy(grant, params.policy);
-        nextOverride = params.policy;
+        if (grant !== undefined) assertDelegationPolicy(grant, mode);
+        nextOverride = mode;
       }
       else throw new KernelError('policy_mode_unknown');
       await appendPolicyState(state.session, state.chain, nextOverride);
@@ -2567,7 +2693,7 @@ export function createHost({
       else state.chain.setMode(nextOverride);
       if (agentControl !== undefined && params.policy !== 'default') {
         await recordDelegationEvent(agentControl.storePath, {
-          kind: 'grant.used', grantId: agentControl.grantId, policy: params.policy as 'ask' | 'auto' | 'none' | 'never',
+          kind: 'grant.used', grantId: agentControl.grantId, policy: nextOverride as 'always' | 'ask' | 'auto' | 'never',
         });
       }
       return { ...(await sessionConfiguration(state, bridge)), applies: 'next_decision' };
@@ -3641,6 +3767,22 @@ export function createHost({
             };
           });
         }
+        case 'usage.get': {
+          // 只读聚合：用途分开记账，未知保持未知，缓存不重复计入输入。
+          // 记录必须按会话自己的项目环境定位；Host 可以打开其他项目的会话。
+          const state = sessions.get(sessionId);
+          const owner = state === undefined ? branchOwner(sessionId) : undefined;
+          const env = state?.environment
+            ?? (owner === undefined ? defaultEnvironment : sessions.get(owner)?.environment ?? defaultEnvironment);
+          const path = recordPathOf(sessionId, env);
+          try {
+            await access(path);
+          } catch {
+            throw new KernelError('session_not_found', { detail: sessionId });
+          }
+          const record = await readSessionRecord(path);
+          return { sessionId, summary: summarizeUsage(record.events) };
+        }
         case 'status.get': {
           const state = open(sessionId);
           const currentGrant = await activeDelegation();
@@ -3801,13 +3943,18 @@ export function createHost({
             maxPermissionProfile: message.params.maxPermissionProfile as PermissionProfile,
             defaultNetwork: message.params.defaultNetwork as PermissionNetwork,
             maxNetwork: message.params.maxNetwork as PermissionNetwork,
-            defaultPolicy: message.params.defaultPolicy as CreateDelegationGrantInput['defaultPolicy'],
-            allowedPolicies: [
+            // 旧 UI 的 `none`/旧 `never` 只降级为 `ask`；更新后的客户端要么显式带上语义标记，
+            // 要么带着只有新版本才会发送的 `allowedPolicyAlways`，这两种情况按新语义读取。
+            defaultPolicy: readPersistedPolicyMode(message.params.defaultPolicy,
+              message.params.policySemantics
+                ?? (message.params.allowedPolicyAlways === undefined ? undefined : POLICY_SEMANTICS)) ?? 'ask',
+            allowedPolicies: [...new Set<DelegationPolicy>([
               ...(message.params.allowedPolicyAsk === true ? ['ask' as const] : []),
               ...(message.params.allowedPolicyAuto === true ? ['auto' as const] : []),
-              ...(message.params.allowedPolicyNone === true ? ['none' as const] : []),
               ...(message.params.allowedPolicyNever === true ? ['never' as const] : []),
-            ],
+              ...(message.params.allowedPolicyAlways === true ? ['always' as const] : []),
+              ...(message.params.allowedPolicyNone === true ? ['ask' as const] : []),
+            ])],
             allowOperator: message.params.allowOperator as boolean,
             allowScreenCapture: message.params.allowScreenCapture === true,
             confirmScreenCapture: message.params.confirmScreenCapture === true,
@@ -4097,7 +4244,10 @@ export function createHost({
             services: modelServices(values.model?.services),
             selection: values.model?.selection === undefined ? null : modelSelection(values.model.selection),
             // 返回配置中的默认策略；`status.get` 返回会话当前生效的策略。
-            policyMode: values.policy.mode,
+            // 带语义标记的文件按新语义展示；没有标记的历史 none/never 仍按旧语义降级，避免界面显示成可用的新档位。
+            policyMode: values.policy.mode === undefined
+              ? undefined
+              : readPersistedPolicyMode(values.policy.mode, values.policy.semantics),
             layers,
             sources,
             rules,

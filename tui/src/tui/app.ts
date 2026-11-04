@@ -28,7 +28,7 @@ import { activeRunBudgetSegment, buildStatusLine, contextSegment } from './statu
 import { controlPresets, textOf as chooseText, type Locale } from '@ligule/core/tui.js';
 import type { TerminalAction } from './keymap.js';
 import { controlGrantRequest, parseControlWizardInput, type ControlWizard, type ControlWizardValues } from './control-wizard.js';
-import type { AskAnswer, AskQuestion, Connection, HostRequest, SessionEvent, SessionHeader, SessionSummary } from '@ligule/core/tui.js';
+import type { AskAnswer, AskQuestion, Connection, HostRequest, SessionEvent, SessionHeader, SessionSummary, UsageBucket, UsageSummary } from '@ligule/core/tui.js';
 import type { TemplateCommand } from './commands.js';
 import type { EditorOutcome } from './editor.js';
 import type { SavedInput } from './input-store.js';
@@ -180,9 +180,9 @@ interface SearchState {
   readonly at: number;
 }
 
-type PickerKind = 'model' | 'thinking' | 'mode' | 'policy' | 'permission' | 'permission-network' | 'permission-confirm-full' | 'permission-confirm-network' | 'permission-confirm-partial'
+type PickerKind = 'model' | 'thinking' | 'mode' | 'policy' | 'policy-confirm-never' | 'permission' | 'permission-network' | 'permission-confirm-full' | 'permission-confirm-network' | 'permission-confirm-partial'
   | 'control' | 'control-action' | 'control-revoke-confirm';
-type PolicyValue = 'ask' | 'auto' | 'none' | 'never';
+type PolicyValue = 'always' | 'ask' | 'auto' | 'never';
 type AgentGrant = {
   readonly id: string;
   readonly name: string;
@@ -375,6 +375,7 @@ interface TuiRequestResults {
   readonly 'run.start': LoopResult;
   readonly 'run.cancel': { readonly cancelled: boolean };
   readonly 'status.get': TuiStatus;
+  readonly 'usage.get': { readonly sessionId: string; readonly summary: UsageSummary };
   readonly 'permission.set': { readonly sessionId: string; readonly permission: NonNullable<TuiStatus['permission']>; readonly applies: 'now' | 'unchanged' };
   readonly 'model.select': { readonly model: string | null; readonly serviceId: string; readonly when: 'now' | 'round' };
   readonly 'session.configure': { readonly applies: 'now' | 'next_round' | 'unchanged'; readonly [key: string]: unknown };
@@ -539,6 +540,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   const [controlWizardSubmitting, setControlWizardSubmitting] = useState(false);
   const controlWizardSubmittingRef = useRef(false);
   const controlWizardGeneration = useRef(0);
+  // The wizard mirror keeps `send` honest: a keystroke handled after the wizard closed must not
+  // resurrect it through a stale render closure and submit the grant a second time.
+  const controlWizardRef = useRef<ControlWizard | null>(null);
+  const showControlWizard = (next: ControlWizard | null) => {
+    controlWizardRef.current = next;
+    setControlWizard(next);
+  };
   const [mcpTrustPending, setMcpTrustPending] = useState<McpTrustPending | null>(null);
   const mcpTrustOutcomeRows = useRef(new Map<string, TranscriptItem[]>());
   const [mcpTrustOutcomeRevision, setMcpTrustOutcomeRevision] = useState(0);
@@ -1159,6 +1167,19 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     });
   }, [client, push, refreshStatus, sessionId, t]);
 
+  const changePolicy = useCallback((mode: string) => {
+    const own = sessionId;
+    void client.request('policy.set', { sessionId: own, mode }).then(async (changed) => {
+      if (activeSession.current !== own) return;
+      await refreshStatus();
+      push({ kind: 'meta', text: changed.policySource === 'session'
+        ? t(`当前会话审批方式：${changed.policy}（已生效）`, `Session approval mode: ${changed.policy} (active now)`)
+        : t(`已恢复默认审批方式：${changed.policy}`, `Default approval mode restored: ${changed.policy}`) });
+    }, (error: unknown) => {
+      if (activeSession.current === own) push({ kind: 'error', text: t(`无法修改审批方式：${errorCode(error) ?? 'policy_change_failed'}`, `Could not change approval mode: ${errorCode(error) ?? 'policy_change_failed'}`) });
+    });
+  }, [client, push, refreshStatus, sessionId, t]);
+
   const createPresetGrant = useCallback((presetId: string) => {
     const permission = status?.permission;
     if (permission === undefined) {
@@ -1189,9 +1210,10 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         defaultNetwork: preset.defaultNetwork,
         maxNetwork: preset.maxNetwork,
         defaultPolicy: preset.defaultPolicy,
+        allowedPolicyAlways: preset.allowedPolicies.includes('always'),
         allowedPolicyAsk: preset.allowedPolicies.includes('ask'),
-        allowedPolicyAuto: false,
-        allowedPolicyNone: preset.allowedPolicies.includes('none'),
+        allowedPolicyAuto: preset.allowedPolicies.includes('auto'),
+        allowedPolicyNever: preset.allowedPolicies.includes('never'),
         allowOperator: preset.allowOperator,
         allowedMcpServers: [],
         allowedMcpTools: [],
@@ -1301,10 +1323,16 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         }));
       } else if (kind === 'policy') {
         available = [
-          { id: 'ask', label: t('逐次审批', 'Ask for each tool'), description: t('工具执行前询问；已有拒绝规则和访问边界继续生效。', 'Ask before tools execute; denial rules and access boundaries still apply.') },
-          { id: 'auto', label: t('自动判定', 'Automatic decisions'), description: t('由现有规则判定；仍可能请求审批，访问边界不变。', 'Use the existing rules; approvals may still be requested and access boundaries stay unchanged.') },
-          { id: 'none', label: t('不受审批', 'No approval'), description: t('普通权限内工具不等待逐项审批；工作区边界、拒绝规则和独立信任要求仍生效。', 'Ordinary in-bound tools do not wait for approval; workspace boundaries, deny rules, and separate trust requirements remain active.') },
+          { id: 'always', label: t('每次都要审批', 'Ask every time'), description: t('每个工具调用都等待批准；拒绝规则先执行，显式批准记忆不会跳过询问。', 'Every tool call waits for approval; deny rules run first and remembered approvals do not skip the prompt.') },
+          { id: 'ask', label: t('逐次审批', 'Ask for each tool'), description: t('先按规则表判定，没有结论再询问；已有拒绝规则和访问边界继续生效。', 'The rule table decides first, otherwise ask; denial rules and access boundaries still apply.') },
+          { id: 'auto', label: t('自动判定', 'Automatic decisions'), description: t('由规则表和确定性分析判定；仍可能请求审批，访问边界不变。', 'The rule table and deterministic analysis decide; approvals may still be requested and access boundaries stay unchanged.') },
+          { id: 'never', label: t('完全不审批', 'Never ask'), description: t('跳过整个 Policy 层（规则和审批），硬性安全校验继续生效；需要再次确认。', 'Skip the whole policy layer, including rules and prompts; hard safety checks stay active. Requires a second confirmation.') },
           { id: 'reset', label: t('使用配置默认', 'Use configured default'), description: t('撤销当前会话的审批方式覆盖。', 'Clear this session’s approval-mode override.') },
+        ];
+      } else if (kind === 'policy-confirm-never') {
+        available = [
+          { id: 'confirm', label: t('我确认跳过所有审批', 'Confirm skipping all approvals'), description: t('工具调用不再等待批准，规则表中的 allow/ask/deny 也不再参与判定。工作区边界、交互通道限制、脚本绑定、系统硬拒绝和权限隔离仍然生效。这一步立即改变当前会话。', 'Tool calls stop waiting for approval and allow/ask/deny rules no longer take part. Workspace boundaries, interactive-channel limits, script binding, hard denials, and permission isolation stay active. This changes the current session immediately.') },
+          { id: 'cancel', label: t('取消', 'Cancel') },
         ];
       } else {
         const current = await client.request('status.get', { sessionId: own });
@@ -1654,7 +1682,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             const mcpServers = trust.servers.filter((server) =>
               server.trustScopes.project?.trusted === true || server.trustScopes.user?.trusted === true,
             ).map((server) => server.name);
-            setControlWizard({ step: 0, values: {}, mcpServers, mcpTools: [] });
+            showControlWizard({ step: 0, values: {}, mcpServers, mcpTools: [] });
             setPanel(null);
             push({ kind: 'meta', text: t(
               `开始创建授权；每一步按 Enter 确认，输入 cancel 可取消。已信任的 MCP Server：${mcpServers.join(', ') || '无'}`,
@@ -2245,6 +2273,40 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       })();
       return;
     }
+    if (name === 'usage') {
+      // 用量按用途分开读：主机返回只读聚合，TUI 不自己累加事件。
+      void (async () => {
+        const measured = await client.request('usage.get', { sessionId })
+          .catch((error: unknown) => requestFailure(error, 'usage_read_failed'));
+        if (measured === null || typeof measured !== 'object' || 'code' in measured) {
+          const code = measured !== null && typeof measured === 'object' && 'code' in measured
+            ? String((measured as { code: unknown }).code) : 'usage_read_failed';
+          push({ kind: 'error', text: t(`无法读取用量：${code}`, `Could not read usage: ${code}`) });
+          return;
+        }
+        const summary = (measured as { summary?: UsageSummary }).summary;
+        if (summary === undefined) {
+          push({ kind: 'error', text: t('无法读取用量：返回里没有汇总', 'Could not read usage: the reply has no summary') });
+          return;
+        }
+        const line = (label: string, bucket: UsageBucket): string => {
+          if (bucket.requests === 0) return t(`${label}：暂无调用`, `${label}: no calls yet`);
+          const input = bucket.unknownInputRequests === 0
+            ? t(`输入 ${bucket.input}`, `input ${bucket.input}`)
+            : t(`输入未知（${bucket.unknownInputRequests} 次未报）`, `input unknown (${bucket.unknownInputRequests} unreported)`);
+          const output = bucket.unknownOutputRequests === 0
+            ? t(`输出 ${bucket.output}`, `output ${bucket.output}`)
+            : t(`输出未知（${bucket.unknownOutputRequests} 次未报）`, `output unknown (${bucket.unknownOutputRequests} unreported)`);
+          const cached = bucket.cachedInput === 0 ? '' : t(`，其中缓存 ${bucket.cachedInput}`, ` (${bucket.cachedInput} cached)`);
+          return t(`${label}：${bucket.requests} 次请求，${input}${cached}，${output}`, `${label}: ${bucket.requests} calls, ${input}${cached}, ${output}`);
+        };
+        push({ kind: 'meta', text: [
+          line(t('主 Agent', 'Agent'), summary.agent),
+          line(t('复审', 'Reviewer'), summary.reviewer),
+        ].join('\n') });
+      })();
+      return;
+    }
     if (name === 'rename' || name === 'archive' || name === 'unarchive') {
       // 会话名称和归档状态由 Host 写入记录，TUI 不维护第二份副本。
       const label = name === 'rename' ? { name: argument.trim() } : { archived: name === 'archive' };
@@ -2355,11 +2417,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     if (name === 'policy') {
       if (argument === '') { openPicker('policy'); return; }
       void (async () => {
-        const asked = argument === 'reset' ? 'default' : argument;
-        if (asked !== 'default' && asked !== 'ask' && asked !== 'auto' && asked !== 'none') {
-          push({ kind: 'error', text: t('用法：/policy ask|auto|none|reset', 'Usage: /policy ask|auto|none|reset') });
+        const asked = argument === 'reset' ? 'default' : argument === 'none' ? 'ask' : argument;
+        if (asked !== 'default' && asked !== 'always' && asked !== 'ask' && asked !== 'auto' && asked !== 'never') {
+          push({ kind: 'error', text: t('用法：/policy always|ask|auto|never|reset（旧 none 等同 ask）', 'Usage: /policy always|ask|auto|never|reset (legacy none equals ask)') });
           return;
         }
+        // 命令行不能绕过二次确认：选择“完全不审批”与选择器走同一条确认路径。
+        if (asked === 'never') { openPicker('policy-confirm-never'); return; }
         const changed = await client.request('policy.set', { sessionId, mode: asked }).catch((error: unknown) => requestFailure(error, 'policy_change_failed'));
         if ('code' in changed) {
           push({ kind: 'error', text: t(`无法修改审批方式：${changed.code}`, `Could not change approval mode: ${changed.code}`) });
@@ -2649,6 +2713,15 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (id === 'confirm') void changePermission({ network: 'unrestricted', confirmNetwork: true });
       return;
     }
+    if (currentPanel === 'policy') {
+      if (id === 'never') { openPicker('policy-confirm-never'); return; }
+      void changePolicy(id === 'reset' ? 'default' : id);
+      return;
+    }
+    if (currentPanel === 'policy-confirm-never') {
+      if (id === 'confirm') void changePolicy('never');
+      return;
+    }
     if (currentPanel === 'thinking') {
       changeThinking(id);
       return;
@@ -2745,14 +2818,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, [client, externalControl, info.boundary, push, query, resetDraft, sessionId, t]);
 
   const advanceControlWizard = useCallback(async (raw: string) => {
-    const wizard = controlWizard;
+    const wizard = controlWizardRef.current;
     if (wizard === null) return false;
     const outcome = parseControlWizardInput(wizard, raw, t);
     if (outcome.kind === 'cancelled') {
       controlWizardGeneration.current += 1;
       controlWizardSubmittingRef.current = false;
       setControlWizardSubmitting(false);
-      setControlWizard(null);
+      showControlWizard(null);
       resetDraft('');
       push({ kind: 'meta', text: t('已取消外控授权创建。', 'Agent Control grant creation cancelled.') });
       return true;
@@ -2765,14 +2838,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       controlWizardGeneration.current += 1;
       controlWizardSubmittingRef.current = false;
       setControlWizardSubmitting(false);
-      setControlWizard(null);
+      showControlWizard(null);
       resetDraft('');
       push({ kind: 'error', text: outcome.message });
       return true;
     }
     if (outcome.kind === 'step') {
       resetDraft('');
-      setControlWizard(outcome.wizard);
+      showControlWizard(outcome.wizard);
       return true;
     }
     if (outcome.kind === 'mcp-servers') {
@@ -2795,7 +2868,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           return true;
         }
       }
-      setControlWizard({ step: 9, values, mcpServers: wizard.mcpServers, mcpTools: tools });
+      showControlWizard({ step: 9, values, mcpServers: wizard.mcpServers, mcpTools: tools });
       push({ kind: 'meta', text: t(
         '可授权的 MCP 工具：' + (tools.join(', ') || '无') + '。输入完整能力名列表，或 none。',
         'MCP tools available to grant: ' + (tools.join(', ') || 'none') + '. Enter exact capability names or none.',
@@ -2818,7 +2891,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         if (generation === controlWizardGeneration.current) {
           controlWizardSubmittingRef.current = false;
           setControlWizardSubmitting(false);
-          setControlWizard(null);
+          showControlWizard(null);
         }
         push({ kind: 'meta', text: grant === undefined
           ? t('外控授权已创建。', 'Agent Control grant created.')
@@ -2827,19 +2900,19 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         if (generation === controlWizardGeneration.current) {
           controlWizardSubmittingRef.current = false;
           setControlWizardSubmitting(false);
-          setControlWizard(null);
+          showControlWizard(null);
         }
         push({ kind: 'error', text: t('外控授权创建失败：' + (errorCode(error) ?? errorMessage(error) ?? 'agent_control_create_failed'), 'Could not create Agent Control grant: ' + (errorCode(error) ?? errorMessage(error) ?? 'agent_control_create_failed')) });
       }
     })();
     return true;
-  }, [client, controlWizard, info.boundary, push, resetDraft, t]);
+  }, [client, info.boundary, push, resetDraft, t]);
 
   const send = useCallback((text: string) => {
     const route = routeInput(text, running);
     const answering = query !== null && !text.trim().startsWith('/');
     // New input supersedes an unfinished grant-wizard setup before the wizard itself appears.
-    if (controlWizard === null && text.trim() !== '') controlWizardGeneration.current += 1;
+    if (controlWizardRef.current === null && text.trim() !== '') controlWizardGeneration.current += 1;
     if (sessionNavigation.current.activeToken !== 0 && !answering && !(route.kind === 'command' && route.name === 'quit')) {
       push({ kind: 'meta', text: t('会话切换完成前不会提交输入，草稿已保留。', 'Input is held until the session switch completes; the draft is preserved.') });
       return;
@@ -2848,7 +2921,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       push({ kind: 'meta', text: t('授权请求已提交，正在等待 Host 返回；此时不能取消或重复提交。', 'The grant request is submitted; wait for the Host result before continuing.') });
       return;
     }
-    if (controlWizard !== null && query === null) { advanceControlWizard(text); return; }
+    if (controlWizardRef.current !== null && query === null) { advanceControlWizard(text); return; }
     // 问题面板打开时，回车提交当前答案；斜杠命令仍可运行，例如 `/status` 和 `/queue`。
     if (answering) {
       answerQuery(text);
@@ -2947,7 +3020,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           t('最大权限：read-only / workspace-write / full-access', 'Maximum permission: read-only / workspace-write / full-access'),
           t('默认网络：disabled / policy / unrestricted', 'Default network: disabled / policy / unrestricted'),
           t('网络上限：disabled / policy / unrestricted', 'Maximum network: disabled / policy / unrestricted'),
-          t('默认 Policy：ask / auto / none', 'Default Policy: ask / auto / none'),
+          t('默认 Policy：always / ask / auto / never', 'Default Policy: always / ask / auto / never'),
           t('允许的 Policy，以逗号分隔，例如 ask,auto', 'Allowed Policy modes, comma-separated, e.g. ask,auto'),
           t('允许 --operator 处理普通审批和会话设置？yes / no', 'Allow --operator for ordinary approvals and session settings? yes / no'),
           '', '',
@@ -3365,6 +3438,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         : panel === 'thinking' ? t('选择思考档', 'Select thinking level')
         : panel === 'mode' ? t('选择工具模式', 'Select tool mode')
           : panel === 'policy' ? t('选择审批方式', 'Select approval mode')
+            : panel === 'policy-confirm-never' ? t('确认完全不审批', 'Confirm skipping all approvals')
             : panel === 'permission' ? t('会话权限', 'Session permissions')
               : panel === 'permission-network' ? t('设置网络权限', 'Set network access')
                 : panel === 'permission-confirm-full' ? t('确认完整访问', 'Confirm full access')

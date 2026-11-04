@@ -164,13 +164,18 @@ export function createCompaction({ provider, session, directory, id, limits, log
   // 本地估算与服务端用量的校准系数；尚无服务端用量时使用 1。
   let factor = 1;
 
+  // 复审（Reviewer）的用量与主 Agent 记在同一份记录里，压缩只认主 Agent 的账：
+  // 拿复审的输入量当校准数据会把主 Agent 的窗口估算整体拉偏。旧记录没有 `purpose`，按主 Agent 解释。
+  const isAgentUsage = (event: SessionEvent): boolean =>
+    event.kind === 'usage' && (event.purpose === undefined || event.purpose === 'agent');
+
   // 从最近一条有明确总输入量的 `usage` 事件恢复校准系数，让未知总量不覆盖先前的有效读数。
   // 事件同时保存本地估算和服务端用量，因此无需依赖上一个进程的内存状态。
   let seeded = false;
   async function lastUsage(): Promise<SessionEvent | null> {
     const events = await session.read();
     for (let index = events.length - 1; index >= 0; index -= 1) {
-      if (events[index].kind === 'usage') return events[index];
+      if (isAgentUsage(events[index])) return events[index];
     }
     return null;
   }
@@ -181,7 +186,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
     const events = await session.read();
     for (let index = events.length - 1; index >= 0; index -= 1) {
       const usage = events[index];
-      if (usage.kind !== 'usage' || usage.measurement !== 'request-v1') continue;
+      if (!isAgentUsage(usage) || usage.measurement !== 'request-v1') continue;
       const input = usage.input;
       const estimated = Number(usage.estimated);
       if (typeof input === 'number' && Number.isFinite(input) && input > 0 && Number.isFinite(estimated) && estimated > 0) {

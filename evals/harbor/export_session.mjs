@@ -6,6 +6,11 @@ import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { SPILL_NAME } from '@ligule/core/kernel/result.js';
 import { sessionTurnToAtif } from '@ligule/core/session/atif.js';
+import { setTrusted } from '@ligule/core/kernel/workspace-trust.js';
+
+import { BENCHMARK_POLICY_MODE } from './policy-mode.mjs';
+
+export { BENCHMARK_POLICY_MODE };
 
 const MAX_SESSION_BYTES = 256 * 1024 * 1024;
 const MAX_SPILL_BYTES = 64 * 1024 * 1024;
@@ -299,7 +304,7 @@ export function buildCliArgs({ instruction, sessionDirectory, api, baseUrl, mode
     ['host.sessionDirectory', sessionDirectory], ['model.api', api], ['model.baseURL', baseUrl],
     ['model.model', model], ['model.apiKeyEnv', apiKeyEnv], ['loop.modelCalls', modelCalls],
     ['loop.totalModelCalls', modelCalls], ['loop.taskTimeoutMs', timeoutMs], ['loop.requestTimeoutMs', requestTimeoutMs],
-    ['policy.mode', 'auto'],
+    ['policy.mode', BENCHMARK_POLICY_MODE],
   ];
   if (outputTokens !== undefined) values.push(['model.outputTokens', outputTokens]);
   return [
@@ -323,6 +328,12 @@ export function buildCliEnvironment(source, homeDirectory, apiKeyEnv) {
 
 async function writeResult(logsDirectory, result) {
   await writeJson(join(resolve(logsDirectory), 'ligule-result.json'), result);
+}
+
+// 基准容器里没有交互式信任确认，任务目录必须由评测器显式信任；
+// 不受信任时 `git`、解释器与项目脚本在 `never` 下仍会被拒（exec_workspace_untrusted）。
+export async function ensureWorkspaceTrust(directory) {
+  await setTrusted(directory, true);
 }
 
 async function runMode(args) {
@@ -350,6 +361,7 @@ async function runMode(args) {
   if (!Buffer.from(instruction, 'utf8').equals(instructionBytes)) throw new Error('ligule_instruction_encoding_invalid');
   await unlink(instructionFile);
   if (instruction.trim() === '') throw new Error('ligule_instruction_empty');
+  await ensureWorkspaceTrust(process.cwd());
 
   const child = await runCli(cli, buildCliArgs({
     instruction, sessionDirectory, api, baseUrl, model, apiKeyEnv, modelCalls, timeoutMs, requestTimeoutMs, outputTokens,
@@ -391,7 +403,14 @@ async function runMode(args) {
     process.exitCode = 1;
   }
   await writeResult(logsDirectory, result);
-  if (result.status !== 'completed' || result.state !== 'completed' || child.status !== 0) process.exitCode = 1;
+  if (!isScorableTrial(result)) process.exitCode = 1;
+}
+
+// 代理层面的失败（预算耗尽、模型调用失败、被中断）仍是一次可评分的 trial：
+// 它跑出了会话，就让 verifier 对它留下的工作区打分，而不是记成 agent error
+// 把这一题挤出分母。没有会话说明评测本身没跑起来，那才是基础设施故障。
+export function isScorableTrial(result) {
+  return isObject(result) && typeof result.sessionId === 'string' && typeof result.runId === 'string';
 }
 
 async function main() {

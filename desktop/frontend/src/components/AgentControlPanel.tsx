@@ -400,12 +400,12 @@ export function AgentControlPanel({ client, projectRoot, onEdit }: {
           <label className="grant-field">
             <span>{t('默认 Policy', 'Default Policy')}</span>
             <select value={draft.defaultPolicy} onChange={(event) => update('defaultPolicy', event.target.value as PolicySelection)}>
-              <option value="ask">ask</option><option value="auto">auto</option><option value="none">none</option>
+              <option value="always">always</option><option value="ask">ask</option><option value="auto">auto</option><option value="never">never</option>
             </select>
           </label>
           <fieldset className="grant-policies">
             <legend>{t('允许的模式', 'Allowed modes')}</legend>
-            {(['ask', 'auto', 'none'] as const).map((policy) => <label key={policy}>
+            {(['always', 'ask', 'auto', 'never'] as const).map((policy) => <label key={policy}>
               <input type="checkbox" checked={draft.allowedPolicies.includes(policy)} onChange={(event) => {
                 const selected = event.target.checked
                   ? [...draft.allowedPolicies, policy]

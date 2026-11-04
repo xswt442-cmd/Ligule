@@ -18,7 +18,7 @@ Place `manifest.json` at the root; [manifest.schema.json](manifest.schema.json) 
 
 The manifest uses `schema_version: "ligule.eval-manifest.v1"` and contains:
 
-- `experiment`: experiment ID, full Ligule Git SHA and dirty flag, Harbor version, dataset ID and revision, image digest, model and provider, config SHA-256, tool mode, `policy_mode: "auto"` (the adapter's fixed, reviewed value), permissions, limits, Node/OS versions, experiment timestamps, and expected evaluation.
+- `experiment`: experiment ID, full Ligule Git SHA and dirty flag, Harbor version, dataset ID and revision, image digest, model and provider, config SHA-256, tool mode, `policy_mode` (the approval mode the adapter actually ran, currently `"never"`), permissions, limits, Node/OS versions, experiment timestamps, and expected evaluation.
 - `verifier`: the exact Harbor result schema, reward key, and numeric pass threshold.
 - `attempts`: an ordered array with task ID, category, attempt number, Harbor trial name and task ID, result path, optional trajectory path, artifact paths, and `not_run_reason`.
 

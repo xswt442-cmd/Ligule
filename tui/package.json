@@ -41,7 +41,7 @@
   "keywords": ["agent", "harness", "agent-harness", "tui"],
   "scripts": {
     "build": "tsc -b tsconfig.json",
-    "test": "pnpm --filter @ligule/core run build && pnpm run build && node --experimental-strip-types --test --test-reporter=../scripts/test-summary-reporter.mjs --import ../tests/hooks/isolated-data-root.mjs tests/*.test.js",
+    "test": "pnpm --filter @ligule/core run build && pnpm run build && node --experimental-strip-types --test --test-reporter=../scripts/test-summary-reporter.mjs --import ../tests/hooks/isolated-data-root.ts tests/*.test.js tests/*.test.ts",
     "check-pack": "node ../scripts/check-pack.js",
     "pack-release": "node ../scripts/pack-release.js",
     "verify-install": "node ../scripts/verify-install.js",

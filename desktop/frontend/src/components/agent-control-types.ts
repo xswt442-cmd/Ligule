@@ -1,7 +1,7 @@
 export type PermissionProfile = 'read-only' | 'workspace-write' | 'full-access';
 export type NetworkLimit = 'disabled' | 'policy' | 'unrestricted';
-export type PolicySelection = 'ask' | 'auto' | 'none';
-export type PolicyMode = PolicySelection | 'never';
+export type PolicySelection = 'always' | 'ask' | 'auto' | 'never';
+export type PolicyMode = PolicySelection;
 
 export type Grant = {
   id: string;

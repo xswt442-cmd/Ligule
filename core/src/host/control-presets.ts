@@ -23,8 +23,8 @@ export interface ControlPreset {
   readonly maxPermissionProfile: 'read-only' | 'workspace-write';
   readonly defaultNetwork: 'policy';
   readonly maxNetwork: 'policy';
-  readonly defaultPolicy: 'ask';
-  readonly allowedPolicies: readonly ('ask' | 'none')[];
+  readonly defaultPolicy: 'ask' | 'always' | 'auto' | 'never';
+  readonly allowedPolicies: readonly ('ask' | 'always' | 'auto' | 'never')[];
   readonly allowOperator: false;
   readonly confirmWorkspaceTrust: boolean;
   readonly confirmPartialWorkspaceWrite: boolean;

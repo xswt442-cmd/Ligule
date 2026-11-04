@@ -123,7 +123,7 @@ const sessionOutput = object({ sessionId: id, settingsApplied: { type: 'boolean'
 const sessionChanges = {
   type: 'object', additionalProperties: false, properties: {
     mode: { type: 'string', maxLength: 64 },
-    policy: { type: 'string', enum: ['ask', 'auto', 'none', 'never', 'default'] },
+    policy: { type: 'string', enum: ['always', 'ask', 'auto', 'never', 'none', 'default'], description: 'always asks every time, ask follows the rule table then asks, auto follows the rule table then analyses the call, never skips the policy layer; legacy none is read as ask' },
     model: { type: ['object', 'null'], additionalProperties: false, properties: { provider: id, model: { type: 'string', minLength: 1, maxLength: 256 } }, required: ['provider', 'model'] },
     thinking: { type: ['object', 'null'], additionalProperties: false, properties: { effort: { type: 'string', enum: ['default', 'none', 'low', 'high', 'max'] } }, required: ['effort'] },
     outputTokens: { type: ['integer', 'null'], minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
@@ -148,7 +148,7 @@ const sessionChanges = {
 const initialSettings = {
   type: 'object', additionalProperties: false, properties: {
     mode: { type: 'string', maxLength: 64 },
-    policy: { type: 'string', enum: ['ask', 'auto', 'none', 'never'] },
+    policy: { type: 'string', enum: ['always', 'ask', 'auto', 'never', 'none'], description: 'legacy none is read as ask' },
     model: { type: 'object', additionalProperties: false, properties: { provider: id, model: { type: 'string', minLength: 1, maxLength: 256 } }, required: ['provider', 'model'] },
     thinking: { type: 'object', additionalProperties: false, properties: { effort: { type: 'string', enum: ['default', 'none', 'low', 'high', 'max'] } }, required: ['effort'] },
     outputTokens: { type: 'integer', minimum: 1, maximum: Number.MAX_SAFE_INTEGER },
@@ -184,7 +184,7 @@ const delegationOutput = { type: ['object', 'null'], additionalProperties: false
   grantId: id,
   maxPermissionProfile: { type: 'string', enum: ['read-only', 'workspace-write', 'full-access'] },
   maxNetwork: { type: 'string', enum: ['policy', 'unrestricted', 'disabled'] },
-  allowedPolicies: { type: 'array', items: { type: 'string', enum: ['ask', 'auto', 'none', 'never'] } },
+  allowedPolicies: { type: 'array', items: { type: 'string', enum: ['always', 'ask', 'auto', 'never'] } },
   allowedMcpServers: { type: 'array', items: { type: 'string' } },
   allowedMcpTools: { type: 'array', items: { type: 'string' } },
   allowScreenCapture: { type: 'boolean' },
@@ -213,7 +213,7 @@ const configurationOutput = object({
       paused: { type: 'boolean' }, connected: { type: 'boolean' }, changeAllowed: { type: 'boolean' },
       code: { type: 'string', maxLength: 128 } }, ['configured', 'available', 'permitted', 'paused', 'connected', 'changeAllowed']),
     policy: { type: 'object', additionalProperties: false, properties: {
-      mode: { type: 'string', enum: ['ask', 'auto', 'none', 'never'] }, source: { type: 'string' }, default: { type: 'string' },
+      mode: { type: 'string', enum: ['always', 'ask', 'auto', 'never'] }, source: { type: 'string' }, default: { type: 'string' },
     }, required: ['mode', 'source', 'default'] },
     generation: { type: 'object', additionalProperties: false, properties: {
       model: { type: 'object', additionalProperties: false, properties: { provider: { type: 'string' }, model: { type: ['string', 'null'] } }, required: ['provider', 'model'] },
@@ -314,7 +314,7 @@ const tools: Tool[] = [
     outputSchema: object({ receipt: durableReceiptOutput, result: runPageOutput }, ['receipt']) },
   { name: 'ligule_run_status', description: 'Read the actual Host state, progress, pending interactions, queued messages, and bounded events after a cursor. Operation IDs are process-local; reopen the session after restart and read durable records.',
     inputSchema: object({ operationId: id, after: { type: 'integer', minimum: 0 }, limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 } }, ['operationId']), outputSchema: operationOutput },
-  { name: 'ligule_run_await', description: 'Wait in the server for one known run, up to timeoutMs (default 60 seconds, maximum 5 minutes). A timeout returns the current resumable state without cancelling the run. A terminal run includes its result. Resolve pending approvals or questions with the interaction tool while the run waits.',
+  { name: 'ligule_run_await', description: 'Wait in the server for one known run, up to timeoutMs (default 60 seconds, maximum 5 minutes). A timeout returns the current resumable state without cancelling the run. A terminal run includes its result. `state` is the operation status (running, done, failed, cancelled) and is what to branch on; `phase` is only the last progress stage and can still read "settling" after a failure. Resolve pending approvals or questions with the interaction tool while the run waits.',
     inputSchema: object({ operationId: id, timeoutMs: { type: 'integer', minimum: 0, maximum: 300_000, default: 60_000 } }, ['operationId']), outputSchema: awaitOutput },
   { name: 'ligule_run_cancel', description: 'Cancel this known operation and wait for Host cleanup. Reports terminated only after it settles. Completed operations keep their outcome; other sessions are unaffected.',
     inputSchema: object({ operationId: id }, ['operationId']), outputSchema: object({ ...operationProperties, terminated: { type: 'boolean' } }, ['operationId', 'sessionId', 'state', 'terminated']) },

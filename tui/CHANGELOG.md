@@ -6,6 +6,32 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ## [Unreleased]
 
+### 简体中文
+
+**改进**
+
+- 审批方式改为四档：`always`（每次都要审批）、`ask`（逐次审批）、`auto`（自动判定）、`never`（完全不审批）。`/policy`、审批方式选择器和底部配置行同步更新；选择 `never` 前必须先确认，并说明规则表里的 allow/ask/deny 不再参与判定。
+- 旧配置、旧会话记录和旧授权里的 `none`、以及旧语义的 `never` 一律按 `ask` 读取，历史数据不会自动变成“跳过审批”；新写入的记录带语义标记，可与旧记录区分。
+- 用户或项目配置可用 `[reviewer]` 表启用可选的自动审批复审：它默认关闭，只在 `auto` 且确定性策略认不出命令形状时调用一次独立模型；复审只能回答 allow / deny / ask-human，超时、超预算与不合规回复一律转人工审批，规则拒绝、硬拒绝、强制人审、私有网络与外部访问永远不交给模型；结论以 `policyReview` 事件记入会话（可跳过、不进入模型上下文）。未配置时 `auto` 行为不变。
+- `/usage` 显示本会话的 Token 用量，主 Agent 与复审分成两份账：缓存命中是输入的子集、不重复计入，端点没有报回的数字保持未知而不是记成 0；外控读取同一份 `usage.get` 汇总。
+
+**修复**
+
+- 外控授权向导提交完成后，尚未处理的一次回车不再会从陈旧状态复活向导、用同一个名字重复提交授权。
+
+### English
+
+**Improved**
+
+- Approval modes are now `always` (every call waits), `ask`, `auto`, and `never` (skip the policy layer). `/policy`, the mode picker, and the bottom configuration line follow the new set; choosing `never` requires a confirmation that explains allow/ask/deny rules no longer take part.
+- Legacy `none` values and the old `never` meaning are read as `ask` in existing config, session records, and grants, so history never silently becomes “skip approvals”. Newly written records carry a semantics marker that separates them from old ones.
+- `/usage` shows this session's token usage with the main agent and the reviewer accounted separately: cached tokens are a subset of the input and are never added again, numbers the endpoint did not report stay unknown instead of becoming zero, and external control reads the same `usage.get` aggregate.
+- A `[reviewer]` table in the user or project configuration can enable an optional automatic approval reviewer. It is off by default and only runs under `auto`, when the deterministic policy cannot recognise the command shape; it may answer only allow / deny / ask-human, and timeouts, exhausted budgets and unusable replies always fall back to asking a human. Deny rules, hard denials, forced manual approval, private networks and external access are never handed to the model. Decisions are recorded as `policyReview` session events (skippable, never part of the model context). Without the table, `auto` behaves exactly as before.
+
+**Fixed**
+
+- After a grant request is submitted, an Enter that was still in flight can no longer resurrect the wizard from stale state and submit the same grant twice.
+
 ## [0.1.2] - 2026-11-02
 
 ### 简体中文

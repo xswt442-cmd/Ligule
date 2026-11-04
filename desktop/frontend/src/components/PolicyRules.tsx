@@ -14,7 +14,7 @@ type Rule = {
   path?: string;
   argsHash?: string;
 };
-type PolicySelection = 'ask' | 'auto' | 'none';
+type PolicySelection = 'always' | 'ask' | 'auto' | 'never';
 type Shown = {
   rules?: Rule[];
   rulesSource?: string;
@@ -72,7 +72,7 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
   const [layer, setLayer] = useState('user');
   const [saving, setSaving] = useState(false);
   const [editing, setEditing] = useState<{ index: number; rule: Rule } | null>(null);
-  const [confirmNone, setConfirmNone] = useState(false);
+  const [confirmNever, setConfirmNever] = useState(false);
   const held = saving
     ? t('“审批规则”正在保存；尚未收到结果。', 'Approval rules are saving; the result has not arrived yet.')
     : editing === null
@@ -206,17 +206,17 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
         <select
           value={shown.policyMode ?? ''}
           disabled={saving}
-          onChange={(event) => { if (event.target.value === 'none') setConfirmNone(true); else if (event.target.value === 'ask' || event.target.value === 'auto') void setMode(event.target.value); }}
+          onChange={(event) => { if (event.target.value === 'never') setConfirmNever(true); else if (event.target.value === 'always' || event.target.value === 'ask' || event.target.value === 'auto') void setMode(event.target.value); }}
         >
           <option value="">{t('未设置', 'Not set')}</option>
-          <option value="ask">ask — {t('未被放行规则覆盖的调用需要批准', 'Calls not covered by an allow rule require approval')}</option>
-          <option value="auto">auto — {t('由守卫与命令语法判定，放行规则不参与', 'Guards and command parsing decide; allow rules do not apply')}</option>
-          <option value="none">none — {t('普通权限内操作不逐项审批；安全边界继续生效', 'No per-action approval for ordinary in-bound operations; safety boundaries remain active')}</option>
-          {shown.policyMode === 'never' && <option value="never" disabled>{t('旧版 never（只保留原有拒绝语义；请明确选择新档位迁移）', 'Legacy never (retains its old refusal semantics; choose a new tier to migrate)')}</option>}
+          <option value="always">always — {t('每个工具调用都等待批准，拒绝规则先执行', 'Every tool call waits for approval; deny rules run first')}</option>
+          <option value="ask">ask — {t('规则表无结论时询问', 'Ask when the rule table has no answer')}</option>
+          <option value="auto">auto — {t('规则表与确定性分析判定，仍可能询问', 'Rule table and deterministic analysis decide; prompts may still appear')}</option>
+          <option value="never">never — {t('跳过整个 Policy 层；硬性安全校验继续生效', 'Skip the whole policy layer; hard safety checks stay active')}</option>
         </select>
       </Row>
-      {shown.policyMode === 'never' && <p className="session-note" data-tone="bad">{t('此配置保留旧版 never 语义：需要审批的调用会被拒绝，不会自动迁移为 none。选择新的档位才会写入明确迁移。', 'This configuration retains legacy never semantics: calls that require approval are refused. It is not migrated to none until you explicitly choose a new tier.')}</p>}
-      {shown.policyMode === 'none' && <p className="session-note">{t('普通权限内工具调用不等待逐项批准；工作区边界、拒绝规则、系统硬拒绝和独立信任要求仍生效。', 'Ordinary in-bound tool calls do not wait for per-action approval. Workspace boundaries, deny rules, system hard denials, and separate trust requirements remain active.')}</p>}
+      {shown.policyMode === 'always' && <p className="session-note">{t('每个工具调用都先经过拒绝规则，再单独等待批准；方向性设置（如保存的批准）不会跳过询问。', 'Every tool call passes deny rules and then waits for its own approval; remembered approvals do not skip the prompt.')}</p>}
+      {shown.policyMode === 'never' && <p className="session-note" data-tone="bad">{t('此配置跳过整个 Policy 层：规则表中的 allow / ask / deny 不再参与判定，审批也不再出现。工作区边界、交互通道限制、脚本绑定、系统硬拒绝和权限隔离仍然生效。', 'This configuration skips the whole policy layer: allow / ask / deny rules no longer take part and approvals never appear. Workspace boundaries, interactive-channel limits, script binding, hard denials, and permission isolation stay active.')}</p>}
 
       <h3 className="group-label">{t(`生效规则（${effectiveRules.length} 条）`, `Effective rules (${effectiveRules.length})`)}</h3>
       <details className="sheet-details"><summary>{t('复合命令的放行条件', 'Compound commands')}</summary><p className="sheet-note">{t('在逐次询问模式下，复合命令的每一段都要被同一条放行规则覆盖，才会跳过询问。禁止规则作用于整条命令及各段，放行规则不能覆盖它。', 'In ask mode, one allow rule must cover every part of a compound command to skip approval. A deny rule applies to the full command and each part; an allow rule cannot override it.')}</p></details>
@@ -277,7 +277,7 @@ export function PolicyRules({ client, projectRoot, onEdit }: {
           </div>
         </div>}
     </>}
-    {confirmNone && <Modal title={t('将默认档改为不受审批？', 'Set the default to no approval?')} className="confirm" onClose={() => setConfirmNone(false)}><h2 className="confirm-lead">{t('使用此默认值的会话将不再等待普通工具调用的逐项批准。', 'Sessions using this default will stop waiting for per-action approval of ordinary tool calls.')}</h2><p className="confirm-note">{t('工作区边界、拒绝规则、系统硬拒绝和需要独立信任的操作仍会被限制。', 'Workspace boundaries, deny rules, system hard denials, and operations requiring separate trust remain restricted.')}</p><div className="confirm-actions"><button type="button" onClick={() => setConfirmNone(false)}>{t('取消', 'Cancel')}</button><button type="button" className="primary-button" onClick={() => { setConfirmNone(false); void setMode('none'); }}>{t('确认启用', 'Enable')}</button></div></Modal>}
+    {confirmNever && <Modal title={t('将默认档改为完全不审批？', 'Set the default to skip all approvals?')} className="confirm" onClose={() => setConfirmNever(false)}><h2 className="confirm-lead">{t('使用此默认值的会话不再等待任何工具批准，规则表也不再参与判定。', 'Sessions using this default stop waiting for any tool approval, and the rule table no longer takes part.')}</h2><p className="confirm-note">{t('工作区边界、交互通道限制、脚本绑定、系统硬拒绝和权限隔离仍然生效。', 'Workspace boundaries, interactive-channel limits, script binding, hard denials, and permission isolation stay active.')}</p><div className="confirm-actions"><button type="button" onClick={() => setConfirmNever(false)}>{t('取消', 'Cancel')}</button><button type="button" className="primary-button" onClick={() => { setConfirmNever(false); void setMode('never'); }}>{t('我确认跳过所有审批', 'Confirm skipping all approvals')}</button></div></Modal>}
   </>;
 }
 

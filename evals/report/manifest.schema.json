@@ -28,7 +28,7 @@
         "provider": { "type": ["string", "null"], "minLength": 1 },
         "config_sha256": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
         "tool_mode": { "type": "string", "minLength": 1 },
-        "policy_mode": { "const": "auto" },
+        "policy_mode": { "enum": ["always", "ask", "auto", "never"] },
         "permissions": {
           "type": "object",
           "propertyNames": { "not": { "pattern": "(?:[sS][eE][cC][rR][eE][tT]|[pP][aA][sS][sS][wW][oO][rR][dD]|[cC][rR][eE][dD][eE][nN][tT][iI][aA][lL]|[bB][eE][aA][rR][eE][rR]|[aA][uU][tT][hH][oO][rR][iI][zZ][aA][tT][iI][oO][nN]|[aA][pP][iI][_-]?[kK][eE][yY]|[aA][cC][cC][eE][sS][sS][_-]?[tT][oO][kK][eE][nN]|[rR][eE][fF][rR][eE][sS][hH][_-]?[tT][oO][kK][eE][nN])" } },

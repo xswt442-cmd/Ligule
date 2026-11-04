@@ -4,6 +4,8 @@ import { loadConfigLayers } from '../kernel/config-file.js';
 import { extensionSources } from '../kernel/extensions.js';
 import { readExtensionState } from '../kernel/extension-state.js';
 import { DEFAULT_MODE, modeDirectories } from '../kernel/modes.js';
+import { readPersistedPolicyMode } from '../kernel/policy.js';
+import { KernelRuntimeError } from '../kernel/error.js';
 import { hostProviderFromConfig } from './provider.js';
 import type { createHost, EnvironmentSeed } from './host.js';
 
@@ -39,8 +41,22 @@ export async function loadHostEnvironment(projectRoot: string, shippedModes: str
     ...loaded,
     config,
     provider: hostProviderFromConfig(config),
-    policy: config.policy as Parameters<typeof createHost>[0]['policy'],
+    // 配置文件里的审批档位按语义标记解释：缺少标记的 `none`/`never` 是历史值，只降级为 `ask`。
+    policy: policyFromConfig(config.policy),
     modeName: typeof config.mode === 'string' ? config.mode : DEFAULT_MODE,
     modePaths: modeDirectories(projectRoot, shippedModes),
   };
+}
+
+function policyFromConfig(raw: unknown): Parameters<typeof createHost>[0]['policy'] {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return raw as Parameters<typeof createHost>[0]['policy'];
+  const value = raw as Record<string, unknown>;
+  if (value.mode === undefined) return value as Parameters<typeof createHost>[0]['policy'];
+  const mode = readPersistedPolicyMode(value.mode, value.semantics);
+  if (mode === undefined) {
+    throw new KernelRuntimeError('policy_mode_unknown', {
+      detail: `policy.mode is ${JSON.stringify(value.mode)}; expected one of always, ask, auto, never (legacy none and never are read as ask)`,
+    });
+  }
+  return { ...value, mode } as Parameters<typeof createHost>[0]['policy'];
 }

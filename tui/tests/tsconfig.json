@@ -6,5 +6,5 @@
     "allowImportingTsExtensions": true
   },
   "references": [{ "path": "../../core" }],
-  "include": ["helpers/port.ts", "helpers/tui-host.ts"]
+  "include": ["**/*.test.ts", "helpers/**/*.ts", "../../core/tests/helpers/**/*.ts"]
 }

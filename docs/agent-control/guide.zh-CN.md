@@ -65,7 +65,7 @@ Windows 路径示例：
 {"command":"ligule","args":["mcp-server","--project","/absolute/path/to/project","--operator"]}
 ```
 
-`--operator` 代表本机操控者明确授权这个 stdio 客户端。它允许回答真实待处理的 Policy 审批和用户提问，以及修改单个会话的 Mode、Policy、模型、生成参数和每轮循环上限；它不更改文件边界、工作区信任或硬拒绝规则。可选 Policy 只有 `ask`、`auto` 和 `none`；已保存的旧版 `never` 保持原有拒绝语义。审批不能覆盖非法工具参数或工作区边界。`ligule_run_status` 的待处理交互只含有界摘要，不会重复传输完整工具参数。可信本地 TUI 或 Desktop 可以在请求仍待处理时展开详情。Host 无法安全审阅请求时会返回明确的 unavailable/error 错误码，不会记作用户拒绝。
+`--operator` 代表本机操控者明确授权这个 stdio 客户端。它允许回答真实待处理的 Policy 审批和用户提问，以及修改单个会话的 Mode、Policy、模型、生成参数和每轮循环上限；它不更改文件边界、工作区信任或硬拒绝规则。可选 Policy 为 `always`、`ask`、`auto` 和 `never`；`never` 跳过整个 Policy 层但保留硬性安全校验，旧版的 `none` 与旧 `never` 一律按 `ask` 读取。审批不能覆盖非法工具参数或工作区边界。`ligule_run_status` 的待处理交互只含有界摘要，不会重复传输完整工具参数。可信本地 TUI 或 Desktop 可以在请求仍待处理时展开详情。Host 无法安全审阅请求时会返回明确的 unavailable/error 错误码，不会记作用户拒绝。
 
 每条待决答复都绑定原始会话和 `requestId`。状态与事件中的 `source` 区分本机 TUI/Desktop 用户（`human`）和 MCP 操控者（`controller`）；两者对待决审批的明确批准都会清除拒绝计数并解除强制逐次审批，只有 `human` 答复可以保存审批记忆。操作结束、断连或请求失效后，迟到的答复会返回 `control_interaction_stale`，不会记作用户拒绝。
 
@@ -114,6 +114,8 @@ Node/Python 脚本调用需要逐次审批；`approval.request` 会包含规范�
 ## 运行阶段与消息队列
 
 `ligule_run_status` 保留 `running/done/failed/cancelled` 四种终态兼容状态，并返回阶段、等待类型、进度、待决交互及有界事件。每个操作保留最近 128 个事件；使用 `after` 游标增量读取，单次最多 50 条。若事件缓存已覆盖旧游标，`eventGap` 会提示需要从现有状态重新同步。运行和等待交互时状态仍是 `running`。
+
+判断一次运行是否结束时以 `state` 为准：`phase` 只是最近一次的进度阶段，运行失败后仍可能停在 `settling`。`ligule_run_await` 与 `ligule_run_status` 返回的是同一份状态，`state` 变为 `done`、`failed` 或 `cancelled` 之后才停止轮询；超时返回的仍是可继续等待的 `running`。
 
 `ligule_session_send` 最多缓存 16 条下一轮消息，每条不超过 65,536 个字符。空闲会话立即开始一轮并返回 `operationId`；运行中的消息按接收顺序排队。运行正常完成后自动执行下一条，并在来源操作的事件流发布 `queue.started` 与新 `operationId`，即使新一轮很快结束也能查询。运行取消或失败（包括缺少有效委派结果）会暂停队列，调用 `continue` 才继续；可用 `cancel_queued` 删除指定条目，或用 `clear_queue` 清空剩余条目。该队列只在 Server 进程内存在，重启后不恢复，也不会重放不确定的副作用。正在等待审批或提问时，排队消息不会替代交互答复。
 

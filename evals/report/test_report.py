@@ -128,7 +128,7 @@ def manifest() -> dict[str, object]:
             "provider": "fixture-provider",
             "config_sha256": None,
             "tool_mode": "read-only",
-            "policy_mode": "auto",
+            "policy_mode": "never",
             "permissions": {"filesystem": "read-only", "network": "disabled"},
             "limits": {"model_calls": 3, "timeout_ms": 60000},
             "node_version": None,
@@ -523,7 +523,7 @@ class ReportTests(unittest.TestCase):
             root = Path(temporary) / "input"
             root.mkdir()
             value = manifest()
-            value["experiment"]["policy_mode"] = "ask"
+            value["experiment"]["policy_mode"] = "none"
             write_json(root / "manifest.json", value)
             with self.assertRaisesRegex(ReportInputError, "experiment_policy_mode_invalid"):
                 write_report(root, Path(temporary) / "output")

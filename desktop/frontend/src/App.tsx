@@ -47,7 +47,7 @@ import type { PermissionConfirmations, PermissionTarget } from './permission-con
 // 流式输出显示在已落盘记录之后，并保持固定 ID，避免每个增量都重建行并丢失展开状态。
 const LIVE_REASONING: Row = { id: -2, kind: 'reasoning', text: '' };
 const LIVE_ANSWER: Row = { id: -1, kind: 'answer', text: '' };
-type PolicySelection = 'ask' | 'auto' | 'none';
+type PolicySelection = 'always' | 'ask' | 'auto' | 'never';
 
 // 每次向前读取一页事件；打开会话时先取最近页，再按游标读取更早记录。
 const RENDER_WINDOW = 400;

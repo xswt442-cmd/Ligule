@@ -6,9 +6,10 @@ import lockfile from 'proper-lockfile';
 import { setTimeout as delay } from 'node:timers/promises';
 import { dataRoot } from '../kernel/config-file.js';
 import { KernelError, KernelRuntimeError } from '../kernel/error.js';
+import { POLICY_SEMANTICS } from '../kernel/policy.js';
 import type { PermissionNetwork, PermissionProfile } from '../kernel/permission.js';
 
-export type DelegationPolicy = 'ask' | 'auto' | 'none' | 'never';
+export type DelegationPolicy = 'always' | 'ask' | 'auto' | 'never';
 export type DelegationSource = 'trusted-ui' | 'legacy';
 
 export interface DelegationGrant {
@@ -33,6 +34,8 @@ export interface DelegationGrant {
   readonly confirmedFullAccess: boolean;
   readonly confirmedUnrestrictedNetwork: boolean;
   readonly confirmedPartialWorkspaceWrite: boolean;
+  // 授权文件写入语义版本；缺失表示旧版本写入的 none/never 字面值。
+  readonly policySemantics?: number;
   readonly createdAt: string;
   readonly expiresAt: string | null;
   readonly revokedAt: string | null;
@@ -102,7 +105,7 @@ const AUDIT_LIMIT = 2048;
 const LOCK_STALE_MS = 10_000;
 const PROFILES: readonly PermissionProfile[] = ['read-only', 'workspace-write', 'full-access'];
 const NETWORKS: readonly PermissionNetwork[] = ['disabled', 'policy', 'unrestricted'];
-const POLICIES: readonly DelegationPolicy[] = ['ask', 'auto', 'none', 'never'];
+const POLICIES: readonly DelegationPolicy[] = ['always', 'ask', 'auto', 'never'];
 const PROFILE_RANK: Readonly<Record<PermissionProfile, number>> = { 'read-only': 0, 'workspace-write': 1, 'full-access': 2 };
 const NETWORK_RANK: Readonly<Record<PermissionNetwork, number>> = { disabled: 0, policy: 1, unrestricted: 2 };
 
@@ -166,14 +169,28 @@ function uniqueStrings(value: unknown, check: (one: unknown) => boolean): readon
   return new Set(list).size === list.length ? list : undefined;
 }
 
+// 旧授权文件里的档位是旧语义：`none` 与 `never` 都不能升级成新 `never`（跳过审批），
+// 一律降级为 `ask`。映射后重新去重；默认档位不在白名单里时整份授权失效，要求重新授权。
+function legacyPolicy(value: unknown): DelegationPolicy | undefined {
+  if (value === 'none' || value === 'never') return 'ask';
+  return value === 'ask' || value === 'auto' ? value : undefined;
+}
+
 function validateGrant(value: unknown): DelegationGrant {
   const keys = ['id', 'name', 'projectRoot', 'defaultPermissionProfile', 'maxPermissionProfile', 'defaultNetwork', 'maxNetwork',
     'source', 'defaultPolicy', 'allowedPolicies', 'allowOperator', 'confirmedFullAccess', 'confirmedUnrestrictedNetwork',
     'confirmedPartialWorkspaceWrite', 'allowedMcpServers', 'allowedMcpTools', 'allowedModes', 'allowedModels', 'maxOutputTokens',
-    'allowScreenCapture', 'confirmedScreenCapture', 'createdAt', 'expiresAt', 'revokedAt'];
+    'allowScreenCapture', 'confirmedScreenCapture', 'createdAt', 'expiresAt', 'revokedAt', 'policySemantics'];
   const requiredKeys = keys.filter((key) => !['source', 'confirmedPartialWorkspaceWrite', 'allowedMcpServers', 'allowedMcpTools',
-    'allowedModes', 'allowedModels', 'maxOutputTokens', 'allowScreenCapture', 'confirmedScreenCapture'].includes(key));
+    'allowedModes', 'allowedModels', 'maxOutputTokens', 'allowScreenCapture', 'confirmedScreenCapture', 'policySemantics'].includes(key));
   const valueRecord = isRecord(value) ? value : {};
+  const semantics = valueRecord.policySemantics;
+  const legacy = semantics === undefined;
+  const normalizedDefault = legacy ? legacyPolicy(valueRecord.defaultPolicy) : isPolicy(valueRecord.defaultPolicy) ? valueRecord.defaultPolicy : undefined;
+  const normalizedAllowed = Array.isArray(valueRecord.allowedPolicies)
+    ? [...new Set((valueRecord.allowedPolicies as unknown[]).map((one) => legacy ? legacyPolicy(one) : isPolicy(one) ? one : undefined)
+      .filter((one): one is DelegationPolicy => one !== undefined))]
+    : undefined;
   const mcpServers = Array.isArray(valueRecord.allowedMcpServers) ? valueRecord.allowedMcpServers : [];
   const mcpTools = Array.isArray(valueRecord.allowedMcpTools) ? valueRecord.allowedMcpTools : [];
   const allowedModes = uniqueStrings(valueRecord.allowedModes, isModeName);
@@ -188,11 +205,10 @@ function validateGrant(value: unknown): DelegationGrant {
     || PROFILE_RANK[value.defaultPermissionProfile] > PROFILE_RANK[value.maxPermissionProfile]
     || !isNetwork(value.defaultNetwork) || !isNetwork(value.maxNetwork)
     || NETWORK_RANK[value.defaultNetwork] > NETWORK_RANK[value.maxNetwork]
-    || !isPolicy(value.defaultPolicy)
-    || !Array.isArray(value.allowedPolicies) || value.allowedPolicies.length === 0
-    || value.allowedPolicies.some((one) => !isPolicy(one))
-    || new Set(value.allowedPolicies).size !== value.allowedPolicies.length
-    || !value.allowedPolicies.includes(value.defaultPolicy)
+    || (semantics !== undefined && semantics !== POLICY_SEMANTICS)
+    || normalizedDefault === undefined
+    || normalizedAllowed === undefined || normalizedAllowed.length === 0
+    || !normalizedAllowed.includes(normalizedDefault)
     || typeof value.allowOperator !== 'boolean'
     || (value.allowScreenCapture !== undefined && typeof value.allowScreenCapture !== 'boolean')
     || (value.confirmedScreenCapture !== undefined && typeof value.confirmedScreenCapture !== 'boolean')
@@ -224,8 +240,8 @@ function validateGrant(value: unknown): DelegationGrant {
     maxPermissionProfile: value.maxPermissionProfile,
     defaultNetwork: value.defaultNetwork,
     maxNetwork: value.maxNetwork,
-    defaultPolicy: value.defaultPolicy,
-    allowedPolicies: Object.freeze([...value.allowedPolicies]) as DelegationPolicy[],
+    defaultPolicy: normalizedDefault,
+    allowedPolicies: Object.freeze([...normalizedAllowed]) as DelegationPolicy[],
     allowOperator: value.allowOperator,
     allowScreenCapture: value.allowScreenCapture === true,
     confirmedScreenCapture: value.confirmedScreenCapture === true,
@@ -237,6 +253,7 @@ function validateGrant(value: unknown): DelegationGrant {
     confirmedFullAccess: value.confirmedFullAccess,
     confirmedUnrestrictedNetwork: value.confirmedUnrestrictedNetwork,
     confirmedPartialWorkspaceWrite: value.confirmedPartialWorkspaceWrite === true,
+    ...(semantics === undefined ? {} : { policySemantics: semantics }),
     createdAt: value.createdAt,
     expiresAt: value.expiresAt,
     revokedAt: value.revokedAt,
@@ -252,7 +269,8 @@ function validateAudit(value: unknown): DelegationAuditEvent {
     || (value.source !== undefined && ((value.source !== 'trusted-ui' && value.source !== 'legacy') || value.kind !== 'grant.created'))
     || (value.permissionProfile !== undefined && !isProfile(value.permissionProfile))
     || (value.network !== undefined && !isNetwork(value.network))
-    || (value.policy !== undefined && !isPolicy(value.policy))
+    // 历史审计记录里可能写着旧值 `none`，保留原文，不改写也不丢弃。
+    || (value.policy !== undefined && !isPolicy(value.policy) && value.policy !== 'none')
     || (value.code !== undefined && (typeof value.code !== 'string' || !/^[a-z][a-z0-9_]{0,79}$/.test(value.code)))) {
     throw invalidStore();
   }
@@ -404,6 +422,7 @@ function checkedInput(input: CreateDelegationGrantInput): Omit<DelegationGrant, 
     maxNetwork: input.maxNetwork,
     defaultPolicy: input.defaultPolicy,
     allowedPolicies: [...input.allowedPolicies],
+    policySemantics: POLICY_SEMANTICS,
     allowOperator: input.allowOperator,
     allowScreenCapture: input.allowScreenCapture === true,
     confirmedScreenCapture: input.allowScreenCapture === true && input.confirmScreenCapture === true,

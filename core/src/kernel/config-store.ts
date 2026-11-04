@@ -104,6 +104,13 @@ export function createConfigStore({ projectRoot, userHome, layers = {} }: { proj
       const [table, key] = editableField(field).path;
       (values[table] ??= {})[key] = valueOf(field);
     }
+    // 档位的语义标记不是可写字段，只在读取时跟着它所在的那一层一起带出来；
+    // 上层据此区分“新写法里的 never”和“旧文件里的 never”。
+    const modeSource = sourceOf('policy.mode');
+    const semantics = modeSource === 'none' || modeSource === 'merged'
+      ? undefined
+      : (layers[modeSource]?.policy as Record<string, unknown> | undefined)?.semantics;
+    if (semantics !== undefined) (values.policy ??= {}).semantics = semantics;
     return values;
   };
   // 一次读取两个可写层的文件，并同时返回字段值、字段来源、有效规则和用于后续写入的版本。

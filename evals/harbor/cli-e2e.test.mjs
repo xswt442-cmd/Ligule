@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { access, cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -20,15 +22,40 @@ const helperSource = fileURLToPath(new URL('./export_session.mjs', import.meta.u
 const MOCK_CREDENTIAL = 'ligule-local-fixture-key';
 const FILE_CONTENT = 'LIGULE_CLI_E2E_FILE_CREATED';
 
+async function copyDependency(name, targetRoot, fromDirectory = corePackage) {
+  const resolveFrom = (specifier) => createRequire(join(fromDirectory, 'package.json')).resolve(specifier);
+  let source;
+  try {
+    source = dirname(resolveFrom(`${name}/package.json`));
+  } catch {
+    // 有的包用 exports 封住 ./package.json，就沿着入口文件向上找包根。
+    let directory = dirname(resolveFrom(name));
+    while (!existsSync(join(directory, 'package.json'))) directory = dirname(directory);
+    source = directory;
+  }
+  await cp(source, join(targetRoot, name), { recursive: true, dereference: true });
+  const manifest = JSON.parse(await readFile(join(source, 'package.json'), 'utf8'));
+  for (const dependency of Object.keys(manifest.dependencies ?? {})) {
+    if (dependency.startsWith('@ligule/')) continue;
+    await copyDependency(dependency, join(targetRoot, name, 'node_modules'), source);
+  }
+}
+
 async function installableHelper(root) {
   const packageRoot = join(root, 'node_modules', 'ligule');
   const coreRoot = join(packageRoot, 'node_modules', '@ligule', 'core');
   await mkdir(join(coreRoot, 'dist'), { recursive: true });
   await cp(join(corePackage, 'dist'), join(coreRoot, 'dist'), { recursive: true });
   await writeFile(join(coreRoot, 'package.json'), await readFile(join(corePackage, 'package.json')));
+  // 这个 consumer 是手写的：pnpm 不提升依赖，所以 core 的运行时依赖要显式放到它自己的 node_modules 下。
+  for (const dependency of ['proper-lockfile', 'smol-toml']) {
+    await copyDependency(dependency, join(coreRoot, 'node_modules'));
+  }
   await writeFile(join(packageRoot, 'package.json'), JSON.stringify({ name: 'ligule', version: '0.1.0' }));
   const helperPath = join(packageRoot, 'export_session.mjs');
   await writeFile(helperPath, await readFile(helperSource));
+  // 导出器按同目录的 policy-mode.mjs 读取基准审批档位，手工 consumer 也需要它。
+  await writeFile(join(packageRoot, 'policy-mode.mjs'), await readFile(fileURLToPath(new URL('./policy-mode.mjs', import.meta.url))));
   return import(pathToFileURL(helperPath).href);
 }
 

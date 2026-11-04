@@ -8,6 +8,7 @@ import { getStaticTOMLValue, parseTOML, traverseNodes, VisitorKeys, type AST } f
 import lockfile from 'proper-lockfile';
 import { isDeepStrictEqual } from 'node:util';
 import { KernelError, KernelRuntimeError } from './error.js';
+import { POLICY_MODES, POLICY_SEMANTICS } from './policy.js';
 import { modelSelection, modelServices, selectionLiteral, servicesLiteral } from './model-services.js';
 
 /** `[[policy.rules]]` 中的一条工具规则。 */
@@ -35,7 +36,7 @@ export type WriteRequest = {
 /** 可写配置字段及其文件路径和允许的值类型。 */
 export type EditableField = {
   readonly path: readonly [string, string];
-  readonly kind: 'string' | 'enum' | 'url' | 'envName' | 'rules' | 'services' | 'selection' | 'positiveInteger' | 'mcpServer';
+  readonly kind: 'string' | 'enum' | 'url' | 'envName' | 'rules' | 'services' | 'selection' | 'positiveInteger' | 'boolean' | 'mcpServer';
   readonly oneOf?: readonly string[];
 };
 
@@ -48,9 +49,20 @@ export const EDITABLE: Readonly<Record<string, EditableField>> = {
   'model.services': { path: ['model', 'services'], kind: 'services' },
   'model.selection': { path: ['model', 'selection'], kind: 'selection' },
   'model.outputTokens': { path: ['model', 'outputTokens'], kind: 'positiveInteger' },
-  'policy.mode': { path: ['policy', 'mode'], kind: 'enum', oneOf: ['ask', 'auto', 'none', 'never'] },
+  'policy.mode': { path: ['policy', 'mode'], kind: 'enum', oneOf: POLICY_MODES },
   'policy.rules': { path: ['policy', 'rules'], kind: 'rules' },
   'mcp.servers': { path: ['mcp', 'servers'], kind: 'mcpServer' },
+  // 复审默认关闭；启用后才在 `auto` 无法确定性放行时调用一次模型复审。
+  'reviewer.enabled': { path: ['reviewer', 'enabled'], kind: 'boolean' },
+  'reviewer.api': { path: ['reviewer', 'api'], kind: 'enum', oneOf: ['messages', 'chat-completions'] },
+  'reviewer.model': { path: ['reviewer', 'model'], kind: 'string' },
+  'reviewer.baseURL': { path: ['reviewer', 'baseURL'], kind: 'url' },
+  'reviewer.apiKeyEnv': { path: ['reviewer', 'apiKeyEnv'], kind: 'envName' },
+  'reviewer.maxInputTokens': { path: ['reviewer', 'maxInputTokens'], kind: 'positiveInteger' },
+  'reviewer.maxOutputTokens': { path: ['reviewer', 'maxOutputTokens'], kind: 'positiveInteger' },
+  'reviewer.timeoutMs': { path: ['reviewer', 'timeoutMs'], kind: 'positiveInteger' },
+  'reviewer.maxPerRun': { path: ['reviewer', 'maxPerRun'], kind: 'positiveInteger' },
+  'reviewer.maxTotalTokens': { path: ['reviewer', 'maxTotalTokens'], kind: 'positiveInteger' },
 };
 
 export function editableField(field: unknown): EditableField {
@@ -62,6 +74,12 @@ export function editableField(field: unknown): EditableField {
 
 /** 校验字段值，并返回用于 TOML 写入和回读比较的表示。 */
 export function encodeValue(field: EditableField, value: unknown): { literal: string; value: unknown } {
+  if (field.kind === 'boolean') {
+    if (typeof value !== 'boolean') {
+      throw new KernelError('config_field_value', { detail: 'takes true or false' });
+    }
+    return { literal: value ? 'true' : 'false', value };
+  }
   if (field.kind === 'positiveInteger') {
     if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
       throw new KernelError('config_field_value', { detail: 'takes a positive safe integer' });
@@ -378,11 +396,15 @@ export async function writeConfigField(
     };
     const before = definition.kind === 'rules' ? rulesOfLayer(read(current, 'config_file_invalid')) : [];
     const beforeServers = definition.kind === 'mcpServer' ? mcpServersOfLayer(read(current, 'config_file_invalid')) : {};
-    const edited = scalar === undefined
+    let edited = scalar === undefined
       ? definition.kind === 'mcpServer'
         ? editMcpServerTable(current, op as McpOp, server as McpServerWrite)
         : editRuleTable(current, op as RuleOp, index, rule)
       : editTomlValue(current, definition.path, scalar.literal, definition.kind === 'services' || definition.kind === 'selection');
+    // 审批档位写入时同时标记语义版本，读取方据此区分新四档与历史的 none/never 字面值。
+    if (definition.path[0] === 'policy' && definition.path[1] === 'mode') {
+      edited = editTomlValue(edited.text, ['policy', 'semantics'], String(POLICY_SEMANTICS), false);
+    }
     const parsed = read(edited.text, 'config_edit_verify_failed');
     if (scalar === undefined && definition.kind === 'rules') {
       // 比较整个规则表，检测写入期间其他规则是否发生变化。

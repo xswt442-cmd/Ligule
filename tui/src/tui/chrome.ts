@@ -52,8 +52,8 @@ export function thinkingText(effort: string | undefined, locale: Locale): string
 
 export function configurationText({ model, mode, policy, thinking, permission, external = false, columns, locale }: ConfigurationProps): string {
   if (external) return fit(textOf(locale, `外控模型 ${model}`, `External model ${model}`), columns);
-  const approval = policy === 'never' ? textOf(locale, '旧 never，需迁移', 'legacy never; migrate')
-    : policy === 'none' ? textOf(locale, '不受审批', 'none')
+  const approval = policy === 'always' ? textOf(locale, '每次审批', 'always')
+    : policy === 'never' ? textOf(locale, '不审批', 'never')
       : policy === 'auto' ? textOf(locale, '自动判定', 'auto') : textOf(locale, '逐次审批', 'ask');
   const policyText = textOf(locale, `审批 ${approval}`, `Approval ${approval}`);
   const modeText = textOf(locale, `工具模式 ${mode}`, `Tools ${mode}`);
@@ -85,8 +85,8 @@ export function configurationText({ model, mode, policy, thinking, permission, e
   for (const { line } of joined) {
     if (displayWidth(line) <= available) return line;
   }
-  const compactApproval = policy === 'never' ? textOf(locale, '旧never', 'legacy')
-    : policy === 'none' ? textOf(locale, '无审批', 'none')
+  const compactApproval = policy === 'always' ? textOf(locale, '每次', 'always')
+    : policy === 'never' ? textOf(locale, '不审', 'never')
       : policy === 'auto' ? textOf(locale, '自动', 'auto') : approval;
   if (displayWidth(policyText) <= available) return policyText;
   return fit(compactApproval, available);

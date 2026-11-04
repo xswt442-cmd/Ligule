@@ -12,8 +12,7 @@ import { CURRENT, formatKeys } from '../hotkeys';
 import type { ModelSelection } from '../model-catalog';
 import { useText } from '../locale';
 
-type PolicySelection = 'ask' | 'auto' | 'none';
-type PolicyValue = PolicySelection | 'never';
+type PolicyValue = 'always' | 'ask' | 'auto' | 'never';
 import type { Client } from '../protocol';
 import type { Status } from '../status';
 import type { Settings } from '../settings';
@@ -66,7 +65,7 @@ export function Composer({ client, sessionId, projectRoot, status, settings, set
   onOpenSecurity: () => void;
   onSessionMenuChange: (open: boolean) => void;
   onSetMode: (name: string | null) => void;
-  onSetPolicy: (mode: PolicySelection | null) => Promise<void>;
+  onSetPolicy: (mode: PolicyValue | null) => Promise<void>;
   onInitialPermissionChange: (target: PermissionTarget, confirmations: PermissionConfirmations) => void;
   onPermissionStatus: (status: Status) => void;
   onStop: () => void;

@@ -1,4 +1,5 @@
 import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
@@ -73,6 +74,10 @@ function packInfo(output, label) {
 }
 
 export async function packRelease(destination) {
+  // Build the runtime from the current checkout before packing so the recorded source SHA
+  // cannot describe a dist/ produced by a different commit.
+  process.stdout.write('building the workspace before packing\n');
+  execPnpm(['run', 'build'], { cwd: root, stdio: 'inherit' });
   const finalManifest = releaseManifest();
   const destinationDirectory = resolve(root, destination);
   await mkdir(join(root, 'testplace', 'tmp'), { recursive: true });
@@ -112,6 +117,22 @@ export async function packRelease(destination) {
     if (!existsSync(tarball)) throw new Error(`npm pack did not produce ${tarball}`);
     const stagedPaths = finalInfo.files.map(({ path }) => path).sort();
     if (JSON.stringify(stagedPaths) !== JSON.stringify([...included].sort())) throw new Error('the staged tarball file list differs from npm pack --dry-run');
+    const sourceGitSha = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
+    if (!/^[0-9a-f]{40}$/u.test(sourceGitSha)) throw new Error(`Git HEAD is not a full SHA: ${sourceGitSha}`);
+    const sourceDirty = execFileSync('git', ['status', '--porcelain'], { cwd: root, encoding: 'utf8' }).trim() !== '';
+    const tarballSha256 = createHash('sha256').update(readFileSync(tarball)).digest('hex');
+    await writeFile(`${tarball}.source.json`, `${JSON.stringify({
+      schemaVersion: 1,
+      package: finalManifest.name,
+      version: finalManifest.version,
+      tarball: basename(tarball),
+      tarballSha256,
+      sourceGitSha,
+      sourceDirty,
+      buildNodeVersion: process.version,
+      buildTimestamp: new Date().toISOString(),
+      builder: 'scripts/pack-release.js',
+    }, null, 2)}\n`, 'utf8');
     process.stdout.write(`${tarball}\n`);
     return tarball;
   } finally {

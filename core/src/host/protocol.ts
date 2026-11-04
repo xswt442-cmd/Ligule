@@ -73,6 +73,9 @@ export interface HostMethodParams extends Record<string, unknown> {
   readonly defaultNetwork?: string;
   readonly maxNetwork?: string;
   readonly defaultPolicy?: string;
+  readonly allowedPolicyAlways?: boolean;
+  /** 客户端写下的档位语义；缺省时按旧语义读取 `defaultPolicy`。 */
+  readonly policySemantics?: number;
   readonly allowedPolicyAsk?: boolean;
   readonly allowedPolicyAuto?: boolean;
   readonly allowedPolicyNone?: boolean;
@@ -121,7 +124,7 @@ export const METHODS = Object.freeze({
         // 未提供来源时，Host 根据是否提供工作区路径区分显式选择与默认工作区。
         workspaceOrigin: { type: 'string', description: "how this session landed on that workspace: 'explicit' when the client chose it, 'default' when it is the one the client falls back to" },
         initialMode: { type: 'string', description: 'optional mode to apply before returning the new session' },
-        initialPolicy: { type: 'string', description: 'optional session policy override: ask, auto, none, or legacy never' },
+        initialPolicy: { type: 'string', description: 'optional session policy override: always, ask, auto, or never' },
         initialPermissionProfile: { type: 'string', description: 'optional initial file and command permission; interactive clients only' },
         initialPermissionNetwork: { type: 'string', description: 'optional initial network permission; interactive clients only' },
         confirmInitialFullAccess: { type: 'boolean', description: 'confirmation for granting full-access permission to a new session' },
@@ -411,12 +414,16 @@ export const METHODS = Object.freeze({
     description: 'Read the Host state for this session, including its live phase and model output budget when a run is active',
     parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
   },
+  'usage.get': {
+    description: 'Read the read-only token usage of a project session, split by purpose (agent model calls and the optional approval reviewer); a total the endpoint never reported stays unknown rather than becoming zero, and cached input is a subset of input, never added to it',
+    parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
+  },
   'session.configure': {
     description: 'Read or change one session-owned category: mode, policy, model generation, or the per-turn iteration limit. Loop-limit changes apply at the next turn boundary and never write configuration files.',
     parameters: { type: 'object', properties: {
       sessionId: SESSION_ID,
       mode: { type: 'string', description: 'select a mode; default restores the mode configured for this project' },
-      policy: { type: 'string', description: 'ask, auto, none, legacy never, or default to restore the project policy' },
+      policy: { type: 'string', description: 'always, ask, auto, never, or default to restore the project policy; legacy none is read as ask' },
       provider: { type: 'string', description: 'provider ID for a model selection; must be paired with model' },
       model: { type: 'string', description: 'model ID for a model selection; must be paired with provider' },
       thinkingEffort: { type: 'string', description: 'a value advertised by the selected provider, or default to inherit the provider default' },
@@ -533,10 +540,12 @@ export const METHODS = Object.freeze({
       maxPermissionProfile: { type: 'string' },
       defaultNetwork: { type: 'string' },
       maxNetwork: { type: 'string' },
-      defaultPolicy: { type: 'string' },
+      defaultPolicy: { type: 'string', description: 'always, ask, auto, or never; a legacy none is read as ask' },
+      allowedPolicyAlways: { type: 'boolean' },
+      policySemantics: { type: 'integer', description: 'the meaning of defaultPolicy; 2 sends always and never as themselves' },
       allowedPolicyAsk: { type: 'boolean' },
       allowedPolicyAuto: { type: 'boolean' },
-      allowedPolicyNone: { type: 'boolean' },
+      allowedPolicyNone: { type: 'boolean', description: 'legacy spelling; grants ask, never the approval-skipping never' },
       allowedPolicyNever: { type: 'boolean' },
       allowOperator: { type: 'boolean' },
       allowScreenCapture: { type: 'boolean' },
@@ -653,7 +662,7 @@ export const METHODS = Object.freeze({
     description: 'Override the approval tier for this session only, or go back to the tier the settings file writes; the new tier applies to the tool decisions that follow',
     parameters: {
       type: 'object',
-      properties: { sessionId: SESSION_ID, mode: { type: 'string', description: "'ask', 'auto', 'none', legacy 'never', or 'default' to drop this session's override" } },
+      properties: { sessionId: SESSION_ID, mode: { type: 'string', description: "'always', 'ask', 'auto', 'never', or 'default' to drop this session's override; legacy 'none' is read as 'ask'" } },
       required: ['sessionId', 'mode'],
     },
   },

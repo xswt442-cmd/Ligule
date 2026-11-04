@@ -15,12 +15,16 @@ export { discoverSkills, skillDirectories } from './kernel/skills.js';
 export { createSessionLog } from './session/session.js';
 export { listWorkspaceSessions, sessionDirectories, type SessionSummary } from './session/list.js';
 export { summarizeVerdicts } from './session/verdicts.js';
+export { summarizeUsage, type UsageBucket, type UsageSummary } from './session/usage-summary.js';
 export { minimalPlugin } from './tools/minimal.js';
 export { networkPlugin } from './tools/network.js';
 export { createHost, providerFromConfig, hostProviderFromConfig, serveHost } from './host/host.js';
 export { KernelError, parseProviderDiagnostic, providerDiagnosticText } from './kernel/error.js';
 export type { ConfigSnapshot } from './kernel/config.js';
-export { isPolicyRule, type PolicyMode, type PolicyThresholds } from './kernel/policy.js';
+export {
+  isPolicyMode, isPolicyRule, POLICY_MODES, POLICY_SEMANTICS, readPersistedPolicyMode, readPolicyMode,
+  type PolicyMode, type PolicySelection, type PolicyThresholds,
+} from './kernel/policy.js';
 export type { PolicyRule } from './kernel/config-edit.js';
 export { createConnection, type Connection, type HostRequest } from './host/connection.js';
 export { type SessionEvent, type SessionHeader } from './session/format.js';
