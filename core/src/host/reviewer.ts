@@ -31,6 +31,8 @@ export interface ReviewerUsage {
 
 export interface SessionReviewer {
   readonly review: PolicyReview;
+  /** 每次 `loop.run` 开始前调用：`maxPerRun` 限制的是一轮之内的复审次数，不是整个会话。 */
+  readonly beginRun: () => void;
   readonly usage: () => ReviewerUsage;
 }
 
@@ -87,13 +89,18 @@ function reportUsage(
   user: string,
   onUsage: ReviewerDeps['onUsage'],
 ): void {
-  if (onUsage === undefined || events.length === 0) return;
-  const event = usageEvent({ system, tools: [], messages: [{ role: 'user', text: user }] }, [...events], 'reviewer');
+  if (onUsage === undefined) return;
+  // 端点完全不报用量时也要留下这次请求：否则 `/usage` 会显示“复审一次都没调过”。
+  const event = usageEvent({ system, tools: [], messages: [{ role: 'user', text: user }] }, [...events], 'reviewer', {
+    unknownWhenUnreported: true,
+  });
   if (event !== null) onUsage(event);
 }
 
 export function createSessionReviewer({ settings, provider, factsOf, logger, onUsage }: ReviewerDeps): SessionReviewer {
   let calls = 0;
+  // 轮次内的调用次数由 beginRun 归零；`calls` 保留为整个会话的累计值，只用于用量展示。
+  let runCalls = 0;
   let inputTokens = 0;
   let outputTokens = 0;
   let unknownInput = false;
@@ -107,16 +114,20 @@ export function createSessionReviewer({ settings, provider, factsOf, logger, onU
   };
 
   const review: PolicyReview = async (request: PolicyReviewRequest): Promise<PolicyReviewOutcome> => {
-    if (calls >= settings.maxPerRun) return askHuman('review_budget_exhausted', 'Review 次数已达本次运行上限，转人工审批。');
+    if (runCalls >= settings.maxPerRun) return askHuman('review_budget_exhausted', 'Review 次数已达本次运行上限，转人工审批。');
     const built = buildReviewInput(factsOf(request), { maxInputTokens: settings.maxInputTokens });
     if (!built.ok) {
       failures += 1;
       return askHuman(built.code, built.detail ?? '复审输入不满足要求，转人工审批。');
     }
-    if (inputTokens + built.input.estimatedInputTokens > settings.maxTotalTokens) {
-      return askHuman('review_budget_exhausted', 'Review 累计输入已超预算，转人工审批。');
+    // 预算按“已花掉的输入与输出 + 本次输入 + 本次回复的预留额度”判断；
+    // 只算输入会让输出悄悄超出上限。
+    const spent = inputTokens + outputTokens;
+    if (spent + built.input.estimatedInputTokens + settings.maxOutputTokens > settings.maxTotalTokens) {
+      return askHuman('review_budget_exhausted', 'Review 累计用量已超预算，转人工审批。');
     }
     calls += 1;
+    runCalls += 1;
     // 预算只记一份：先用估算做准入检查，之后收到端点的真实输入量就替换它，绝不重复累加。
     let providerInputSeen = false;
     let budgetSettled = false;
@@ -193,6 +204,7 @@ export function createSessionReviewer({ settings, provider, factsOf, logger, onU
 
   return {
     review,
+    beginRun: () => { runCalls = 0; },
     usage: () => ({
       calls,
       inputTokens: unknownInput ? null : inputTokens,

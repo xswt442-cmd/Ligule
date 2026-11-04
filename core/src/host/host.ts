@@ -1819,19 +1819,37 @@ export function createHost({
     // 复审只在配置显式启用时存在；未启用时 `auto` 与 P9.5 行为一致。
     const reviewSettings = reviewerSettings(config as unknown as Record<string, unknown>);
     const reviewer = reviewSettings === undefined ? undefined : (() => {
-      const base = modelConfigOf(config);
-      const overridden: Record<string, unknown> = {
-        ...base,
-        ...(reviewSettings.model === undefined ? {} : { model: reviewSettings.model }),
-        ...(reviewSettings.baseURL === undefined ? {} : { baseURL: reviewSettings.baseURL }),
+      // 复审的默认路由就是用户选中的主模型；先把主模型解析成具体端点，
+      // 再让 `[reviewer]` 覆盖需要的字段——直接删 `selection` 会退回配置文件里的第一个服务。
+      const main = resolveModel(modelConfigOf(config));
+      const route: Record<string, unknown> = {
+        ...(typeof main.api === 'string' ? { api: reviewSettings.api ?? main.api } : {}),
         ...(reviewSettings.api === undefined ? {} : { api: reviewSettings.api }),
-        ...(reviewSettings.apiKeyEnv === undefined ? {} : { apiKeyEnv: reviewSettings.apiKeyEnv }),
+        ...(reviewSettings.baseURL === undefined
+          ? (typeof main.baseURL === 'string' ? { baseURL: main.baseURL } : {})
+          : { baseURL: reviewSettings.baseURL }),
+        ...(reviewSettings.model === undefined
+          ? (typeof main.model === 'string' ? { model: main.model } : {})
+          : { model: reviewSettings.model }),
+        ...(typeof main.apiKeyEnv === 'string' || reviewSettings.apiKeyEnv !== undefined
+          ? { apiKeyEnv: reviewSettings.apiKeyEnv ?? main.apiKeyEnv }
+          : {}),
       };
-      // 复审使用独立路由时不能继承主模型的 service 选择，否则会被解析回主模型。
-      delete overridden.selection;
+      // 项目层的 `[reviewer]` 是不可信输入：端点与凭据引用必须是用户配置或命令行绑定过的，
+      // 否则一次复审就能把已保存的密钥发到任意地址。
+      const bindings = Object.keys(env.layers).length === 0 ? undefined
+        : modelConfigOf(createConfig({ user: env.layers.user ?? {}, flag: env.layers.flag ?? {} }));
+      const bound = bindings !== undefined && typeof route.api === 'string' && typeof route.baseURL === 'string'
+        && hasModelCredentialBinding(bindings, route.api, route.baseURL, route.apiKeyEnv ?? 'LIGULE_API_KEY');
+      if (!bound) {
+        try {
+          logger?.log?.('reviewer stays off: its endpoint and credential are not bound', { sessionId: id });
+        } catch { /* 记录失败不影响会话 */ }
+        return undefined;
+      }
       return createSessionReviewer({
         settings: reviewSettings,
-        provider: deriveProvider({ ...config, model: overridden }, { outputTokens: reviewSettings.maxOutputTokens }),
+        provider: deriveProvider({ ...config, model: route }, { outputTokens: reviewSettings.maxOutputTokens }),
         factsOf: (request: PolicyReviewRequest): ReviewFacts => ({
           tool: request.tool,
           args: request.input,
@@ -2425,6 +2443,8 @@ export function createHost({
         // 复审装配把用户原文当作仍然有效的指令；它不会进入主 Agent 的模型投影。
         state.reviewInstructions = [...(state.reviewInstructions ?? []), input]
           .slice(-REVIEW_INSTRUCTION_LIMIT);
+        // `maxPerRun` 是每轮上限：新一轮开始就重置，长会话里复审不会提前失效。
+        state.reviewer?.beginRun();
         const result = await loop.run(input, {
           signal: budget.signal,
           task: budget,
@@ -3749,7 +3769,18 @@ export function createHost({
         }
         case 'usage.get': {
           // 只读聚合：用途分开记账，未知保持未知，缓存不重复计入输入。
-          const record = await readSessionRecord(recordPathOf(sessionId));
+          // 记录必须按会话自己的项目环境定位；Host 可以打开其他项目的会话。
+          const state = sessions.get(sessionId);
+          const owner = state === undefined ? branchOwner(sessionId) : undefined;
+          const env = state?.environment
+            ?? (owner === undefined ? defaultEnvironment : sessions.get(owner)?.environment ?? defaultEnvironment);
+          const path = recordPathOf(sessionId, env);
+          try {
+            await access(path);
+          } catch {
+            throw new KernelError('session_not_found', { detail: sessionId });
+          }
+          const record = await readSessionRecord(path);
           return { sessionId, summary: summarizeUsage(record.events) };
         }
         case 'status.get': {

@@ -161,6 +161,54 @@ test('a reply without usage still counts the estimate exactly once', async () =>
   assert.equal(afterSecond - afterFirst, afterFirst, '每次调用只记一份输入');
 });
 
+test('the per-run limit is reset by beginRun, not exhausted by the whole session', async () => {
+  const reviewer = createSessionReviewer({
+    settings: { ...settings, maxPerRun: 1 },
+    provider: providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }]),
+    factsOf: () => facts,
+  });
+  assert.equal((await reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined })).decision, 'allow');
+  // 同一轮内第二次必须被拦下。
+  assert.equal((await reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined })).reasonCode, 'review_budget_exhausted');
+  // 新一轮开始后额度恢复：长会话里复审不能因为前几轮用过就永久失效。
+  reviewer.beginRun();
+  assert.equal((await reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined })).decision, 'allow');
+  assert.equal(reviewer.usage().calls, 2);
+});
+
+test('output tokens count against the total budget, not just the input', async () => {
+  const reviewer = createSessionReviewer({
+    // 输出 5000 + 预留 400 已经超过 5000 的总预算，但只看输入（100）时会误判为还有额度。
+    settings: { ...settings, maxTotalTokens: 5_000, maxPerRun: 5 },
+    provider: providerOf([
+      { type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' },
+      { type: 'usage', input: 100, output: 5_000 },
+      { type: 'finish' },
+    ]),
+    factsOf: () => facts,
+  });
+  assert.equal((await reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined })).decision, 'allow');
+  const again = await reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
+  assert.equal(again.decision, 'ask-human');
+  assert.equal(again.reasonCode, 'review_budget_exhausted');
+});
+
+test('a request whose endpoint reports nothing still shows up with unknown counts', async () => {
+  const recorded: { purpose?: string; input?: number | null; output?: number | null }[] = [];
+  const reviewer = createSessionReviewer({
+    settings,
+    provider: providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' }, { type: 'finish' }]),
+    factsOf: () => facts,
+    onUsage: (event) => { recorded.push(event as { purpose?: string; input?: number | null; output?: number | null }); },
+  });
+  await reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
+  // 端点完全不报用量时也要留一条 reviewer 请求：否则 /usage 会说“复审一次都没调过”。
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0]?.purpose, 'reviewer');
+  assert.equal(recorded[0]?.input, null);
+  assert.equal(recorded[0]?.output, null);
+});
+
 test('the reviewer stays disabled until the configuration asks for it', () => {
   assert.equal(reviewerSettings({}), undefined);
   assert.equal(reviewerSettings({ reviewer: { enabled: false, model: 'x' } }), undefined);
