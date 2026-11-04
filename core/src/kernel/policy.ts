@@ -572,6 +572,9 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       // 规则询问、强制人审、外部进程、无法分类的工具与私有网络都不交模型改判。
       // 复审不可用（未配置、超时、超预算、回复不合法）都退回人工审批，绝不当成放行。
       if (typeof review === 'function' && effective === 'auto' && reviewable) {
+        // 复审是异步请求；期间的策略切换或规则变更会让结论失效，先留一份签名用于复核。
+        const modeSignature = current;
+        const rulesSignature = JSON.stringify(currentRules);
         let outcome: PolicyReviewRecord | undefined;
         try {
           outcome = await review({
@@ -586,6 +589,10 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
             ...(scriptBinding === undefined ? {} : { scriptBinding }),
           });
         } catch {
+          outcome = undefined;
+        }
+        if (outcome !== undefined && (current !== modeSignature || JSON.stringify(currentRules) !== rulesSignature)) {
+          // 过期结论必须作废：回到确定性与人工审批路径，而不是拿旧判定放行或拒绝。
           outcome = undefined;
         }
         if (outcome !== undefined && outcome.decision === 'allow') {

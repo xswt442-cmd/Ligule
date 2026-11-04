@@ -71,16 +71,23 @@ test('the reply parser accepts exactly one JSON object and nothing else', () => 
 
   // 缺少决定、拼在句子中间、或决定不在枚举内，都必须判不可用。
   assert.equal(parseReviewReply('yes, allow it').ok, false);
-  // 模型把对象包在说明文字里时，取其中第一个配平的 JSON 对象即可，取不到才判不可用。
-  const wrapped = parseReviewReply('Decision: {"decision":"deny","reasonCode":"explicit_deny_rule"} — done.');
-  assert.equal(wrapped.ok, true);
-  if (wrapped.ok) assert.equal(wrapped.decision, 'deny');
-  assert.equal(parseReviewReply('{"decision":"allow"').ok, false);
+  // 包在说明文字里的对象不再被挑选：这种回复必须判无效，不能拿中间那个对象去放行。
+  const wrapped = parseReviewReply('Decision: {"decision":"deny","reasonCode":"explicit_deny_rule"} done.');
+  assert.equal(wrapped.ok, false);
+  if (!wrapped.ok) assert.equal(wrapped.code, 'review_reply_invalid');
+  // 括号没配平是截断，配平但解析失败是格式不对，两者要分开。
+  const truncated = parseReviewReply('{"decision":"allow"');
+  assert.equal(truncated.ok, false);
+  if (!truncated.ok) assert.equal(truncated.code, 'review_reply_truncated');
   assert.equal(parseReviewReply('{"decision":"maybe"}').ok, false);
   assert.equal(parseReviewReply('').ok, false);
   assert.equal(parseReviewReply('["allow"]').ok, false);
-  // 不合规的 reasonCode 退化为固定值，而不是把模型原文当代码使用。
-  const loose = parseReviewReply('{"decision":"ask-human","reasonCode":"NOT VALID!"}');
+  // 重复键、未知字段、不合规的 reasonCode 一律拒绝，不做静默降级。
+  assert.equal(parseReviewReply('{"decision":"allow","decision":"deny"}').ok, false);
+  assert.equal(parseReviewReply('{"decision":"allow","extra":1}').ok, false);
+  assert.equal(parseReviewReply('{"decision":"ask-human","reasonCode":"NOT VALID!"}').ok, false);
+  // 缺 reasonCode 时用固定值，而不是把模型原文当代码使用。
+  const loose = parseReviewReply('{"decision":"ask-human"}');
   assert.equal(loose.ok, true);
   if (loose.ok) assert.equal(loose.reasonCode, 'review_unspecified');
 });

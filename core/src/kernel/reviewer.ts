@@ -209,15 +209,65 @@ export type ReviewParseResult =
   | { readonly ok: true; readonly decision: ReviewDecision; readonly reasonCode: string; readonly reason?: string }
   | { readonly ok: false; readonly code: 'review_reply_invalid' | 'review_reply_truncated'; readonly detail: string };
 
-// 从说明文字里挑出第一个配平的 JSON 对象；引号内的括号不计入层级。
-function firstJsonObject(text: string): string | undefined {
-  const start = text.indexOf('{');
-  if (start < 0) return undefined;
+/**
+ * 解析模型回复：只接受“整段就是一个 JSON 对象”。
+ *
+ * 允许外层包一层完整代码围栏，但不再从解释性正文里挑首个 JSON——`Quoted: {...} Final answer: deny`
+ * 这种回复必须判为无效，而不是拿中间那个对象去放行。
+ */
+export function parseReviewReply(text: string): ReviewParseResult {
+  const trimmed = text.trim();
+  if (trimmed === '') return { ok: false, code: 'review_reply_invalid', detail: 'the reviewer returned nothing' };
+  let body = trimmed;
+  const fenced = /^```[a-zA-Z]*\s*\n?([\s\S]*?)\n?```$/u.exec(trimmed);
+  if (fenced !== null) body = (fenced[1] ?? '').trim();
+  // 括号没有配平说明生成被截断；配平但解析失败是回复本身不合规。
+  const balanced = bracketsBalanced(body);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return { ok: false, code: balanced ? 'review_reply_invalid' : 'review_reply_truncated', detail: balanced
+      ? 'the reviewer reply is not exactly one JSON object'
+      : 'the reviewer reply ended before the JSON object closed' };
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return { ok: false, code: 'review_reply_invalid', detail: 'the reviewer reply is not a JSON object' };
+  }
+  const duplicate = duplicateTopLevelKey(body);
+  if (duplicate !== undefined) {
+    return { ok: false, code: 'review_reply_invalid', detail: `the reviewer reply repeats the key ${duplicate}` };
+  }
+  const record = parsed as Record<string, unknown>;
+  const unknownField = Object.keys(record).find((key) => key !== 'decision' && key !== 'reasonCode' && key !== 'reason');
+  if (unknownField !== undefined) {
+    return { ok: false, code: 'review_reply_invalid', detail: `the reviewer reply sets an unknown field ${unknownField}` };
+  }
+  const decision = record.decision;
+  if (decision !== 'allow' && decision !== 'deny' && decision !== 'ask-human') {
+    return { ok: false, code: 'review_reply_invalid', detail: 'decision must be allow, deny or ask-human' };
+  }
+  if (record.reasonCode !== undefined && (typeof record.reasonCode !== 'string' || !/^[a-z0-9_]{1,60}$/u.test(record.reasonCode))) {
+    return { ok: false, code: 'review_reply_invalid', detail: 'reasonCode must be short snake case' };
+  }
+  if (record.reason !== undefined && typeof record.reason !== 'string') {
+    return { ok: false, code: 'review_reply_invalid', detail: 'reason must be a string' };
+  }
+  const reasonCode = typeof record.reasonCode === 'string' ? record.reasonCode : 'review_unspecified';
+  return {
+    ok: true,
+    decision,
+    reasonCode,
+    ...(typeof record.reason === 'string' && record.reason.trim() !== '' ? { reason: record.reason.trim().slice(0, 400) } : {}),
+  };
+}
+
+/** 只检查引号外的花括号是否配平，用来区分“截断”和“格式不对”。 */
+function bracketsBalanced(text: string): boolean {
   let depth = 0;
   let inString = false;
   let escaped = false;
-  for (let index = start; index < text.length; index += 1) {
-    const character = text[index];
+  for (const character of text) {
     if (inString) {
       if (escaped) escaped = false;
       else if (character === '\\') escaped = true;
@@ -228,48 +278,48 @@ function firstJsonObject(text: string): string | undefined {
     else if (character === '{') depth += 1;
     else if (character === '}') {
       depth -= 1;
-      if (depth === 0) return text.slice(start, index + 1);
+      if (depth < 0) return false;
     }
   }
-  return undefined;
+  return depth === 0 && !inString;
 }
 
-/** 解析模型回复：接受一个 JSON 对象（可被说明文字包围），其余字段一律忽略。 */
-
-export function parseReviewReply(text: string): ReviewParseResult {
-  const trimmed = text.trim();
-  if (trimmed === '') return { ok: false, code: 'review_reply_invalid', detail: 'the reviewer returned nothing' };
-  const unfenced = trimmed.startsWith('```')
-    ? trimmed.replace(/^```[a-zA-Z]*\n?/u, '').replace(/\n?```$/u, '').trim()
-    : trimmed;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(unfenced);
-  } catch {
-    // 有的模型会把对象包在一句说明里；只接受其中第一个完整的 JSON 对象，其余内容一律忽略。
-    const object = firstJsonObject(unfenced);
-    if (object === undefined) {
-      return { ok: false, code: 'review_reply_truncated', detail: 'the reviewer reply is not one JSON object' };
+/** 检出最外层对象里重复出现的键；JSON.parse 会静默取最后一个，这里必须显式拒绝。 */
+function duplicateTopLevelKey(text: string): string | undefined {
+  const seen = new Set<string>();
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  let pending = '';
+  let collecting = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index] as string;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === '"') {
+        inString = false;
+        if (collecting && depth === 1) {
+          const key = pending;
+          collecting = false;
+          pending = '';
+          // 只有后面紧跟冒号的字符串才是键名。
+          const rest = text.slice(index + 1).trimStart();
+          if (rest.startsWith(':')) {
+            if (seen.has(key)) return key;
+            seen.add(key);
+          }
+        }
+      } else if (collecting) pending += character;
+      continue;
     }
-    try {
-      parsed = JSON.parse(object);
-    } catch {
-      return { ok: false, code: 'review_reply_truncated', detail: 'the reviewer reply is not one JSON object' };
+    if (character === '"') {
+      inString = true;
+      if (depth === 1) collecting = true;
+      continue;
     }
+    if (character === '{' || character === '[') depth += 1;
+    else if (character === '}' || character === ']') depth -= 1;
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    return { ok: false, code: 'review_reply_invalid', detail: 'the reviewer reply is not a JSON object' };
-  }
-  const record = parsed as Record<string, unknown>;
-  const decision = record.decision;
-  if (decision !== 'allow' && decision !== 'deny' && decision !== 'ask-human') {
-    return { ok: false, code: 'review_reply_invalid', detail: 'decision must be allow, deny or ask-human' };
-  }
-  const reasonCode = typeof record.reasonCode === 'string' && /^[a-z0-9_]{1,60}$/u.test(record.reasonCode) ? record.reasonCode : 'review_unspecified';
-  return {
-    ok: true,
-    decision,
-    reasonCode,
-    ...(typeof record.reason === 'string' && record.reason.trim() !== '' ? { reason: record.reason.trim().slice(0, 400) } : {}),
-  };
+  return undefined;
 }

@@ -89,3 +89,22 @@ test('a rule-based ask and a private network target are human checkpoints, not r
   await scoped.evaluate({ tool: 'exec', input: { command: 'curl http://127.0.0.1:8080/' }, access: 'external' });
   assert.equal(network.requests.length, 0, '私有网络目标必须由人确认');
 });
+
+test('a verdict that arrives after the rules changed is discarded', async () => {
+  const asked: PolicyQuestion[] = [];
+  let chain: ReturnType<typeof createDecisionChain> | undefined;
+  const built = createDecisionChain({
+    mode: 'auto',
+    ask: async (question) => { asked.push(question); return false; },
+    review: async () => {
+      // 复审是异步的：结论回来之前规则被收紧，这个 allow 就不能再用。
+      chain?.setRules([{ tool: 'exec', decision: 'deny', match: 'python3 *' }]);
+      return { decision: 'allow', reasonCode: 'read_only_python', fingerprint: 'f', inputVersion: 2 };
+    },
+  });
+  chain = built;
+  const verdict = await built.evaluate(interpreterCall);
+  assert.notEqual(verdict.decision, 'allow', '规则收紧后旧结论必须作废');
+  assert.equal(asked.length, 1, '作废后回到人工审批');
+  assert.equal(verdict.review, undefined);
+});

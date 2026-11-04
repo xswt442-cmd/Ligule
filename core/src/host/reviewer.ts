@@ -126,6 +126,8 @@ export function createSessionReviewer({ settings, provider, factsOf, logger, onU
   let runCalls = 0;
   let inputTokens = 0;
   let outputTokens = 0;
+  // 已经发出、尚未结算的请求所预留的输入估算与最大输出。并发复审靠它互斥，避免两个请求同时通过准入。
+  let reservedTokens = 0;
   let unknownInput = false;
   let unknownOutput = false;
   let failures = 0;
@@ -145,10 +147,13 @@ export function createSessionReviewer({ settings, provider, factsOf, logger, onU
     }
     // 预算按“已花掉的输入与输出 + 本次输入 + 本次回复的预留额度”判断；
     // 只算输入会让输出悄悄超出上限。
+    const reservation = built.input.estimatedInputTokens + settings.maxOutputTokens;
     const spent = inputTokens + outputTokens;
-    if (spent + built.input.estimatedInputTokens + settings.maxOutputTokens > settings.maxTotalTokens) {
+    if (spent + reservedTokens + reservation > settings.maxTotalTokens) {
       return askHuman('review_budget_exhausted', 'Review 累计用量已超预算，转人工审批。');
     }
+    // 先占位再发请求：只算已结算的用量，两个并发的复审会同时看到“还有额度”而一起超支。
+    reservedTokens += reservation;
     calls += 1;
     runCalls += 1;
     // 预算只记一份：先用估算做准入检查，之后收到端点的真实输入量就替换它，绝不重复累加。
@@ -157,6 +162,8 @@ export function createSessionReviewer({ settings, provider, factsOf, logger, onU
     const settleBudget = (): void => {
       if (budgetSettled) return;
       budgetSettled = true;
+      // 无论成功失败都要归还预留额度，否则一次失败会把预算永久吃掉。
+      reservedTokens -= reservation;
       // 端点始终没报输入时退回估算，否则累计预算是空的、上限形同虚设。
       if (!providerInputSeen) inputTokens += built.input.estimatedInputTokens;
     };

@@ -426,6 +426,14 @@ test('Desktop human input and question answers reach the single MCP-owned real H
       assert.equal(model.requests.length, 3);
 
       const transcript = await callTool(client, 'ligule_session_read', { sessionId, limit: 50 });
+      // 用量是只读汇总：没有配置复审时复审账必须为空，主 Agent 账要能读出来。
+      const usage = await callTool(client, 'ligule_usage_get', { sessionId });
+      assert.equal(usage.isError ?? false, false, JSON.stringify(usage));
+      const summary = usage.structuredContent.summary as { agent: { requests: number }; reviewer: { requests: number } };
+      assert.equal(typeof summary.agent.requests, 'number');
+      assert.equal(summary.reviewer.requests, 0, '没有配置复审时不应出现复审用量');
+      const foreign = await callTool(client, 'ligule_usage_get', { sessionId: '00000000-0000-4000-8000-000000000000' });
+      assert.equal(foreign.isError, true, '只允许读取本控制器拥有的会话');
       const records = transcript.structuredContent.records.map((item) => JSON.parse(item.json) as SessionRecordLine);
       const users = records.filter((item) => item.kind === 'user');
       assert.ok(users.some((item) => item.origin === 'controller' && item.text === 'Ask the local user which route to take.'));

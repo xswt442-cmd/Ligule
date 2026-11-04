@@ -1,4 +1,4 @@
-﻿import test from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createSessionReviewer, narrowReviewerSettings, reviewerRouteFields, reviewerSettings } from '../dist/host/reviewer.js';
 import type { ModelProvider } from '../dist/kernel/loop.js';
@@ -60,8 +60,16 @@ test('every unusable reply turns into ask-human instead of an approval', async (
   });
   const unusable = await invalid.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
   assert.equal(unusable.decision, 'ask-human');
-  assert.equal(unusable.reasonCode, 'review_reply_truncated');
+  // 纯正文不是“截断”，是格式不合规；只有括号没配平才算截断。
+  assert.equal(unusable.reasonCode, 'review_reply_invalid');
   assert.equal(invalid.usage().failures, 1);
+
+  const truncated = createSessionReviewer({
+    settings, provider: () => providerOf([{ type: 'text', text: '{"decision":"allow","reasonCode":"ok"' }]), factsOf: () => facts,
+  });
+  const cut = await truncated.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
+  assert.equal(cut.decision, 'ask-human');
+  assert.equal(cut.reasonCode, 'review_reply_truncated');
 
   const toolCalling = createSessionReviewer({
     settings, provider: () => providerOf([{ type: 'tool-call', name: 'exec', input: { command: 'rm -rf /' } }]), factsOf: () => facts,
@@ -258,4 +266,29 @@ test('every review asks the host for the current session route', async () => {
   await reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
   assert.equal(routeCalls, 2, '复审不能缓存创建会话时的 Provider');
   assert.deepEqual(seen, ['provider-1', 'provider-2'], '每一轮的复审都走该轮 Run 的 Session 模型路由');
+});
+
+test('a pending review holds its budget so a parallel one cannot overspend', async () => {
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const blocking = {
+    stream: async function* () {
+      await gate;
+      yield { type: 'text', text: '{"decision":"allow","reasonCode":"ok"}' } as never;
+      yield { type: 'usage', input: 1, output: 1 } as never;
+      yield { type: 'finish' } as never;
+    },
+  } as unknown as ModelProvider;
+  const reviewer = createSessionReviewer({
+    settings: { ...settings, maxPerRun: 5, maxTotalTokens: 1_200 },
+    provider: () => blocking,
+    factsOf: () => facts,
+  });
+  const first = reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
+  await Promise.resolve();
+  const second = await reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
+  assert.equal(second.decision, 'ask-human', '并发复审不能同时看到同一份余额');
+  assert.equal(second.reasonCode, 'review_budget_exhausted');
+  release?.();
+  assert.equal((await first).decision, 'allow');
 });

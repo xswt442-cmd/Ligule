@@ -53,6 +53,7 @@ Windows 路径示例：
 - `ligule_run_status`：查询当前进程内操作的运行、完成、失败或取消状态。
 - `ligule_run_await`：等待已知 `operationId`；超时同样不会取消运行。
 - `ligule_session_read`：分页读取会话记录。
+- `ligule_usage_get`：读取本控制器拥有的会话的 Token 用量，按主 Agent 与复审两份账返回。
 - `ligule_run_cancel`：按 `operationId` 取消相应任务。
 
 推荐顺序是开始或继续工作前先创建或接回会话，再读取 `ligule_session_configure`。若希望服务端等待，可用 `ligule_run`；若要立即取回控制权，则用 `ligule_run_start`，之后通过 `ligule_run_await` 等待或用 `ligule_run_status` 轮询。两种等待超时都不会取消任务；根据 `phase`、`waitingFor` 和 `pendingInteractions` 继续等待或审阅后答复。完成后用 `ligule_session_read` 查看新增记录。状态通知通过 MCP logging 尽力发送；通知不可用时轮询仍可读取同一状态。需要停止时调用 `ligule_run_cancel`。工具参数以运行中的 `tools/list` schema 为准。进程重启后，可直接使用已有 `sessionId` 和 `runId`（或 `requestKey`）调用 `ligule_run_get`；无需先 `ligule_session_open`，也不会取得 Session 写锁。
@@ -121,7 +122,9 @@ Node/Python 脚本调用需要逐次审批；`approval.request` 会包含规范�
 
 成功结果同时提供 `structuredContent` 和 JSON 文本 `content`。工具执行失败时返回 `isError: true`，从文本 `content` 中解析 JSON 的 `code` 字段，例如 `session_locked` 或 `operation_not_found`；失败结果没有成功形状的 `structuredContent`。未知工具或不符合 schema 的参数返回 MCP 协议错误。运行状态只包含固定摘要和错误码，模型正文与工具结果通过会话记录读取。
 
-`ligule_session_read` 默认返回最近一页，页内记录按时间从早到晚排列。用响应里的 `nextBefore` 作为下一次读取的 `before`，即可逐页向更早记录读取。单次最多返回 50 条记录；每条 `json` 是 Host 记录的 JSON 文本片段，每段最多 8192 个 UTF-16 字符。响应尚未写入 Session 记录时，结果还可能包含独立的 `provisionalOutput` 快照，并标记 `provisional: true`。字段包括 `responseId`、可空的 `userSeq`、`updatedAt`、`text`、`reasoning`、`textCharacters`、`reasoningCharacters` 和 `truncated`。它不是助手正式记录，也不会作为模型输入。若正式助手记录已有相同 `responseId`，读取时会忽略残留快照。快照损坏或超限时返回 `provisionalOutputError: session_stream_invalid`，但仍可读取正式记录。快照可能落后于 Provider 流；进程突然终止时，尚未写入的最后一批内容可能丢失。
+`ligule_session_read` 默认返回最近一页，页内记录按时间从早到晚排列。用响应里的 `nextBefore` 作为下一次读取的 `before`，即可逐页向更早记录读取。`ligule_usage_get` 返回 `summary.agent` 与 `summary.reviewer` 两个账本，每本含 `requests`、`input`、`output`、`cachedInput`、`uncachedInput`、`estimatedInput`、`unknownInputRequests`、`unknownOutputRequests`。`input` 是端点报回的总量，`cachedInput` 是其中的缓存部分（不可相加）；任何一路缺失都保持 `null` 或计入 `unknown*`，不会当成 0。该工具只读，且只能读取本控制器拥有的会话。
+
+单次最多返回 50 条记录；每条 `json` 是 Host 记录的 JSON 文本片段，每段最多 8192 个 UTF-16 字符。响应尚未写入 Session 记录时，结果还可能包含独立的 `provisionalOutput` 快照，并标记 `provisional: true`。字段包括 `responseId`、可空的 `userSeq`、`updatedAt`、`text`、`reasoning`、`textCharacters`、`reasoningCharacters` 和 `truncated`。它不是助手正式记录，也不会作为模型输入。若正式助手记录已有相同 `responseId`，读取时会忽略残留快照。快照损坏或超限时返回 `provisionalOutputError: session_stream_invalid`，但仍可读取正式记录。快照可能落后于 Provider 流；进程突然终止时，尚未写入的最后一批内容可能丢失。
 
 读取一个较大的完整记录时，先用 `at` 指定该记录的事件序号，再按响应里的 `nextOffset` 继续读取同一记录：
 
