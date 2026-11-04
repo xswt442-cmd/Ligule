@@ -430,10 +430,16 @@ test('Desktop human input and question answers reach the single MCP-owned real H
       const usage = await callTool(client, 'ligule_usage_get', { sessionId });
       assert.equal(usage.isError ?? false, false, JSON.stringify(usage));
       const summary = (usage.structuredContent as unknown as {
-        summary?: { agent: { requests: number }; reviewer: { requests: number } };
+        summary?: {
+          agent: { requests: number; unknownInputRequests: number; unknownOutputRequests: number };
+          reviewer: { requests: number };
+        };
       }).summary;
       assert.ok(summary !== undefined, 'usage.get 必须带回汇总');
-      assert.equal(typeof summary.agent.requests, 'number');
+      // 这个假模型不报用量：三次请求都要算进次数，并且如实记成未知，而不是 0。
+      assert.equal(summary.agent.requests, 3, '未报告用量的请求也要计入次数');
+      assert.equal(summary.agent.unknownInputRequests, 3);
+      assert.equal(summary.agent.unknownOutputRequests, 3);
       assert.equal(summary.reviewer.requests, 0, '没有配置复审时不应出现复审用量');
       const foreign = await callTool(client, 'ligule_usage_get', { sessionId: '00000000-0000-4000-8000-000000000000' });
       assert.equal(foreign.isError, true, '只允许读取本控制器拥有的会话');

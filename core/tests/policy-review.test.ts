@@ -130,3 +130,45 @@ test('a verdict with an unrelated rule change still falls back to the human', as
   assert.equal(asked.length, 1, 'an unrelated change drops the review and asks the human');
   assert.equal(verdict.review, undefined);
 });
+
+test('a denial threshold tightening during a review discards the verdict', async () => {
+  const asked: PolicyQuestion[] = [];
+  let chain: ReturnType<typeof createDecisionChain> | undefined;
+  const built = createDecisionChain({
+    mode: 'auto',
+    thresholds: { consecutive: 1, total: 1 },
+    ask: async (question) => { asked.push(question); return false; },
+    review: async () => {
+      // 复审等待期间另一个调用被硬拒绝：连续拒绝阈值把语义收紧成 ask，
+      // 但 mode 仍然是 auto，只有把 forcedToAsk 也算进签名才能发现这次收紧。
+      await chain?.evaluate({ tool: 'exec', input: { command: 'rm -rf /tmp/ligule-x' }, command: 'rm -rf /tmp/ligule-x', access: 'exec' } as never);
+      return { decision: 'allow', reasonCode: 'read_only_python', fingerprint: 'f', inputVersion: 2 };
+    },
+  });
+  chain = built;
+  const verdict = await built.evaluate(interpreterCall);
+  assert.equal(verdict.review, undefined, '收紧之后的复审结论必须作废');
+  assert.equal(verdict.via, 'ask', '作废后回到人工审批，而不是拿旧结论放行');
+  // 并发的那次调用自己也可能问过一次人，这里只要求这次调用确实回到了人工。
+  assert.ok(asked.length >= 1);
+});
+
+test('a deny rule for another tool never rejects the pending call', async () => {
+  const asked: PolicyQuestion[] = [];
+  let chain: ReturnType<typeof createDecisionChain> | undefined;
+  const built = createDecisionChain({
+    mode: 'auto',
+    ask: async (question) => { asked.push(question); return true; },
+    review: async () => {
+      // 等待期间新增的是 write 的 deny，与这次 exec 调用无关。
+      chain?.setRules([{ tool: 'write', decision: 'deny', reason: 'file writes are off' }]);
+      return { decision: 'allow', reasonCode: 'read_only_python', fingerprint: 'f', inputVersion: 2 };
+    },
+  });
+  chain = built;
+  const verdict = await built.evaluate(interpreterCall);
+  assert.equal(verdict.decision, 'allow');
+  assert.equal(verdict.via, 'ask', '无关的 deny 不能当成命中，只能回到人工审批');
+  assert.notEqual(verdict.code, 'policy_denied');
+  assert.equal(asked.length, 1);
+});

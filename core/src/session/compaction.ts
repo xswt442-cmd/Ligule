@@ -461,7 +461,8 @@ export function createCompaction({ provider, session, directory, id, limits, log
     // 服务端报告用量后校准本地估算并写入会话记录，避免持续低估导致压力触发失效。
     // 服务端和本地估算都包含系统提示、工具定义与消息，因此固定前缀不会被误判为历史增长。
     async observe(request: LoopCompactionRequest, events: ProviderEvent[]): Promise<void> {
-      const usage = usageEvent(request, events);
+      // 端点没报用量时写一条未知记录：既保留了请求次数，也不会拿它校准估算。
+      const usage = usageEvent(request, events, 'agent', { unknownWhenUnreported: true });
       if (usage === null) return;
       // 使用当前响应中的最新用量，无需再从历史记录查找。
       // 缺少总输入量时仍保存缓存分项，但不改变本地估算校准系数。

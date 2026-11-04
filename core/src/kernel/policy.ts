@@ -575,7 +575,8 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       // 复审不可用（未配置、超时、超预算、回复不合法）都退回人工审批，绝不当成放行。
       if (typeof review === 'function' && effective === 'auto' && reviewable) {
         // 复审是异步请求；期间的策略切换或规则变更会让结论失效，先留一份签名用于复核。
-        const modeSignature = current;
+        // 拒绝阈值也会收紧语义：连续拒绝后 `forcedToAsk` 生效，mode 仍然是 auto。
+        const modeSignature = `${current}:${forcedToAsk}`;
         const rulesSignature = JSON.stringify(currentRules);
         let outcome: PolicyReviewRecord | undefined;
         try {
@@ -593,11 +594,14 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         } catch {
           outcome = undefined;
         }
-        if (outcome !== undefined && (current !== modeSignature || JSON.stringify(currentRules) !== rulesSignature)) {
+        if (outcome !== undefined && (`${current}:${forcedToAsk}` !== modeSignature || JSON.stringify(currentRules) !== rulesSignature)) {
           // 过期结论必须作废：回到确定性与人工审批路径，而不是拿旧判定放行或拒绝。
           outcome = undefined;
           // 作废不等于忽略新规则：等待期间新增的 deny 要当场生效，否则会落到可被批准的分支。
           const added = currentRules.find((item) => item.decision === 'deny'
+            && item.tool === named
+            && item.target === undefined && item.path === undefined
+            && (item.argsHash === undefined || item.argsHash === argsHash)
             && (matches(command, item.match) || (segments ?? []).some((segment) => matches(segment, item.match))));
           if (added !== undefined) return refuse('policy_denied', 'rule', added.reason ?? '等待复审期间规则表收紧了这一次调用', added.match);
         }

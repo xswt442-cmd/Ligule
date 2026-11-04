@@ -145,6 +145,16 @@ export function createSessionReviewer({ settings, provider, factsOf, logger, onU
       failures += 1;
       return askHuman(built.code, built.detail ?? '复审输入不满足要求，转人工审批。');
     }
+    // 路由在发请求之前取：这一轮复审与它审批的那次调用用同一个 Session 模型。
+    // 取不到路由说明请求根本没发出去，因此不能占用预算额度，也不能启动超时计时器。
+    let active: ModelProvider;
+    try {
+      active = provider();
+    } catch (error) {
+      failures += 1;
+      logger?.('reviewer route unavailable', { reason: String(error) });
+      return askHuman('review_unavailable', '复审没有可用的 Session 模型路由，转人工审批。');
+    }
     // 预算按“已花掉的输入与输出 + 本次输入 + 本次回复的预留额度”判断；
     // 只算输入会让输出悄悄超出上限。
     const reservation = built.input.estimatedInputTokens + settings.maxOutputTokens;
@@ -175,16 +185,6 @@ export function createSessionReviewer({ settings, provider, factsOf, logger, onU
     let toolCall: string | undefined;
     // 端点用量要按用途记账：先收集本次复审的全部流事件，结束后写成 purpose=reviewer 的用量事件。
     const collected: unknown[] = [];
-    let active: ModelProvider;
-    try {
-      // 路由在调用前取一次：这一轮复审与它审批的那次调用用同一个 Session 模型。
-      active = provider();
-    } catch (error) {
-      failures += 1;
-      logger?.('reviewer route unavailable', { reason: String(error) });
-      settleBudget();
-      return askHuman('review_unavailable', '复审没有可用的 Session 模型路由，转人工审批。');
-    }
     try {
       for await (const event of active.stream({
         system: built.input.system,

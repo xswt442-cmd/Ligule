@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHost } from '../dist/host/host.js';
@@ -206,5 +206,8 @@ test('removed reviewer route fields are rejected instead of silently ignored', a
         return true;
       },
     );
+    // 校验必须在创建会话资源之前：否则会先写出只含权限事件的残缺记录。
+    const sessions = await readdir(join(projectA, '.ligule', 'sessions')).catch(() => [] as string[]);
+    assert.deepEqual(sessions, [], '被拒绝的新会话不能留下任何记录');
   }, { project: PROJECT_AUTO, reviewer: { enabled: true, model: 'some-other-model' } });
 });

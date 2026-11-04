@@ -416,7 +416,7 @@ export const METHODS = Object.freeze({
   },
   'usage.get': {
     description: 'Read the read-only token usage of a project session, split by purpose (agent model calls and the optional approval reviewer); a total the endpoint never reported stays unknown rather than becoming zero, and cached input is a subset of input, never added to it',
-    parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
+    parameters: { type: 'object', properties: { sessionId: SESSION_ID, projectRoot: { type: 'string' } }, required: ['sessionId'] },
   },
   'session.configure': {
     description: 'Read or change one session-owned category: mode, policy, model generation, or the per-turn iteration limit. Loop-limit changes apply at the next turn boundary and never write configuration files.',

@@ -292,3 +292,20 @@ test('a pending review holds its budget so a parallel one cannot overspend', asy
   release?.();
   assert.equal((await first).decision, 'allow');
 });
+
+test('a route that fails before the request never spends budget', async () => {
+  const reviewer = createSessionReviewer({
+    settings,
+    // 路由取不到说明请求没发出去：既不能占额度，也不能记成一次复审。
+    provider: () => { throw new Error('no session route'); },
+    factsOf: () => facts,
+  });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const outcome = await reviewer.review({ tool: 'exec', input: facts.args, command: undefined, policy: 'auto', reason: undefined });
+    assert.equal(outcome.decision, 'ask-human');
+    assert.equal(outcome.reasonCode, 'review_unavailable');
+  }
+  assert.equal(reviewer.usage().calls, 0, '没有发出的请求不算一次复审');
+  assert.equal(reviewer.usage().inputTokens, 0, '没有发出的请求不能占用输入预算');
+  assert.equal(reviewer.usage().failures, 3);
+});

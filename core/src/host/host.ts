@@ -1619,6 +1619,20 @@ export function createHost({
   ): Promise<HostSessionState> {
     // 从会话所属的项目环境解析项目级资源。
     const { config, provider, policy, modePaths, directory, mcpConfigs, extensions, skillRegistry, templateRegistry } = env;
+    // 可信层里残留的路由字段从不生效，也不能看起来像生效：明确拒绝，让用户删掉它们。
+    // 校验放在创建任何会话资源之前：否则会先写出一条只含权限事件的残缺记录。
+    // 不可信层（项目配置）写进来的同名字段更不可能生效，只记一条诊断，不阻断会话。
+    const trustedLayers = Object.keys(env.layers).length === 0
+      ? undefined
+      : createConfig({ user: env.layers.user ?? {}, flag: env.layers.flag ?? {} });
+    const trustedRouteFields = trustedLayers === undefined
+      ? reviewerRouteFields(config as unknown as Record<string, unknown>)
+      : reviewerRouteFields(trustedLayers as unknown as Record<string, unknown>);
+    if (trustedRouteFields.length > 0) {
+      throw new KernelError('reviewer_route_removed', {
+        detail: `the [reviewer] table still sets ${trustedRouteFields.join(', ')}; the reviewer always uses the session model, so remove those fields`,
+      });
+    }
     // 将已持久化的会话事件同时发送给客户端和已加载扩展。
     const listeners: ((event: SessionEvent) => void)[] = [];
     const asks = new Set<() => void>();
@@ -1821,9 +1835,6 @@ export function createHost({
     const mergedReviewSettings = reviewerSettings(config as unknown as Record<string, unknown>);
     // 项目配置不能自己打开付费请求：`enabled` 只认用户配置与命令行；预算只能被收紧，
     // 不能被合并后的项目层放大。
-    const trustedLayers = Object.keys(env.layers).length === 0
-      ? undefined
-      : createConfig({ user: env.layers.user ?? {}, flag: env.layers.flag ?? {} });
     const trustedReviewSettings = trustedLayers === undefined
       ? mergedReviewSettings
       : reviewerSettings(trustedLayers as unknown as Record<string, unknown>);
@@ -1832,16 +1843,6 @@ export function createHost({
       : narrowReviewerSettings(mergedReviewSettings, trustedReviewSettings);
     // 复审不选自己的模型：它用的就是这一轮 Run 的 Session generation（同一个 Provider、
     // 同一个端点、同一份凭据绑定），只额外压一个输出预算。
-    // 可信层里残留的路由字段从不生效，也不能看起来像生效：明确拒绝，让用户删掉它们。
-    // 不可信层（项目配置）写进来的同名字段更不可能生效，只记一条诊断，不阻断会话。
-    const trustedRouteFields = trustedLayers === undefined
-      ? reviewerRouteFields(config as unknown as Record<string, unknown>)
-      : reviewerRouteFields(trustedLayers as unknown as Record<string, unknown>);
-    if (trustedRouteFields.length > 0) {
-      throw new KernelError('reviewer_route_removed', {
-        detail: `the [reviewer] table still sets ${trustedRouteFields.join(', ')}; the reviewer always uses the session model, so remove those fields`,
-      });
-    }
     if (reviewSettings !== undefined) {
       const ignoredRouteFields = reviewerRouteFields(config as unknown as Record<string, unknown>);
       if (ignoredRouteFields.length > 0) {
@@ -2373,7 +2374,8 @@ export function createHost({
         const current = state.compaction;
         if (current !== undefined && current !== null) await current.observe(request, events);
         else {
-          const usage = usageEvent(request, events);
+          // 端点没报用量也要留一条：否则会话看起来一次请求都没发生过。
+          const usage = usageEvent(request, events, 'agent', { unknownWhenUnreported: true });
           if (usage !== null) await session.append(usage);
         }
       },
@@ -3798,8 +3800,12 @@ export function createHost({
           // 记录必须按会话自己的项目环境定位；Host 可以打开其他项目的会话。
           const state = sessions.get(sessionId);
           const owner = state === undefined ? branchOwner(sessionId) : undefined;
-          const env = state?.environment
-            ?? (owner === undefined ? defaultEnvironment : sessions.get(owner)?.environment ?? defaultEnvironment);
+          // 调用方给出项目根时以它为准：观察别的项目的会话时记录不在本 Host 的默认目录里。
+          const requestedRoot = message.params.projectRoot;
+          const env = typeof requestedRoot === 'string' && requestedRoot !== ''
+            ? await environmentFor(requestedRoot)
+            : state?.environment
+              ?? (owner === undefined ? defaultEnvironment : sessions.get(owner)?.environment ?? defaultEnvironment);
           const path = recordPathOf(sessionId, env);
           try {
             await access(path);
