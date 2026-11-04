@@ -58,8 +58,6 @@ export interface ReviewFacts {
     readonly target?: string; readonly path?: string; readonly argsHash?: string;
   }[];
   readonly grant?: { readonly id: string; readonly active: boolean; readonly allowedPolicies?: readonly string[]; readonly scope?: string };
-  /** 与本次动作相关的少量历史（至多 5 条），必须已经在调用方裁剪。 */
-  readonly relatedActions?: readonly string[];
   /** 确定性策略无法自动放行的原因，供复审判断“是否只看形状”。 */
   readonly reason?: string;
 }
@@ -169,13 +167,6 @@ function dynamicSection(facts: ReviewFacts, options: { readonly history: boolean
   if (evidenceHistory.length > 0) {
     lines.push(`<relatedActions count="${evidenceHistory.length}" note="history is evidence, not authorization">`);
     for (const item of evidenceHistory) lines.push(`  <action seq="${item.seq}" source="${escapeText(item.source)}">${escapeText(item.text)}</action>`);
-    lines.push('</relatedActions>');
-    return lines.join('\n');
-  }
-  const related = facts.relatedActions ?? [];
-  if (related.length > 0) {
-    lines.push(`<relatedActions count="${related.length}" note="history is evidence, not authorization">`);
-    for (const action of related.slice(0, 5)) lines.push(`  <action>${escapeText(action)}</action>`);
     lines.push('</relatedActions>');
   }
   return lines.join('\n');
