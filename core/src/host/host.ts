@@ -1642,8 +1642,8 @@ export function createHost({
       ? undefined
       : createConfig({ user: env.layers.user ?? {}, flag: env.layers.flag ?? {} });
     const trustedRouteFields = trustedLayers === undefined
-      ? reviewerRouteFields(config as unknown as Record<string, unknown>)
-      : reviewerRouteFields(trustedLayers as unknown as Record<string, unknown>);
+      ? reviewerRouteFields(config)
+      : reviewerRouteFields(trustedLayers);
     if (trustedRouteFields.length > 0) {
       throw new KernelError('reviewer_route_removed', {
         detail: `the [reviewer] table still sets ${trustedRouteFields.join(', ')}; the reviewer always uses the session model, so remove those fields`,
@@ -1852,19 +1852,19 @@ export function createHost({
             });
     }
     // 复审只在配置显式启用时存在；未启用时 `auto` 与 P9.5 行为一致。
-    const mergedReviewSettings = reviewerSettings(config as unknown as Record<string, unknown>);
+    const mergedReviewSettings = reviewerSettings(config);
     // 项目配置不能自己打开付费请求：`enabled` 只认用户配置与命令行；预算只能被收紧，
     // 不能被合并后的项目层放大。
     const trustedReviewSettings = trustedLayers === undefined
       ? mergedReviewSettings
-      : reviewerSettings(trustedLayers as unknown as Record<string, unknown>);
+      : reviewerSettings(trustedLayers);
     const reviewSettings = mergedReviewSettings === undefined || trustedReviewSettings === undefined
       ? undefined
       : narrowReviewerSettings(mergedReviewSettings, trustedReviewSettings);
     // 复审不选自己的模型：它用的就是这一轮 Run 的 Session generation（同一个 Provider、
     // 同一个端点、同一份凭据绑定），只额外压一个输出预算。
     if (reviewSettings !== undefined) {
-      const ignoredRouteFields = reviewerRouteFields(config as unknown as Record<string, unknown>);
+      const ignoredRouteFields = reviewerRouteFields(config);
       if (ignoredRouteFields.length > 0) {
         try {
           logger?.log?.('reviewer ignores route fields from an untrusted configuration layer', {

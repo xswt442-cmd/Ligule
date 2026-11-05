@@ -673,7 +673,8 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
           return refuse('run_cancelled', 'ask', 'Run 已取消，这次调用不再执行', undefined, 'cancelled', false);
         }
         recordApproval();
-        return { ...judged('allow', 'ask', { ...(segments === undefined ? {} : { segments }), answer: 'allow' }), ...(scriptBinding === undefined ? {} : { scriptBinding }) };
+        // 放行字段只保留一处来源：`answer()` 已经带回分段与脚本绑定，人工批准只额外加 `answer: 'allow'`。
+        return { ...answer('ask'), answer: 'allow' };
       };
       if (response === true) return allowAfterApproval();
       switch (response.decision) {

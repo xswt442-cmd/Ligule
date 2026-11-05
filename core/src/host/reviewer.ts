@@ -53,7 +53,7 @@ function positive(value: unknown, fallback: number): number {
  * 从配置读取复审设置。未写 `[reviewer]` 或 `enabled` 不为真时返回 undefined：
  * 未配置复审的 `auto` 行为必须与 P9.5 完全一致。
  */
-export function reviewerSettings(config: Record<string, unknown>): ReviewerSettings | undefined {
+export function reviewerSettings(config: Readonly<Record<string, unknown>>): ReviewerSettings | undefined {
   const table = config.reviewer;
   // 只认布尔真值：项目配置里的 `enabled = "true"` 不会悄悄打开付费请求。
   if (!isRecord(table) || table.enabled !== true) return undefined;
@@ -72,7 +72,7 @@ export function reviewerSettings(config: Record<string, unknown>): ReviewerSetti
  * 列出配置里残留的路由字段。它们不再生效，Host 必须明确拒绝而不是静默忽略：
  * 一个项目配置里的 `baseURL` 不能看起来像“已经生效”。
  */
-export function reviewerRouteFields(config: Record<string, unknown>): readonly string[] {
+export function reviewerRouteFields(config: Readonly<Record<string, unknown>>): readonly string[] {
   const table = config.reviewer;
   if (!isRecord(table)) return [];
   return REVIEWER_ROUTE_FIELDS.filter((field) => table[field] !== undefined);
