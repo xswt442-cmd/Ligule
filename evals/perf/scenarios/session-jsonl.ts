@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createSessionHeader } from '../../core/dist/session/format.js';
-import { listSessions } from '../../core/dist/session/list.js';
-import { parseSessionBytes, readSessionRecord } from '../../core/dist/session/record.js';
+import { createSessionHeader } from '../../../core/dist/session/format.js';
+import { listSessions } from '../../../core/dist/session/list.js';
+import { parseSessionBytes, readSessionRecord } from '../../../core/dist/session/record.js';
 import type { Scenario, ScenarioResult, Sample } from '../lib.ts';
 
 type Event = Record<string, unknown> & { seq: number };

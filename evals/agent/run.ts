@@ -152,7 +152,7 @@ async function runReport(runDirectory: string, apiKey: string, timeoutMs: number
 }
 
 async function main(): Promise<void> {
-  const planPath = resolve(option('plan') ?? join(repository, 'evals', 'benchmarks', 'plan.json'));
+  const planPath = resolve(option('plan') ?? join(repository, 'evals', 'agent', 'plan.json'));
 if (!existsSync(planPath)) throw new Error(`plan_missing:${planPath}`);
   const plan = JSON.parse(await readFile(planPath, 'utf8')) as Plan;
   const collectOnly = process.argv.includes('--collect-only');

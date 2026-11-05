@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import type { Scenario, ScenarioResult, Sample } from '../lib.ts';
 import { MOCK_CREDENTIAL, startMockMessagesProvider } from '../provider.ts';
 
-const repository = fileURLToPath(new URL('../..', import.meta.url));
+const repository = fileURLToPath(new URL('../../..', import.meta.url));
 
 function childEnvironment(home: string): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {};

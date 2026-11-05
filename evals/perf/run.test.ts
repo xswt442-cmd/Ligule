@@ -6,8 +6,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const repository = fileURLToPath(new URL('..', import.meta.url));
-const runner = join(repository, 'benchmarks', 'run.ts');
+const repository = fileURLToPath(new URL('../..', import.meta.url));
+const runner = join(repository, 'evals', 'perf', 'run.ts');
 
 function run(args: readonly string[], cwd = repository): { status: number | null; stderr: string; stdout: string } {
   const result = spawnSync(process.execPath, ['--experimental-strip-types', runner, ...args], {

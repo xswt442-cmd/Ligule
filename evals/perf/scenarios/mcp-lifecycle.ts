@@ -3,13 +3,13 @@ import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createDelegationGrant, listDelegationGrants } from '../../core/dist/host/agent-control.js';
-import { setTrusted } from '../../core/dist/kernel/workspace-trust.js';
+import { createDelegationGrant, listDelegationGrants } from '../../../core/dist/host/agent-control.js';
+import { setTrusted } from '../../../core/dist/kernel/workspace-trust.js';
 import type { Scenario, ScenarioResult, Sample } from '../lib.ts';
 import { MOCK_CREDENTIAL, startMockMessagesProvider } from '../provider.ts';
 
-const repository = fileURLToPath(new URL('../..', import.meta.url));
-const EXPECTED_TOOLS = 14;
+const repository = fileURLToPath(new URL('../../..', import.meta.url));
+const EXPECTED_TOOLS = 15;
 
 type ToolResult = {
   isError?: boolean;

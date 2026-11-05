@@ -38,8 +38,8 @@ Exit codes describe the benchmark execution, not task success: `0` Harbor and re
 `canary-plan.json` and `canary/` provide a one-task file-tool canary that is not part of the benchmark score. It asks the agent to create `/app/answer.txt` with `LIGULE-CANARY-OK` using only `create`/`read`, and an independent Harbor verifier writes the reward. Run it with the same prerequisites and:
 
 ```sh
-pnpm run bench:agent -- --plan evals/benchmarks/canary-plan.json \
-  --dataset-dir evals/benchmarks/canary --tasks canary
+pnpm run bench:agent -- --plan evals/agent/canary-plan.json \
+  --dataset-dir evals/agent/canary --tasks canary
 ```
 
 The canary image uses a locally available base image so the check does not depend on a Docker Hub pull. It validates the provider, Ligule Session/tool path, Harbor adapter, report manifest, and verifier without mixing the result into the eight-task benchmark. `--collect-only` loads the task set from the saved `run.json`, so a canary run can be recovered without repeating its custom `--plan`.

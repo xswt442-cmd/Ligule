@@ -9,7 +9,7 @@ import { mcpLifecycle } from './scenarios/mcp-lifecycle.ts';
 import { sessionJsonl } from './scenarios/session-jsonl.ts';
 import { shellOutput } from './scenarios/shell-output.ts';
 
-const repository = fileURLToPath(new URL('..', import.meta.url));
+const repository = fileURLToPath(new URL('../..', import.meta.url));
 const SCENARIOS: Scenario[] = [cliStartup, sessionJsonl, shellOutput, mcpLifecycle];
 
 function option(name: string): string | undefined {

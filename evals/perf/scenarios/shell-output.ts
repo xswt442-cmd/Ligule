@@ -1,10 +1,10 @@
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { bindScript } from '../../core/dist/capability/script-binding.js';
-import { execTool } from '../../core/dist/capability/exec.js';
-import { resolveShell, withNativeExitCode } from '../../core/dist/index.js';
-import { DEFAULT_LIMITS } from '../../core/dist/capability/limits.js';
-import { createPermissionContext } from '../../core/dist/kernel/permission.js';
+import { bindScript } from '../../../core/dist/capability/script-binding.js';
+import { execTool } from '../../../core/dist/capability/exec.js';
+import { resolveShell, withNativeExitCode } from '../../../core/dist/index.js';
+import { DEFAULT_LIMITS } from '../../../core/dist/capability/limits.js';
+import { createPermissionContext } from '../../../core/dist/kernel/permission.js';
 import type { Scenario, ScenarioResult, Sample } from '../lib.ts';
 
 const OUTPUTS = [1 * 1024 * 1024, 5 * 1024 * 1024] as const;

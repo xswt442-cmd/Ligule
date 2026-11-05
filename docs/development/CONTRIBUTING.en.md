@@ -43,7 +43,7 @@ Cross-platform installers, real-window checks, and native acceptance require the
 
 ## Benchmarks
 
-`pnpm run bench:perf` runs the deterministic harness scenarios (CLI first round, Session JSONL parse/read/list, shell output, MCP receipt lifecycle) and writes raw samples plus JSON/Markdown summaries under `testplace/benchmarks/`. `pnpm run bench:agent` runs the frozen `terminal-bench@2.0` plan through the Harbor adapter; it requires Docker, a CLI tarball, provider settings, the frozen dataset, and a Node 24 Linux runtime for images without Node. Both commands record the Git SHA, tarball digest, model/API, budget, and platform. A blocked prerequisite is reported as `BLOCKED`, never as a score. See [benchmarks/README.md](../../benchmarks/README.md) and [evals/benchmarks/README.md](../../evals/benchmarks/README.md).
+`pnpm run bench:perf` runs the deterministic harness scenarios (CLI first round, Session JSONL parse/read/list, shell output, MCP receipt lifecycle) and writes raw samples plus JSON/Markdown summaries under `testplace/benchmarks/`. `pnpm run bench:agent` runs the frozen `terminal-bench@2.0` plan through the Harbor adapter; it requires Docker, a CLI tarball, provider settings, the frozen dataset, and a Node 24 Linux runtime for images without Node. Both commands record the Git SHA, tarball digest, model/API, budget, and platform. A blocked prerequisite is reported as `BLOCKED`, never as a score. See [evals/perf/README.md](../../evals/perf/README.md) and [evals/agent/README.md](../../evals/agent/README.md).
 
 ## Keep changes verifiable
 

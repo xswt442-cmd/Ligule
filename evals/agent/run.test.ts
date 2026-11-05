@@ -10,7 +10,7 @@ import { benchmarkTimeoutMs, countsOf, createStateWriter, positiveInteger, prepa
 import { writeManifest } from './manifest.ts';
 
 const repository = fileURLToPath(new URL('../..', import.meta.url));
-const runner = join(repository, 'evals', 'benchmarks', 'run.ts');
+const runner = join(repository, 'evals', 'agent', 'run.ts');
 
 function run(args: readonly string[], options: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {}): { status: number | null; stdout: string; stderr: string } {
   const result = spawnSync(process.execPath, ['--experimental-strip-types', runner, ...args], {

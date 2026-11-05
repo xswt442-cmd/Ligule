@@ -6,5 +6,5 @@
     "allowImportingTsExtensions": true,
     "rootDir": ".."
   },
-  "include": ["benchmarks/**/*.ts"]
+  "include": ["agent/**/*.ts"]
 }
