@@ -2405,7 +2405,7 @@ test('/usage says the lookup stopped instead of claiming there was no review', o
     stdin.write('\r');
     await waitFor(() => strip(painted).includes('查询未完成'), { within: 20_000, read: () => strip(painted).slice(-700) });
     assert.equal(strip(painted).includes('最近复审：'), false, '翻不到就不能画出一条“没有复审”的结论');
-    assert.equal(pages.length, 50, 'the command stops at the page cap instead of looping forever');
+    assert.equal(pages.length, 100, 'the command stops at the 100-page cap instead of looping forever');
   } finally {
     instance.unmount();
   }

@@ -2307,13 +2307,15 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         // 这时改用不取锁的 `session.observe`，并按 `before` 向更早的页翻，
         // 否则复审早于最新一页时，命令会把“存在但没翻到”说成“没有复审”。
         interface ReviewEvent { kind?: string; seq?: number; review?: string; reasonCode?: string; evidenceSeqs?: readonly number[] }
+        // 分页预算上限：100 页 × 400 条足够覆盖常见会话；翻到上限就如实说“没查完”。
+        const REVIEW_PAGE_LIMIT = 100;
         const readReviews = async (): Promise<{ reviews: readonly ReviewEvent[] } | { code: string } | { incomplete: true }> => {
           const direct = await client.request('session.read', { sessionId }).catch((error: unknown) => ({ code: errorCode(error) ?? 'session_read_failed' }));
           if (!('code' in direct)) {
             return { reviews: (direct.events as readonly ReviewEvent[]).filter((event) => event.kind === 'policyReview') };
           }
           let cursor: number | undefined;
-          for (let page = 0; page < 50; page += 1) {
+          for (let page = 0; page < REVIEW_PAGE_LIMIT; page += 1) {
             const params: { projectRoot: string; sessionId: string; limit: number; before?: number } = {
               projectRoot: info.boundary ?? '', sessionId, limit: 400,
             };
@@ -2347,7 +2349,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         // 翻到页数上限也没找到复审：只能报“没查完”，不能声称一次复审都没有。
         if ('incomplete' in page) {
           push({ kind: 'meta', text: lines.join('\n') });
-          push({ kind: 'error', text: t('查询未完成（已向前翻 50 页仍未找到复审），最近复审未知', 'The lookup stopped before the session start, so the last review is unknown') });
+          push({ kind: 'error', text: t(`查询未完成（已向前翻 ${REVIEW_PAGE_LIMIT} 页仍未找到复审），最近复审未知`, `The lookup stopped at its ${REVIEW_PAGE_LIMIT}-page limit, so the last review is unknown`) });
           return;
         }
         const last = page.reviews[page.reviews.length - 1];
