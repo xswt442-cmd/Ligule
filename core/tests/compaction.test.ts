@@ -133,8 +133,9 @@ test('pressure over the line compacts once and the next request carries the summ
     assert.equal(sent.messages.at(-1)!.text, '再问一句', 'the input of this round is still there');
 
     const after = await readFile(join(directory, `${id}.jsonl`), 'utf8');
-    // 本轮加用户、助手、轮次完成、压缩事实与一条“端点没报用量”的记录，块文件本身一条都不进日志。
-    assert.equal(after.trim().split('\n').length, lines + 5, 'the round adds its own events plus one unknown usage record and no block content');
+    // 本轮加用户、助手、轮次完成、压缩事实与两条“端点没报用量”的记录（摘要请求和主请求各一条），
+    // 块文件本身一条都不进日志。
+    assert.equal(after.trim().split('\n').length, lines + 6, 'the round adds its own events plus one usage record per request and no block content');
     const numbers = logged.find((entry) => entry.message === 'session compacted') as unknown as { tokensBefore: number; tokensAfter: number };
     assert.ok(numbers.tokensBefore > numbers.tokensAfter, 'a summary removes more than it adds');
   });
@@ -450,6 +451,89 @@ test('the usage an endpoint reports lands in the record and never in the project
     assert.equal(unknown.kind, 'usage');
     assert.equal(unknown.purpose, 'agent');
     assert.deepEqual([unknown.input, unknown.output], [null, null], 'missing numbers stay unknown instead of becoming zero');
+  });
+});
+
+// 摘要请求也是一次真实调用：即使端点什么都没报，也要在账上留下次数与估算。
+test('a compaction summary request is counted even when the endpoint reports nothing', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 12);
+    const provider = fakeProvider([]);
+    const compaction = createCompaction({ provider, session, directory, id, limits });
+    const done = await compaction.compactNow();
+    assert.ok(done !== null, 'the summary compacted the history');
+    const usage = (await session.read()).filter((event) => event.kind === 'usage');
+    assert.equal(usage.length, 1, 'one summary request leaves exactly one record');
+    const summary = usage[0] as Recorded;
+    assert.equal(summary.purpose, 'agent', 'a summary belongs to the agent account');
+    assert.equal(summary.measurement, 'request-v1');
+    assert.deepEqual([summary.input, summary.output], [null, null], 'missing numbers stay unknown instead of becoming zero');
+    assert.ok(Number(summary.estimated) > 0, 'the local estimate is kept so a later run can calibrate');
+  });
+});
+
+// 端点报了数字时按报回的记，不重复叠加本地估算。
+test('a summary request records the usage the endpoint reports', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 12);
+    const provider = {
+      model: 'fake',
+      capabilities: {},
+      async *stream(request: ModelRequest): AsyncGenerator<ProviderEvent> {
+        const text = String((request.messages[0] as { readonly text?: string }).text ?? '');
+        if (text.startsWith('Write a summary')) {
+          yield { type: 'usage', input: 900, output: 40 };
+          yield { type: 'text', text: SUMMARY };
+          return;
+        }
+        yield { type: 'text', text: 'ok' };
+      },
+    };
+    const compaction = createCompaction({ provider: provider as never, session, directory, id, limits });
+    assert.ok((await compaction.compactNow()) !== null);
+    const summary = (await session.read()).filter((event) => event.kind === 'usage').at(-1) as Recorded;
+    assert.deepEqual([summary.input, summary.output], [900, 40]);
+  });
+});
+
+// 摘要失败后不再每轮重发：同一份记录上重复重试只会重复花钱。
+test('a failed summary is not requested again on the next turn', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 12);
+    let asked = 0;
+    const provider = {
+      model: 'fake',
+      capabilities: {},
+      async *stream(request: ModelRequest): AsyncGenerator<ProviderEvent> {
+        const text = String((request.messages[0] as { readonly text?: string }).text ?? '');
+        if (text.startsWith('Write a summary')) {
+          asked += 1;
+          throw new KernelError('provider_http_error', { detail: 'the summary endpoint is down' });
+        }
+        yield { type: 'text', text: 'ok' };
+      },
+    };
+    const compaction = createCompaction({ provider: provider as never, session, directory, id, limits });
+    await assert.rejects(() => compaction.compactNow(), /provider_http_error/);
+    assert.equal(asked, 1);
+    assert.equal(await compaction.compactNow(), null, 'the next turn reports unavailable');
+    assert.equal(asked, 1, 'the provider is not asked a second time');
+  });
+});
+
+// 摘要写出来却比原历史还大时不会写成块；同一条路最多试三次，之后不再调用端点。
+test('a summary that never shrinks stops after three attempts', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    await fill(session, 3);
+    const provider = fakeProvider([], 'y'.repeat(30_000));
+    const roomy = { ...limits, resultBytes: 200_000 };
+    const compaction = createCompaction({ provider, session, directory, id, limits: roomy });
+    assert.equal(await compaction.compactNow(), null, 'a summary bigger than the history is not written');
+    assert.equal(await compaction.compactNow(), null);
+    assert.equal(await compaction.compactNow(), null);
+    assert.equal(provider.summaries(), 3, 'three attempts at most');
+    assert.equal(await compaction.compactNow(), null, 'the fourth turn gives up without another call');
+    assert.equal(provider.summaries(), 3);
   });
 });
 

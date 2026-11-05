@@ -7,7 +7,7 @@ import { spillContent } from './spill.js';
 import { KernelError } from '../errors.js';
 import type { SessionEvent } from './format.js';
 import { estimateRequest, estimateTokens, usageEvent, type ProviderCacheUsage } from './usage.js';
-import type { LoopCompactionRequest, ModelProvider, ModelRequest, ModelTool, ProviderEvent } from '../kernel/loop.js';
+import type { LoopCompactionRequest, ModelProvider, ModelTool, ProviderEvent } from '../kernel/loop.js';
 import { projectModelView } from './session.js';
 export { estimateRequest, estimateTokens } from './usage.js';
 
@@ -163,6 +163,12 @@ export function createCompaction({ provider, session, directory, id, limits, log
   let nudged = false;
   // 本地估算与服务端用量的校准系数；尚无服务端用量时使用 1。
   let factor = 1;
+  // 摘要请求最多尝试三次：压缩本身是恢复手段，不能变成每轮重新花一次 Provider 调用。
+  const SUMMARY_ATTEMPT_LIMIT = 3;
+  // 摘要失败标记。两种失败都算不可用：请求抛错（网络、超时、工具调用、上下文超限）
+  // 与回复为空。一旦标记，本实例不再发起摘要请求，也不再把摘要请求算进用量。
+  let summaryFailure: string | null = null;
+  let summaryAttempts = 0;
 
   // 复审（Reviewer）的用量与主 Agent 记在同一份记录里，压缩只认主 Agent 的账：
   // 拿复审的输入量当校准数据会把主 Agent 的窗口估算整体拉偏。旧记录没有 `purpose`，按主 Agent 解释。
@@ -196,24 +202,39 @@ export function createCompaction({ provider, session, directory, id, limits, log
     }
   }
 
+  // 摘要请求同样是一次 Provider 调用，要按主 Agent 记账：否则压缩一次就少算一次请求。
+  // 端点没报用量时仍写一条未知记录，次数算得清，数值保持 null。
+  // 记账只要求“消息数组可展开”，因此这里按 usage 的口径重新包一层，不改原请求。
+  async function recordSummaryUsage(request: { readonly system: string; readonly tools: readonly ModelTool[]; readonly messages: readonly { readonly role: string; readonly text: string }[] }, events: readonly ProviderEvent[]): Promise<void> {
+    const usage = usageEvent({ system: request.system, tools: request.tools, messages: [...request.messages] }, [...events], 'agent', { unknownWhenUnreported: true });
+    if (usage === null || typeof session.append !== 'function') return;
+    await session.append(usage);
+  }
+
   async function summarise(events: SessionEvent[], previous: string | undefined, signal?: AbortSignal): Promise<string> {
     // 摘要请求本身也计入窗口预算，并使用校准后的估算，避免请求自身超出模型限制。
     const excerpt = `${previous === undefined ? '' : `Earlier summary:\n${previous}\n\n`}${fitExcerpt(flatten(events), Math.max(1, Math.floor((threshold - 1024) / factor)))}`;
     const parts: string[] = [];
+    const seen: ProviderEvent[] = [];
     let finish: ProviderEvent | undefined;
-    const request: ModelRequest = {
-      system: '',
-      tools: [],
-      messages: [{ role: 'user', text: `${INSTRUCTION}${excerpt}` }],
-    };
-    for await (const event of provider.stream(
-      request,
-      { signal },
-    )) {
-      if (event.type === 'text') parts.push(event.text);
-      if (event.type === 'finish') finish = event;
-      if (event.type === 'tool-call') throw new KernelError('provider_tool_call_invalid', { detail: 'a compaction summary cannot call tools' });
+    const messages = [{ role: 'user' as const, text: `${INSTRUCTION}${excerpt}` }];
+    const request = { system: '', tools: [] as ModelTool[], messages };
+    // 记账放进 finally：请求抛错（网络、超时）时同样花了额度，次数要算得清。
+    // 先记账再看结果，被截断或后续校验失败的请求也不会从账上消失。
+    try {
+      for await (const event of provider.stream(
+        request,
+        { signal },
+      )) {
+        seen.push(event);
+        if (event.type === 'text') parts.push(event.text);
+        if (event.type === 'finish') finish = event;
+        if (event.type === 'tool-call') throw new KernelError('provider_tool_call_invalid', { detail: 'a compaction summary cannot call tools' });
+      }
+    } finally {
+      await recordSummaryUsage(request, seen);
     }
+
     if (signal?.aborted) throw new KernelError('provider_cancelled');
     if (provider.requiresCompletion === true && finish === undefined) throw new KernelError('provider_stream_incomplete');
     if (finish?.type === 'finish' && (finish.reason === 'length' || finish.reason === 'max_tokens')) {
@@ -241,17 +262,33 @@ export function createCompaction({ provider, session, directory, id, limits, log
     const covered = tail.filter((event) => event.seq < cut);
     if (covered.length === 0) return null;
     const tokensBefore = estimateTokens(await session.modelView());
+    // 摘要已经确认不可用（请求失败或回复为空）时不再重发：同一份记录上每轮重试只会重复花钱，
+    // 结论仍然是“压缩不可用”，由调用方按原上下文继续或失败。
+    if (summaryFailure !== null) {
+      logger?.log?.('compaction summary is unavailable, not retrying', { sessionId: id, code: summaryFailure });
+      return null;
+    }
+    if (summaryAttempts >= SUMMARY_ATTEMPT_LIMIT) {
+      summaryFailure = 'summary_attempt_limit';
+      logger?.log?.('compaction summary hit its attempt limit', { sessionId: id, attempts: summaryAttempts });
+      return null;
+    }
+    summaryAttempts += 1;
     let text: string;
     try {
       // 新块请求携带上一块的摘要，摘要链因此覆盖更早的全部历史。
       text = await summarise(covered, last?.text, signal);
     } catch (error) {
-      logger?.log?.('compaction summary call failed', { sessionId: id, code: (error as { code?: string }).code });
+      const code = (error as { code?: string }).code;
+      logger?.log?.('compaction summary call failed', { sessionId: id, code });
       if (signal?.aborted) throw new KernelError('loop_cancelled', { cause: error });
+      // 请求抛错属于“摘要不可用”，与回复为空同一条路：记下原因，后续不再重发。
+      summaryFailure = code ?? 'summary_failed';
       throw error;
     }
     if (text === '') {
       logger?.log?.('compaction summary came back empty', { sessionId: id });
+      summaryFailure = 'summary_empty';
       return null;
     }
     return await writeBlock({ blocks, covered, text, reason, tokensBefore });
@@ -453,7 +490,11 @@ export function createCompaction({ provider, session, directory, id, limits, log
       });
       const done = await compact('overflow', signal);
       if (done === null) {
-        logger?.log?.('the one allowed compaction did not happen, the round is abandoned', { sessionId: id });
+        // 压缩不能用时给出明确原因：没有可压范围、摘要不可用、或尝试次数已用尽。
+        logger?.log?.('the one allowed compaction did not happen, the round is abandoned', {
+          sessionId: id,
+          reason: summaryFailure ?? 'no_compressible_range',
+        });
         return null;
       }
       return await session.modelView();
