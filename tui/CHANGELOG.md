@@ -6,6 +6,8 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-05
+
 ### 简体中文
 
 **改进**
@@ -14,10 +16,12 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - 旧配置、旧会话记录和旧授权里的 `none`、以及旧语义的 `never` 一律按 `ask` 读取，历史数据不会自动变成“跳过审批”；新写入的记录带语义标记，可与旧记录区分。
 - 用户配置可用 `[reviewer]` 表启用可选的自动审批复审：它默认关闭，只在 `auto` 且确定性策略认不出命令形状时调用一次模型做只读判断；复审不选自己的模型或端点，跟随当前 Run 的会话模型与凭据，项目配置只能收紧预算、不能自行启用；复审只能回答 allow / deny / ask-human，超时、超预算与不合规回复一律转人工审批，规则拒绝、硬拒绝、强制人审、私有网络与外部访问永远不交给模型；结论以 `policyReview` 事件记入会话（可跳过、不进入模型上下文）。未配置时 `auto` 行为不变。
 - `/usage` 显示本会话的 Token 用量，主 Agent 与复审分成两份账：缓存命中是输入的子集、不重复计入，端点没有报回的数字保持未知而不是记成 0；外控读取同一份 `usage.get` 汇总。会话有复审记录时，`/usage` 还会显示最近一次复审的裁决、原因码与证据条数。
+- Agent Control 的 `ligule_run_get` 可在授权项目中只读查询已保存回执；控制器重启后无需重新打开 Session 或占用写锁，任务不会因此重放。
 
 **修复**
 
 - 外控授权向导提交完成后，尚未处理的一次回车不再会从陈旧状态复活向导、用同一个名字重复提交授权。
+- Session 切换 Mode 时，旧工具清单会保持生效，直到新设置写入成功；自定义 TOML 工具冲突和单个 Skill 文件读取失败会报告各自诊断，不再遮蔽其他可用条目。
 
 ### English
 
@@ -27,31 +31,11 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 - Legacy `none` values and the old `never` meaning are read as `ask` in existing config, session records, and grants, so history never silently becomes “skip approvals”. Newly written records carry a semantics marker that separates them from old ones.
 - `/usage` shows this session's token usage with the main agent and the reviewer accounted separately: cached tokens are a subset of the input and are never added again, numbers the endpoint did not report stay unknown instead of becoming zero, and external control reads the same `usage.get` aggregate. When the session has review records, `/usage` also shows the last verdict with its reason code and evidence count.
 - A `[reviewer]` table in the user configuration can enable an optional automatic approval reviewer. It is off by default and only runs under `auto`, when the deterministic policy cannot recognise the command shape; it never picks its own model or endpoint and follows the session model and credential of the current run, while a project configuration can only tighten its budgets and never enable it; it may answer only allow / deny / ask-human, and timeouts, exhausted budgets and unusable replies always fall back to asking a human. Deny rules, hard denials, forced manual approval, private networks and external access are never handed to the model. Decisions are recorded as `policyReview` session events (skippable, never part of the model context). Without the table, `auto` behaves exactly as before.
-
-**Fixed**
-
-- After a grant request is submitted, an Enter that was still in flight can no longer resurrect the wizard from stale state and submit the same grant twice.
-
-## [0.1.2] - 2026-11-02
-
-### 简体中文
-
-**改进**
-
-- Agent Control 的 `ligule_run_get` 可在授权项目中只读查询已保存回执；控制器重启后无需重新打开 Session 或占用写锁，任务不会因此重放。
-
-**修复**
-
-- Session 切换 Mode 时，旧工具清单会保持生效，直到新设置写入成功；自定义 TOML 工具冲突和单个 Skill 文件读取失败会报告各自诊断，不再遮蔽其他可用条目。
-
-### English
-
-**Improved**
-
 - Agent Control `ligule_run_get` can read a persisted receipt in the authorized project without reopening the Session or taking its writer lock after a controller restart. The lookup does not replay work.
 
 **Fixed**
 
+- After a grant request is submitted, an Enter that was still in flight can no longer resurrect the wizard from stale state and submit the same grant twice.
 - During a Session Mode change, the previous tool set stays active until the new settings are persisted. Conflicting TOML tools and individual unreadable Skill files report diagnostics without hiding other usable entries.
 
 ## [0.1.1] - 2026-11-01

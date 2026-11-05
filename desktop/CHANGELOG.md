@@ -6,6 +6,8 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-11-05
+
 ### 简体中文
 
 **改进**
@@ -13,21 +15,6 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 - 审批方式改为四档：`always`（每次都要审批）、`ask`（逐次审批）、`auto`（自动判定）、`never`（完全不审批）。设置里的审批方式选择器、会话配置行和外控授权草稿同步更新；选择 `never` 前必须先确认。
 - 旧配置与会话记录里的 `none`、以及旧语义的 `never` 按 `ask` 读取，历史数据不会自动变成“跳过审批”。
 - 用户配置可用 `[reviewer]` 表启用可选的自动审批复审：它默认关闭，只在 `auto` 且确定性策略认不出命令形状时调用一次模型做只读判断；复审不选自己的模型或端点，跟随当前 Run 的会话模型与凭据，项目配置只能收紧预算、不能自行启用；复审只能回答 allow / deny / ask-human，超时、超预算与不合规回复一律转人工审批，规则拒绝、硬拒绝、强制人审、私有网络与外部访问永远不交给模型；结论以 `policyReview` 事件记入会话（可跳过、不进入模型上下文）。未配置时 `auto` 行为不变。
-
-### English
-
-**Improved**
-
-- Approval modes are now `always`, `ask`, `auto`, and `never` (skip the policy layer). The settings picker, session status line, and Agent Control grant draft follow the new set, and choosing `never` requires a confirmation.
-- Legacy `none` values and the old `never` meaning are read as `ask`, so existing data never silently becomes “skip approvals”.
-- A `[reviewer]` table in the user configuration can enable an optional automatic approval reviewer. It is off by default and only runs under `auto`, when the deterministic policy cannot recognise the command shape; it never picks its own model or endpoint and follows the session model and credential of the current run, while a project configuration can only tighten its budgets and never enable it; it may answer only allow / deny / ask-human, and timeouts, exhausted budgets and unusable replies always fall back to asking a human. Deny rules, hard denials, forced manual approval, private networks and external access are never handed to the model. Decisions are recorded as `policyReview` session events (skippable, never part of the model context). Without the table, `auto` behaves exactly as before.
-
-## [0.1.2] - 2026-11-02
-
-### 简体中文
-
-**改进**
-
 - 「设置 → 工具」会标明自定义 TOML 工具来源，并展示工具声明诊断；没有活动会话时，列表也会区分已发现的元数据与当前 Mode、Permission 下实际可用的工具。
 
 **修复**
@@ -38,6 +25,9 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 **Improved**
 
+- Approval modes are now `always`, `ask`, `auto`, and `never` (skip the policy layer). The settings picker, session status line, and Agent Control grant draft follow the new set, and choosing `never` requires a confirmation.
+- Legacy `none` values and the old `never` meaning are read as `ask`, so existing data never silently becomes “skip approvals”.
+- A `[reviewer]` table in the user configuration can enable an optional automatic approval reviewer. It is off by default and only runs under `auto`, when the deterministic policy cannot recognise the command shape; it never picks its own model or endpoint and follows the session model and credential of the current run, while a project configuration can only tighten its budgets and never enable it; it may answer only allow / deny / ask-human, and timeouts, exhausted budgets and unusable replies always fall back to asking a human. Deny rules, hard denials, forced manual approval, private networks and external access are never handed to the model. Decisions are recorded as `policyReview` session events (skippable, never part of the model context). Without the table, `auto` behaves exactly as before.
 - Settings → Tools identifies custom TOML tools and shows declaration diagnostics. With no active Session, it distinguishes discovered metadata from tools actually available under the current Mode and Permission.
 
 **Fixed**
