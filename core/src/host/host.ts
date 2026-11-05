@@ -1978,6 +1978,21 @@ export function createHost({
         return inactive;
       }
       const outcome = await reviewer.review(request);
+      // 复审是一次真实网络请求，期间 Grant 可能被撤销或到期。撤销之后才到达的 allow
+      // 不能沿用复审前的检查：那会把“授权已经收回”变成“模型同意所以放行”。
+      if (agentControl !== undefined) {
+        try {
+          liveGrant = await activeDelegation();
+          grantCheckFailed = false;
+        } catch {
+          grantCheckFailed = true;
+        }
+      }
+      if (outcome.decision === 'allow' && (grantCheckFailed || (liveGrant !== undefined && !isGrantActive(liveGrant)))) {
+        const inactive = inactiveGrantOutcome();
+        await appendAudit(inactive);
+        return inactive;
+      }
       await appendAudit(outcome);
       return outcome;
     };

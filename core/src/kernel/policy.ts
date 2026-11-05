@@ -609,6 +609,11 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
           || signal?.aborted === true;
         if (changed) {
           outcome = undefined;
+          // 取消优先于规则收紧：Run 已经取消时这次调用本来就不该执行，报“被规则拒绝”
+          // 还会把拒绝计数加一，把下一次运行的错误归到这次取消上。
+          if (signal?.aborted === true) {
+            return refuse('run_cancelled', 'ask', 'Run 已取消，这次调用不再执行', undefined, 'cancelled', false);
+          }
           // 作废不等于忽略新规则：等待期间新增的 deny 要当场生效，否则会落到可被批准的分支。
           const tightened = currentRules.filter(inScope).find((item) => item.decision === 'deny'
             && (matches(command, item.match) || (segments ?? []).some((segment) => matches(segment, item.match))));
@@ -659,7 +664,12 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
         return refuse(code, 'ask', 'approval channel failed', undefined, 'error', false);
       }
       if (response === false) return refuse('ask_declined', 'ask', 'the user declined', undefined, 'deny');
+      // 审批期间 Run 被取消时，人给出的 allow 已经过期：这次调用不会再执行，
+      // 拿它当批准还会把拒绝阈值之外的状态改掉。取消后只报取消，不计拒绝。
       const allowAfterApproval = (): PolicyVerdict => {
+        if (signal?.aborted === true) {
+          return refuse('run_cancelled', 'ask', 'Run 已取消，这次调用不再执行', undefined, 'cancelled', false);
+        }
         recordApproval();
         return { ...judged('allow', 'ask', { ...(segments === undefined ? {} : { segments }), answer: 'allow' }), ...(scriptBinding === undefined ? {} : { scriptBinding }) };
       };

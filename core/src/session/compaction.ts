@@ -163,17 +163,21 @@ export function createCompaction({ provider, session, directory, id, limits, log
   let nudged = false;
   // 本地估算与服务端用量的校准系数；尚无服务端用量时使用 1。
   let factor = 1;
-  // 摘要请求最多尝试三次：压缩本身是恢复手段，不能变成每轮重新花一次 Provider 调用。
-  const SUMMARY_ATTEMPT_LIMIT = 3;
-  // 摘要失败标记。两种失败都算不可用：请求抛错（网络、超时、工具调用、上下文超限）
-  // 与回复为空。一旦标记，本实例不再发起摘要请求，也不再把摘要请求算进用量。
+  // 摘要连续失败最多尝试三次：压缩本身是恢复手段，不能变成每轮重新花一次 Provider 调用。
+  // 这个上限只数失败：一次成功就把计数清零，长时间会话该连续产出多少块就产出多少块。
+  // 一次网络抖动、超时或空回复也不会永久禁用压缩——下一轮压力到线时会再试一次。
+  const SUMMARY_FAILURE_LIMIT = 3;
+  // 摘要不可用标记。两种失败都算不可用：请求抛错（网络、超时、工具调用、上下文超限）
+  // 与回复为空。达到失败上限后才停止请求；单次失败只记原因，仍会重试。
   let summaryFailure: string | null = null;
-  let summaryAttempts = 0;
+  let summaryFailures = 0;
 
-  // 复审（Reviewer）的用量与主 Agent 记在同一份记录里，压缩只认主 Agent 的账：
-  // 拿复审的输入量当校准数据会把主 Agent 的窗口估算整体拉偏。旧记录没有 `purpose`，按主 Agent 解释。
+  // 复审（Reviewer）的用量与主 Agent 记在同一份记录里，压缩只认主 Agent 的对话账：
+  // 拿复审或摘要请求的输入量当校准数据会把主 Agent 的窗口估算整体拉偏。
+  // 旧记录没有 `purpose`/`source`，按普通主 Agent 对话解释。
   const isAgentUsage = (event: SessionEvent): boolean =>
-    event.kind === 'usage' && (event.purpose === undefined || event.purpose === 'agent');
+    event.kind === 'usage' && (event.purpose === undefined || event.purpose === 'agent')
+      && event.source !== 'summary';
 
   // 从最近一条有明确总输入量的 `usage` 事件恢复校准系数，让未知总量不覆盖先前的有效读数。
   // 事件同时保存本地估算和服务端用量，因此无需依赖上一个进程的内存状态。
@@ -206,7 +210,9 @@ export function createCompaction({ provider, session, directory, id, limits, log
   // 端点没报用量时仍写一条未知记录，次数算得清，数值保持 null。
   // 记账只要求“消息数组可展开”，因此这里按 usage 的口径重新包一层，不改原请求。
   async function recordSummaryUsage(request: { readonly system: string; readonly tools: readonly ModelTool[]; readonly messages: readonly { readonly role: string; readonly text: string }[] }, events: readonly ProviderEvent[]): Promise<void> {
-    const usage = usageEvent({ system: request.system, tools: request.tools, messages: [...request.messages] }, [...events], 'agent', { unknownWhenUnreported: true });
+    // 摘要请求记在主 Agent 账上（它确实是一次主 Agent 的调用），但标成 `source: 'summary'`：
+    // 用量汇总照常计数，窗口校准不拿它当对话读数。
+    const usage = usageEvent({ system: request.system, tools: request.tools, messages: [...request.messages] }, [...events], 'agent', { unknownWhenUnreported: true, source: 'summary' });
     if (usage === null || typeof session.append !== 'function') return;
     await session.append(usage);
   }
@@ -262,18 +268,12 @@ export function createCompaction({ provider, session, directory, id, limits, log
     const covered = tail.filter((event) => event.seq < cut);
     if (covered.length === 0) return null;
     const tokensBefore = estimateTokens(await session.modelView());
-    // 摘要已经确认不可用（请求失败或回复为空）时不再重发：同一份记录上每轮重试只会重复花钱，
+    // 摘要已经确认不可用（连续失败到达上限）时不再重发：同一份记录上每轮重试只会重复花钱，
     // 结论仍然是“压缩不可用”，由调用方按原上下文继续或失败。
-    if (summaryFailure !== null) {
+    if (summaryFailure !== null && summaryFailures >= SUMMARY_FAILURE_LIMIT) {
       logger?.log?.('compaction summary is unavailable, not retrying', { sessionId: id, code: summaryFailure });
       return null;
     }
-    if (summaryAttempts >= SUMMARY_ATTEMPT_LIMIT) {
-      summaryFailure = 'summary_attempt_limit';
-      logger?.log?.('compaction summary hit its attempt limit', { sessionId: id, attempts: summaryAttempts });
-      return null;
-    }
-    summaryAttempts += 1;
     let text: string;
     try {
       // 新块请求携带上一块的摘要，摘要链因此覆盖更早的全部历史。
@@ -281,17 +281,30 @@ export function createCompaction({ provider, session, directory, id, limits, log
     } catch (error) {
       const code = (error as { code?: string }).code;
       logger?.log?.('compaction summary call failed', { sessionId: id, code });
+      // Run 取消不是摘要坏了：这次调用本身不该继续，不记失败、不锁死后续压缩。
       if (signal?.aborted) throw new KernelError('loop_cancelled', { cause: error });
-      // 请求抛错属于“摘要不可用”，与回复为空同一条路：记下原因，后续不再重发。
+      // 请求抛错属于“摘要不可用”，与回复为空同一条路：记下原因，连续失败到上限才停。
       summaryFailure = code ?? 'summary_failed';
+      summaryFailures += 1;
       throw error;
     }
     if (text === '') {
       logger?.log?.('compaction summary came back empty', { sessionId: id });
       summaryFailure = 'summary_empty';
+      summaryFailures += 1;
       return null;
     }
-    return await writeBlock({ blocks, covered, text, reason, tokensBefore });
+    const written = await writeBlock({ blocks, covered, text, reason, tokensBefore });
+    if (written === null) {
+      // 摘要写出来却不比原文小：这一轮同样没有收益，也算一次失败，连续三次就停止花钱。
+      summaryFailure = 'summary_not_smaller';
+      summaryFailures += 1;
+      return null;
+    }
+    // 真正写出块才清零：失败上限只约束连续重试，不约束同一会话产出的摘要块数量。
+    summaryFailure = null;
+    summaryFailures = 0;
+    return written;
   }
 
   // 校验块级不变量后写入块文件与压缩事件。压缩结果必须小于原投影，否则块只增加

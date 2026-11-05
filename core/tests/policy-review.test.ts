@@ -49,6 +49,43 @@ test('a cancelled run never opens an approval after the review', async () => {
   assert.equal(asked.length, 0, '已取消的 Run 不应再登记人工审批');
 });
 
+test('a cancelled run reports the cancellation, not a rule that tightened meanwhile', async () => {
+  const controller = new AbortController();
+  let chain: ReturnType<typeof createDecisionChain> | undefined;
+  const built = createDecisionChain({
+    mode: 'auto',
+    ask: async () => true,
+    review: async () => {
+      // 复审等待期间同时发生两件事：规则表收紧、Run 被取消。
+      // 取消必须优先：这次调用本来就该结束，也不能把拒绝计数加一记到下一次运行上。
+      chain?.setRules([{ tool: 'exec', decision: 'deny', match: 'python3 *' }]);
+      controller.abort();
+      return { decision: 'allow', reasonCode: 'read_only_python' };
+    },
+  });
+  chain = built;
+  const verdict = await built.evaluate({ ...interpreterCall, signal: controller.signal });
+  assert.equal(verdict.code, 'run_cancelled');
+  assert.equal(verdict.via, 'ask');
+  assert.equal(built.denials().consecutive, 0, 'a cancellation is not a denial');
+  assert.equal(built.denials().total, 0, 'a cancellation does not move the denial threshold');
+});
+
+test('an approval that arrives after the run was cancelled never approves', async () => {
+  const controller = new AbortController();
+  const chain = createDecisionChain({
+    mode: 'ask',
+    // 人还在审批时 Run 被取消；随后返回的 allow 已经过期，不能再批准这次调用。
+    ask: async () => {
+      controller.abort();
+      return true;
+    },
+  });
+  const verdict = await chain.evaluate({ ...interpreterCall, signal: controller.signal });
+  assert.equal(verdict.decision, 'deny');
+  assert.equal(verdict.code, 'run_cancelled');
+});
+
 test('a reviewer deny stays a deny and never becomes an approval', async () => {
   const { review } = reviewer({ decision: 'deny', reasonCode: 'writes_outside_tests' });
   const chain = createDecisionChain({ mode: 'auto', review, ask: async () => true });

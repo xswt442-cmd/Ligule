@@ -313,6 +313,81 @@ test('the next compaction appends a block after the kept boundary and feeds the 
 });
 
 // 摘要文本也受上下文预算限制；超出时写入溢出文件，并在检查点中保留引用。
+test('a long session keeps producing summary blocks after earlier successes', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    const provider = fakeProvider([], SUMMARY);
+    const compaction = createCompaction({ provider, session, directory, id, limits });
+    // 连续四次成功压缩：失败上限只约束连续重试，不能在第 N 次成功之后把后面的压缩锁死。
+    for (let round = 0; round < 4; round += 1) {
+      await fill(session, 4);
+      const done = await compaction.compactNow();
+      assert.ok(done !== null, `compaction ${round + 1} must happen`);
+    }
+    assert.equal(provider.summaries(), 4, '每次成功压缩各发一次摘要请求');
+    const checkpoint = await loadCheckpointFile({ directory, id, events: await session.read() });
+    assert.equal(checkpoint.blocks.length, 4, '四次压缩都写下了自己的块');
+  });
+});
+
+test('one failed summary does not disable compaction for the rest of the session', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    // 第一次摘要请求抛错，第二次正常：单次网络失败只能让那一轮没有摘要，不能永久禁用。
+    const provider = fakeProvider([], SUMMARY);
+    // 只有第一次摘要请求失败，第二次要真的发出去。
+    let summaryCalls = 0;
+    const failing = { ...provider, stream: async function* (request: ModelRequest) {
+      const first = request.messages?.[0] as { readonly text?: string } | undefined;
+      if (String(first?.text ?? '').startsWith('Write a summary')) {
+        summaryCalls += 1;
+        if (summaryCalls === 1) throw new KernelError('provider_http_error', { detail: 'network is unreachable' });
+      }
+      yield* provider.stream(request);
+    } };
+    const compaction = createCompaction({ provider: failing, session, directory, id, limits });
+    await fill(session, 4);
+    await assert.rejects(() => compaction.compactNow(), (error: { readonly code?: string }) => error.code === 'provider_http_error');
+    await fill(session, 4);
+    const done = await compaction.compactNow();
+    assert.ok(done !== null, 'a transient failure must not lock the next compaction');
+    assert.equal(provider.summaries(), 1, '失败的那次没有摘要，恢复的那次有');
+  });
+});
+
+test('summary usage is counted but never calibrates the context estimate', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    const provider = fakeProvider([], SUMMARY);
+    const compaction = createCompaction({ provider, session, directory, id, limits });
+    // 一次正常对话轮次报回 8,000 / 估算 1,000，另一次摘要请求报回 40,000。
+    await session.append({
+      kind: 'usage', ignorable: true, purpose: 'agent', input: 8_000, output: 20, estimated: 1_000, measurement: 'request-v1',
+    });
+    await session.append({
+      kind: 'usage', ignorable: true, purpose: 'agent', source: 'summary', input: 40_000, output: 60, estimated: 1_000, measurement: 'request-v1',
+    });
+    const context = await compaction.context();
+    // 摘要请求的输入量是“整段待压缩原文”，拿它当对话读数会把窗口估算整体放大 5 倍。
+    assert.equal(context.factor, 8);
+    assert.equal(context.reported?.input, 8_000, '校准只看对话轮次');
+    const summaryUsage = (await session.read()).filter((event) => event.kind === 'usage' && event.source === 'summary');
+    assert.equal(summaryUsage.length, 1, '摘要请求仍然记在用量里');
+  });
+});
+
+test('unknown summary usage stays unknown after reopening the record', async () => {
+  await withSession(async ({ directory, id, session }) => {
+    const provider = fakeProvider([], SUMMARY);
+    const compaction = createCompaction({ provider, session, directory, id, limits });
+    await session.append({
+      kind: 'usage', ignorable: true, purpose: 'agent', source: 'summary', input: null, output: null, estimated: 900, measurement: 'request-v1',
+    });
+    // 重新构造一个实例模拟重启：未知读数既不能校准，也不能变成 0。
+    const reopened = createCompaction({ provider, session, directory, id, limits });
+    const context = await reopened.context();
+    assert.equal(context.factor, 1, '未知读数不参与校准');
+    assert.equal(context.reported, null, '没有可报的数字时这一格是 null');
+  });
+});
+
 test('an oversized summary spills to a file with a retrievable reference', async () => {
   await withSession(async ({ directory, id, session }) => {
     await fill(session, 4);
@@ -497,7 +572,7 @@ test('a summary request records the usage the endpoint reports', async () => {
 });
 
 // 摘要失败后不再每轮重发：同一份记录上重复重试只会重复花钱。
-test('a failed summary is not requested again on the next turn', async () => {
+test('a failed summary is retried and then stops after three attempts', async () => {
   await withSession(async ({ directory, id, session }) => {
     await fill(session, 12);
     let asked = 0;
@@ -514,10 +589,16 @@ test('a failed summary is not requested again on the next turn', async () => {
       },
     };
     const compaction = createCompaction({ provider: provider as never, session, directory, id, limits });
+    // 单次失败只是这一轮没有摘要：下一次压力到线仍要再试，否则一次网络抖动就会锁死整个会话。
     await assert.rejects(() => compaction.compactNow(), /provider_http_error/);
     assert.equal(asked, 1);
+    await assert.rejects(() => compaction.compactNow(), /provider_http_error/);
+    assert.equal(asked, 2);
+    await assert.rejects(() => compaction.compactNow(), /provider_http_error/);
+    assert.equal(asked, 3);
+    // 连续三次都失败才算“摘要不可用”：之后不再调用端点，避免每轮重复花钱。
     assert.equal(await compaction.compactNow(), null, 'the next turn reports unavailable');
-    assert.equal(asked, 1, 'the provider is not asked a second time');
+    assert.equal(asked, 3, 'the provider is not asked a fourth time');
   });
 });
 

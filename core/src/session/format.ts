@@ -292,6 +292,11 @@ export function parseSessionEvents(objects: SessionEvent[]): SessionRecord {
       // 用途决定这条用量记在主 Agent 还是复审账上；无法解释的用途必须拒绝，不能猜。
       throw new KernelRuntimeError('session_usage_event_invalid');
     }
+    if (kind === 'usage' && event.source !== undefined
+      && event.source !== 'turn' && event.source !== 'summary') {
+      // 来源决定这条读数能不能用来校准窗口；同样是封闭枚举，不认识的来源不能进记录。
+      throw new KernelRuntimeError('session_usage_event_invalid');
+    }
     events.push(event);
     if (kind === 'user') {
       currentUserSeq = event.seq;

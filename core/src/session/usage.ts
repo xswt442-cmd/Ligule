@@ -72,13 +72,17 @@ function cacheUsage(value: unknown): ProviderCacheUsage | undefined {
 // 用量事件按用途分开记账：主 Agent 的模型调用与可选复审（Reviewer）不能混在一起统计。
 export type UsagePurpose = 'agent' | 'reviewer';
 
+// 同一本主 Agent 账里还要区分「正常对话轮次」与「压缩时单独发出的摘要请求」：
+// 两者都算请求与费用，但只有对话轮的读数能用来校准上下文窗口。
+export type UsageSource = 'turn' | 'summary';
+
 export function usageEvent(
   request: ModelRequest,
   events: unknown[],
   purpose: UsagePurpose = 'agent',
-  options: { readonly unknownWhenUnreported?: boolean } = {},
+  options: { readonly unknownWhenUnreported?: boolean; readonly source?: UsageSource } = {},
 ): {
-  kind: 'usage'; ignorable: true; purpose: UsagePurpose; input: number | null; output: number | null;
+  kind: 'usage'; ignorable: true; purpose: UsagePurpose; source?: UsageSource; input: number | null; output: number | null;
   estimated: number; measurement: 'request-v1'; cache?: ProviderCacheUsage;
 } | null {
   const raw = [...events].reverse().find((event) => typeof event === 'object' && event !== null
@@ -98,6 +102,7 @@ export function usageEvent(
       kind: 'usage',
       ignorable: true,
       purpose,
+      ...(options.source === undefined ? {} : { source: options.source }),
       input: null,
       output: null,
       estimated: estimateRequest(request),
@@ -108,6 +113,7 @@ export function usageEvent(
     kind: 'usage',
     ignorable: true,
     purpose,
+    ...(options.source === undefined ? {} : { source: options.source }),
     input,
     output,
     estimated: estimateRequest(request),

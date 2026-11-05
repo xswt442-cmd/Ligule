@@ -37,6 +37,8 @@ type ReviewerHostOptions = {
   readonly reviewer?: Record<string, unknown>;
   /** 让会话带着一个外控 Grant 运行，用来验证授权失效后的复审行为。 */
   readonly grant?: boolean;
+  /** 模型回答复审请求之前撤销 Grant：用来复现“请求期间授权被收回”的竞态。 */
+  readonly revokeDuringReview?: boolean;
 };
 
 type TestClient = {
@@ -60,12 +62,15 @@ async function withReviewerHost(
 
   const seen: Seen = { agent: [], review: [] };
   let modelCall = 0;
+  // 复审请求进行到一半时才能撤销 Grant，所以由夹具提供一个可后置赋值的钩子。
+  let revokeNow: (() => Promise<void>) | undefined;
   const provider = testHostProvider({
     capabilities: MESSAGES_CAPABILITIES,
     model: 'reviewer-route-test',
     async *stream(request: ModelRequest, _options?: { readonly signal?: AbortSignal }) {
       if (typeof request.system === 'string' && request.system.startsWith(REVIEW_SYSTEM)) {
         seen.review.push(request);
+        if (options.revokeDuringReview === true) await revokeNow?.();
         yield { type: 'text', text: ALLOW_REPLY };
         yield { type: 'finish', reason: 'stop' };
         return;
@@ -144,6 +149,7 @@ async function withReviewerHost(
       const snapshot = await listDelegationGrants(grantStore);
       await revokeDelegationGrant(grantStore, grantId, snapshot.version);
     };
+    revokeNow = revokeGrant;
     host = createHost({
       config: seed.config,
       provider,
@@ -166,6 +172,17 @@ async function withReviewerHost(
     else process.env.LIGULE_HOME = previousHome;
     await rm(root, { recursive: true, force: true });
   }
+}
+
+function decliningClient(approvals: Record<string, unknown>[]): TestClient {
+  return {
+    notify(): void {},
+    async request(method: string, params: Record<string, unknown>) {
+      assert.equal(method, 'approval.request');
+      approvals.push(params);
+      return { decision: 'deny' };
+    },
+  };
 }
 
 function approvingClient(approvals: Record<string, unknown>[]): TestClient {
@@ -247,6 +264,26 @@ test('a revoked grant stops the review before the model can approve', async () =
     assert.equal(audit.review, 'ask-human');
     assert.equal(audit.reasonCode, 'review_grant_inactive');
   }, { project: PROJECT_AUTO, reviewer: { enabled: true }, grant: true });
+});
+
+test('a grant revoked while the review is in flight never approves the call', async () => {
+  await withReviewerHost(async ({ host, projectA, seen, approvals }) => {
+    // 复审前授权仍然有效，模型请求进行到一半时才被撤销；随后返回的 allow 已经过期。
+    const client = decliningClient(approvals);
+    const { sessionId } = await host.handle({ method: 'session.create', params: { projectRoot: projectA } }, client) as { sessionId: string };
+    await host.handle({ method: 'run.start', params: { sessionId, input: '运行 script.js' } }, client);
+    assert.equal(seen.review.length, 1, '授权有效时复审确实交给了模型');
+    assert.equal(approvals.length, 1, '迟到的 allow 必须变成人工审批，而不是自动放行');
+    const record = await host.handle({ method: 'session.read', params: { sessionId } }, client) as { events?: readonly Record<string, unknown>[] };
+    const events = record.events ?? [];
+    // 工具只在被批准后才执行；这里人拒绝了，所以日志里不能出现一次成功的执行。
+    assert.ok(events.filter((event) => event.kind === 'tool').every((event) => event.ok !== true),
+      '作废的复审放行不能变成一次工具执行');
+    const audit = events.find((event) => event.kind === 'policyReview');
+    assert.ok(audit !== undefined, '作废的复审结论也要写进审计');
+    assert.equal(audit.review, 'ask-human');
+    assert.equal(audit.reasonCode, 'review_grant_inactive');
+  }, { project: PROJECT_AUTO, reviewer: { enabled: true }, grant: true, revokeDuringReview: true });
 });
 
 test('removed reviewer route fields are rejected instead of silently ignored', async () => {
