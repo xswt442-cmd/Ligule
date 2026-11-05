@@ -83,8 +83,10 @@ async function createFixture(onRequest: (body: ChatBody, response: ServerRespons
       await onRequest(JSON.parse(Buffer.concat(chunks).toString('utf8')), response, request);
     } catch (error) {
       if (!response.destroyed) {
+        // 夹具自己的失败只写进程日志：响应体是对外通道，不回显内部错误消息。
+        process.stderr.write(`[fixture] request failed: ${error instanceof Error ? error.message : String(error)}\n`);
         response.writeHead(500, { 'content-type': 'text/plain' });
-        response.end(error instanceof Error ? error.message : String(error));
+        response.end('fixture failure');
       }
     }
   });

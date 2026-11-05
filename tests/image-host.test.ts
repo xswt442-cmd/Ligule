@@ -135,7 +135,8 @@ async function providerEndpoint() {
     } catch (error) {
       failures.push(error);
       if (!response.headersSent) response.writeHead(500, { 'content-type': 'text/plain' });
-      response.end(error instanceof Error ? error.message : String(error));
+      // 失败原因已经记在 `failures` 里；响应体是对外通道，不回显内部错误消息。
+      response.end('fixture failure');
     }
   });
   const port = await listenFetchable(server);

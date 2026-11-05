@@ -397,8 +397,10 @@ test('a real stdio MCP client controls, reads, cancels, and reopens Host session
       sse(response, { tool_calls: [{ index: 0, id: `mcp-e2e-call-${callId}`, type: 'function', function: { name: tool, arguments: JSON.stringify(args) } }] });
     } catch (error) {
       if (!response.destroyed) {
+        // 夹具自己的失败只写进程日志：响应体是对外通道，不回显内部错误消息。
+        process.stderr.write(`[fixture] request failed: ${error instanceof Error ? error.message : String(error)}\n`);
         response.writeHead(500, { 'content-type': 'text/plain' });
-        response.end(error instanceof Error ? error.message : String(error));
+        response.end('fixture failure');
       }
     }
   });
