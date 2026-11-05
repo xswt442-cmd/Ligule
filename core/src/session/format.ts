@@ -124,12 +124,13 @@ export function createSessionHeader({
     kind: 'session',
     formatVersion: SESSION_FORMAT_VERSION,
     sessionId: id,
-    // 创建记录时可能尚未确定模式；此时省略该字段，不写空名称或虚构的默认值。
+    // 项目根缺失时写空串：记录必须带上这个字段，读取方靠它定位工作区。
     projectRoot: projectRoot ?? '',
     createdAt,
   };
   if (workspace !== undefined && workspace !== '') header.workspace = workspace;
   if (workspaceOrigin !== undefined) header.workspaceOrigin = workspaceOrigin;
+  // 创建记录时可能尚未确定模式；此时省略该字段，不写虚构的默认值。
   if (mode !== undefined) header.mode = mode;
   return header;
 }

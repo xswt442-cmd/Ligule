@@ -41,7 +41,7 @@ export function estimateRequest(request: ModelRequest): number {
   return estimateTokens({ system: request.system ?? '', tools: request.tools ?? [], messages: request.messages });
 }
 
-function tokenCount(value: unknown): number | null {
+export function tokenCount(value: unknown): number | null {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
 

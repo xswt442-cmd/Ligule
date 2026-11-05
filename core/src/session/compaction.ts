@@ -111,6 +111,8 @@ export function flatten(events: SessionEvent[]): string {
 const INSTRUCTION = 'Write a summary of the transcript excerpt below so a later agent can continue the work. '
   + 'Keep every decision, still-open question, tool outcome, path, command, code fragment and identifier that matters; write each of them exactly as it appeared. '
   + 'Write the prose in the language the conversation is written in, or the language it asks for. Plain prose, no preamble.\n\n';
+// 摘要提示词自身的预留：窗口预算扣掉它，避免请求连同摘要在内超出模型限制。
+const SUMMARY_PROMPT_RESERVE_TOKENS = 1024;
 
 // 压缩摘要溢出文件的命名；读取方以此校验文件名，防止借工具读取会话目录外的文件。
 // 末尾的短哈希区分同范围不同内容的摘要；旧格式不带哈希，读取时仍接受。
@@ -167,8 +169,9 @@ export function createCompaction({ provider, session, directory, id, limits, log
   // 这个上限只数失败：一次成功就把计数清零，长时间会话该连续产出多少块就产出多少块。
   // 一次网络抖动、超时或空回复也不会永久禁用压缩——下一轮压力到线时会再试一次。
   const SUMMARY_FAILURE_LIMIT = 3;
-  // 摘要不可用标记。两种失败都算不可用：请求抛错（网络、超时、工具调用、上下文超限）
-  // 与回复为空。达到失败上限后才停止请求；单次失败只记原因，仍会重试。
+  // 摘要不可用标记：只在请求失败时记录（网络、超时、工具调用、空回复、输出超限、
+  // 上下文超限都由 `summarise` 抛错走到同一条路）。达到失败上限才停止请求；
+  // 单次失败只记原因，仍会重试。
   let summaryFailure: string | null = null;
   let summaryFailures = 0;
 
@@ -219,7 +222,7 @@ export function createCompaction({ provider, session, directory, id, limits, log
 
   async function summarise(events: SessionEvent[], previous: string | undefined, signal?: AbortSignal): Promise<string> {
     // 摘要请求本身也计入窗口预算，并使用校准后的估算，避免请求自身超出模型限制。
-    const excerpt = `${previous === undefined ? '' : `Earlier summary:\n${previous}\n\n`}${fitExcerpt(flatten(events), Math.max(1, Math.floor((threshold - 1024) / factor)))}`;
+    const excerpt = `${previous === undefined ? '' : `Earlier summary:\n${previous}\n\n`}${fitExcerpt(flatten(events), Math.max(1, Math.floor((threshold - SUMMARY_PROMPT_RESERVE_TOKENS) / factor)))}`;
     const parts: string[] = [];
     const seen: ProviderEvent[] = [];
     let finish: ProviderEvent | undefined;
@@ -283,16 +286,11 @@ export function createCompaction({ provider, session, directory, id, limits, log
       logger?.log?.('compaction summary call failed', { sessionId: id, code });
       // Run 取消不是摘要坏了：这次调用本身不该继续，不记失败、不锁死后续压缩。
       if (signal?.aborted) throw new KernelError('loop_cancelled', { cause: error });
-      // 请求抛错属于“摘要不可用”，与回复为空同一条路：记下原因，连续失败到上限才停。
+      // 请求抛错属于“摘要不可用”：`summarise` 把空回复与超长输出也变成错误抛出，
+      // 因此这里统一记下原因，连续失败到上限才停。
       summaryFailure = code ?? 'summary_failed';
       summaryFailures += 1;
       throw error;
-    }
-    if (text === '') {
-      logger?.log?.('compaction summary came back empty', { sessionId: id });
-      summaryFailure = 'summary_empty';
-      summaryFailures += 1;
-      return null;
     }
     const written = await writeBlock({ blocks, covered, text, reason, tokensBefore });
     if (written === null) {

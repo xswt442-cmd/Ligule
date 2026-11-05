@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  REVIEW_INPUT_VERSION, buildReviewInput, estimateTokens, parseReviewReply, type ReviewFacts,
+  REVIEW_INPUT_VERSION, buildReviewInput, estimatePromptTokens, parseReviewReply, type ReviewFacts,
 } from '../dist/kernel/reviewer.js';
 
 const baseFacts: ReviewFacts = {
@@ -119,7 +119,7 @@ test('the reply parser accepts exactly one JSON object and nothing else', () => 
 });
 
 test('the token estimate counts CJK wider than latin text', () => {
-  assert.equal(estimateTokens('abcd'), 1);
-  assert.equal(estimateTokens('中文'), 2);
-  assert.ok(estimateTokens('中文中文中文') > estimateTokens('abcdefghijkl'));
+  assert.equal(estimatePromptTokens('abcd'), 1);
+  assert.equal(estimatePromptTokens('中文'), 2);
+  assert.ok(estimatePromptTokens('中文中文中文') > estimatePromptTokens('abcdefghijkl'));
 });

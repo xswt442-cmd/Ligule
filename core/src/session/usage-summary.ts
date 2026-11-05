@@ -1,7 +1,8 @@
 // 只读用量聚合：把会话里的 `usage` 事件按用途（主 Agent / 复审）求和。
 // 约定：`input` 是端点报回的输入总量，可能已含缓存命中；`cachedInput` 是其中的缓存部分，
-// 两者不能相加。任何一路缺失都记成“未知”，绝不把缺失当成 0。
-import type { UsagePurpose } from './usage.js';
+// 两者不能相加。合计只是“已报数值的部分和”：没报数值的请求不进 `input`/`output`，
+// 只记进 `unknownInputRequests`/`unknownOutputRequests`，所以 0 不代表“端点报了 0”。
+import { tokenCount, type UsagePurpose } from './usage.js';
 
 export interface UsageBucket {
   /** 记录到的模型请求次数。 */
@@ -58,19 +59,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function count(value: unknown): number | null {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
-}
-
 function purposeOf(value: unknown): UsagePurpose {
   return value === 'reviewer' ? 'reviewer' : 'agent';
 }
 
 function add(counter: Counter, event: Record<string, unknown>): void {
   counter.requests += 1;
-  const input = count(event.input);
-  const output = count(event.output);
-  const estimated = count(event.estimated);
+  const input = tokenCount(event.input);
+  const output = tokenCount(event.output);
+  const estimated = tokenCount(event.estimated);
   if (estimated !== null) counter.estimatedInput += estimated;
   if (input === null) counter.unknownInputRequests += 1;
   else {
@@ -80,7 +77,7 @@ function add(counter: Counter, event: Record<string, unknown>): void {
   if (output === null) counter.unknownOutputRequests += 1;
   else counter.output += output;
   const cache = isRecord(event.cache) ? event.cache : undefined;
-  const hit = cache === undefined ? null : count(cache.hitInputTokens);
+  const hit = cache === undefined ? null : tokenCount(cache.hitInputTokens);
   if (cache !== undefined && hit !== null) {
     counter.cachedInput += hit;
     if (input !== null) counter.cacheKnownRequests += 1;

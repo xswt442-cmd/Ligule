@@ -270,8 +270,11 @@ export function createSessionReviewer({ settings, provider, factsOf, logger, onU
     const parsed = parseReviewReply(text);
     if (!parsed.ok) {
       failures += 1;
-      logger?.('reviewer reply was unusable', { code: parsed.code });
-      return askHuman(parsed.code, '复审回复不可解析，转人工审批。');
+      logger?.('reviewer reply was unusable', { code: parsed.code, detail: parsed.detail });
+      // 具体原因来自解析器：截断与“不是 JSON 对象”要区分开，否则日志和用户提示都会误导。
+      return askHuman(parsed.code, parsed.code === 'review_reply_truncated'
+        ? `复审回复被截断（${parsed.detail}），转人工审批。`
+        : `复审回复不可用（${parsed.detail}），转人工审批。`);
     }
     const record: PolicyReviewRecord = {
       decision: parsed.decision,

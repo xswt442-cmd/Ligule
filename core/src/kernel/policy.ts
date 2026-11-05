@@ -136,8 +136,9 @@ export interface PolicyReviewRecord {
 export type PolicyReviewOutcome = PolicyReviewRecord;
 
 /**
- * 复审只在这四种结果间做选择：允许、拒绝、转人工、不可用。
- * 不可用（模型/JSON/超时/预算失败）与转人工都继续走原有审批通道，绝不当成放行。
+ * 复审只在这三种结果间做选择：允许、拒绝、转人工（`allow` / `deny` / `ask-human`）。
+ * “不可用”（模型/JSON/超时/预算失败）不是第四种结果，而是 `ask-human` 加一个原因码：
+ * 两者都继续走原有审批通道，绝不当成放行。
  */
 export type PolicyReview = (request: PolicyReviewRequest) => PolicyReviewOutcome | Promise<PolicyReviewOutcome>;
 
@@ -277,7 +278,8 @@ function canAutoApprove(inspection: CommandInspection | undefined): boolean {
 }
 
 // 需要审批时附上解析器状态、无法识别的命令构造和所用语法，让界面可以说明原因。
-// 面向用户的解释使用中文，机器可判断的信息由稳定错误码提供。
+// 只有这个函数负责“为什么需要审批”的解释文案，因此统一用中文；机器可判断的信息由稳定错误码提供。
+// 危险命令分类的拒绝理由另在 classifyDangerousCommand 里给出，那里的措辞不经过这里。
 function askReason(parsed: ParsedCommand | undefined, target: NetworkTarget | undefined, shell: ShellSelection | undefined): string | undefined {
   const kind = shell?.kind ?? 'bash';
   if (parsed?.kind === 'unavailable') return `${kind} 的命令语法解析器用不了：${parsed.detail}`;
@@ -450,8 +452,10 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       const segments = parsed?.kind === 'segments' ? parsed.segments : undefined;
       // 没有命令文本的调用仍作为一个分段应用规则检查。
       const parts = command === undefined ? [undefined] : segments;
-      const askedRule = candidates.find((item) => item.decision === 'ask'
-        && (matches(command, item.match) || (segments ?? []).some((segment) => matches(segment, item.match))));
+      // 规则命中“整条命令”或“解析出的任一分段”都算命中：问句规则、拒绝规则与复审后的收紧复查共用这一处判定。
+      const ruleHits = (item: PolicyRule): boolean =>
+        matches(command, item.match) || (segments ?? []).some((segment) => matches(segment, item.match));
+      const askedRule = candidates.find((item) => item.decision === 'ask' && ruleHits(item));
       if (askedRule !== undefined) effective = 'ask';
       // 在结果中包含解析分段，便于从记录中还原命令如何被解释。
       // 无命令文本或无法解析时不返回分段字段。
@@ -526,9 +530,8 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       }
 
       // 任一匹配规则拒绝时就拒绝调用，后续放行规则不能覆盖拒绝。
-      // 命令规则同时检查整条命令和每个分段，以拦截管道中的危险命令。
-      const denied = candidates.find((item) => item.decision === 'deny'
-        && (matches(command, item.match) || (segments ?? []).some((segment) => matches(segment, item.match))));
+      // 命令规则同时检查整条命令和每个分段（ruleHits），以拦截管道中的危险命令。
+      const denied = candidates.find((item) => item.decision === 'deny' && ruleHits(item));
       if (denied) {
         return refuse('policy_denied', 'rule', denied.reason ?? `${named} 被规则表拒绝`, denied.match);
       }
@@ -553,7 +556,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
       }
 
       const allowed = candidates.filter((item) => item.decision === 'allow');
-      // 记录实际匹配的放行规则名称，便于解释判定结果。
+      // 记录实际匹配的放行规则模式，便于解释判定结果。
       const covering = () => (parts === undefined ? undefined : allowed.find((item) => parts.every((segment) => matches(segment, item.match))));
       let covered;
       if (loopOrPrivate) {
@@ -615,8 +618,7 @@ export function createDecisionChain({ mode = 'ask', rules = [], thresholds = DEF
             return refuse('run_cancelled', 'ask', 'Run 已取消，这次调用不再执行', undefined, 'cancelled', false);
           }
           // 作废不等于忽略新规则：等待期间新增的 deny 要当场生效，否则会落到可被批准的分支。
-          const tightened = currentRules.filter(inScope).find((item) => item.decision === 'deny'
-            && (matches(command, item.match) || (segments ?? []).some((segment) => matches(segment, item.match))));
+          const tightened = currentRules.filter(inScope).find((item) => item.decision === 'deny' && ruleHits(item));
           if (tightened !== undefined) return refuse('policy_denied', 'rule', tightened.reason ?? '等待复审期间规则表收紧了这一次调用', tightened.match);
         }
         if (outcome !== undefined && outcome.decision === 'allow') {

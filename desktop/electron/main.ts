@@ -1,4 +1,4 @@
-﻿import { app, dialog, type BrowserWindow } from 'electron';
+import { app, dialog, type BrowserWindow } from 'electron';
 import { resolve, join } from 'node:path';
 import { HostController } from './host.js';
 import { resolveHostRuntime } from './runtime.js';

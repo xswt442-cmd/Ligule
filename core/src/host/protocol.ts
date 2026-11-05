@@ -415,7 +415,7 @@ export const METHODS = Object.freeze({
     parameters: { type: 'object', properties: { sessionId: SESSION_ID }, required: ['sessionId'] },
   },
   'usage.get': {
-    description: 'Read the read-only token usage of a project session, split by purpose (agent model calls and the optional approval reviewer); a total the endpoint never reported stays unknown rather than becoming zero, and cached input is a subset of input, never added to it',
+    description: 'Read the read-only token usage of a project session, split by purpose (agent model calls and the optional approval reviewer); the totals are partial sums of what endpoints reported, requests that reported nothing are counted in unknownInputRequests and unknownOutputRequests instead of becoming zero, and cached input is a subset of input, never added to it',
     parameters: { type: 'object', properties: { sessionId: SESSION_ID, projectRoot: { type: 'string' } }, required: ['sessionId'] },
   },
   'session.configure': {

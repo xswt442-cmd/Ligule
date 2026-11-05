@@ -1924,19 +1924,20 @@ export function createHost({
       const startedAt = Date.now();
       // 复审前重新读一次 Grant：会话创建时的那份快照无法反映之后的撤销与到期。
       // 重读失败说明授权状态未知：保留旧记录但按失效处理，让复审转人工而不是沿用旧放行依据。
-      if (agentControl !== undefined) {
+      // 复审期间也要再读一次：撤销之后才到达的 allow 不能沿用复审前的结论。
+      const refreshGrant = async (): Promise<void> => {
+        if (agentControl === undefined) return;
         try {
           liveGrant = await activeDelegation();
           grantCheckFailed = false;
         } catch {
           grantCheckFailed = true;
         }
-      }
+      };
+      await refreshGrant();
       // 每次复审前从原始 Session 事件重建可信证据：早期约束、撤销与收紧、相关历史都带 seq。
-      const evidence = await selectReviewEvidence(session, {
-        tool: request.tool,
-        ...(liveGrant === undefined ? {} : { grantActive: !grantCheckFailed && isGrantActive(liveGrant) }),
-      });
+      // Grant 是否有效由 Host 单独判定并可能直接转人工，因此不混进证据列表。
+      const evidence = await selectReviewEvidence(session, { tool: request.tool });
       const appendAudit = async (record: {
         readonly decision: 'allow' | 'deny' | 'ask-human';
         readonly reasonCode?: string;
@@ -1980,14 +1981,7 @@ export function createHost({
       const outcome = await reviewer.review(request);
       // 复审是一次真实网络请求，期间 Grant 可能被撤销或到期。撤销之后才到达的 allow
       // 不能沿用复审前的检查：那会把“授权已经收回”变成“模型同意所以放行”。
-      if (agentControl !== undefined) {
-        try {
-          liveGrant = await activeDelegation();
-          grantCheckFailed = false;
-        } catch {
-          grantCheckFailed = true;
-        }
-      }
+      await refreshGrant();
       if (outcome.decision === 'allow' && (grantCheckFailed || (liveGrant !== undefined && !isGrantActive(liveGrant)))) {
         const inactive = inactiveGrantOutcome();
         await appendAudit(inactive);

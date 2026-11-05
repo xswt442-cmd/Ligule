@@ -6,10 +6,12 @@ import lockfile from 'proper-lockfile';
 import { setTimeout as delay } from 'node:timers/promises';
 import { dataRoot } from '../kernel/config-file.js';
 import { KernelError, KernelRuntimeError } from '../kernel/error.js';
-import { POLICY_SEMANTICS } from '../kernel/policy.js';
+import { isPolicyMode, POLICY_SEMANTICS, readPolicyMode, type PolicyMode } from '../kernel/policy.js';
+import { grantState } from './review-evidence.js';
 import type { PermissionNetwork, PermissionProfile } from '../kernel/permission.js';
 
-export type DelegationPolicy = 'always' | 'ask' | 'auto' | 'never';
+// 授权里的档位与 Policy 用的是同一套四档词汇，这里只做别名，避免两处各自维护。
+export type DelegationPolicy = PolicyMode;
 export type DelegationSource = 'trusted-ui' | 'legacy';
 
 export interface DelegationGrant {
@@ -105,7 +107,6 @@ const AUDIT_LIMIT = 2048;
 const LOCK_STALE_MS = 10_000;
 const PROFILES: readonly PermissionProfile[] = ['read-only', 'workspace-write', 'full-access'];
 const NETWORKS: readonly PermissionNetwork[] = ['disabled', 'policy', 'unrestricted'];
-const POLICIES: readonly DelegationPolicy[] = ['always', 'ask', 'auto', 'never'];
 const PROFILE_RANK: Readonly<Record<PermissionProfile, number>> = { 'read-only': 0, 'workspace-write': 1, 'full-access': 2 };
 const NETWORK_RANK: Readonly<Record<PermissionNetwork, number>> = { disabled: 0, policy: 1, unrestricted: 2 };
 
@@ -142,7 +143,7 @@ function isNetwork(value: unknown): value is PermissionNetwork {
 }
 
 function isPolicy(value: unknown): value is DelegationPolicy {
-  return POLICIES.includes(value as DelegationPolicy);
+  return isPolicyMode(value);
 }
 
 const MODE_NAME = /^[a-z][a-z0-9-]{0,63}$/u;
@@ -171,10 +172,7 @@ function uniqueStrings(value: unknown, check: (one: unknown) => boolean): readon
 
 // 旧授权文件里的档位是旧语义：`none` 与 `never` 都不能升级成新 `never`（跳过审批），
 // 一律降级为 `ask`。映射后重新去重；默认档位不在白名单里时整份授权失效，要求重新授权。
-function legacyPolicy(value: unknown): DelegationPolicy | undefined {
-  if (value === 'none' || value === 'never') return 'ask';
-  return value === 'ask' || value === 'auto' ? value : undefined;
-}
+// 语义判定与 Policy 共用 `readPolicyMode`，不在这里另写一份映射。
 
 function validateGrant(value: unknown): DelegationGrant {
   const keys = ['id', 'name', 'projectRoot', 'defaultPermissionProfile', 'maxPermissionProfile', 'defaultNetwork', 'maxNetwork',
@@ -186,9 +184,9 @@ function validateGrant(value: unknown): DelegationGrant {
   const valueRecord = isRecord(value) ? value : {};
   const semantics = valueRecord.policySemantics;
   const legacy = semantics === undefined;
-  const normalizedDefault = legacy ? legacyPolicy(valueRecord.defaultPolicy) : isPolicy(valueRecord.defaultPolicy) ? valueRecord.defaultPolicy : undefined;
+  const normalizedDefault = legacy ? readPolicyMode(valueRecord.defaultPolicy, true) : isPolicy(valueRecord.defaultPolicy) ? valueRecord.defaultPolicy : undefined;
   const normalizedAllowed = Array.isArray(valueRecord.allowedPolicies)
-    ? [...new Set((valueRecord.allowedPolicies as unknown[]).map((one) => legacy ? legacyPolicy(one) : isPolicy(one) ? one : undefined)
+    ? [...new Set((valueRecord.allowedPolicies as unknown[]).map((one) => legacy ? readPolicyMode(one, true) : isPolicy(one) ? one : undefined)
       .filter((one): one is DelegationPolicy => one !== undefined))]
     : undefined;
   const mcpServers = Array.isArray(valueRecord.allowedMcpServers) ? valueRecord.allowedMcpServers : [];
@@ -497,8 +495,10 @@ export async function requireDelegationGrant(path: string, id: string, projectRo
   const { store } = await readStore(resolve(path));
   const grant = store.grants.find((one) => one.id === id);
   if (grant === undefined) throw new KernelError('agent_control_grant_not_found');
-  if (grant.revokedAt !== null) throw new KernelError('agent_control_grant_revoked');
-  if (grant.expiresAt !== null && Date.parse(grant.expiresAt) <= Date.now()) throw new KernelError('agent_control_grant_expired');
+  // 与复审侧共用同一套“授权是否仍然有效”的判定，避免两处各写一份日期比较。
+  const state = grantState(grant);
+  if (state === 'revoked') throw new KernelError('agent_control_grant_revoked');
+  if (state !== 'active') throw new KernelError('agent_control_grant_expired');
   if (!isAbsolute(projectRoot)) throw new KernelError('agent_control_project_forbidden');
   let actual: string;
   try { actual = await realpath(projectRoot); } catch { throw new KernelError('agent_control_project_forbidden'); }

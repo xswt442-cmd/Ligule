@@ -38,7 +38,7 @@ For example, on Windows:
 }
 ```
 
-Each MCP server process authorizes only the project supplied at startup. Use MCP `tools/list` to discover all fourteen tools and their input schemas:
+Each MCP server process authorizes only the project supplied at startup. Use MCP `tools/list` to discover all fifteen tools and their input schemas:
 
 - `ligule_session_create`: create a session in the authorized project.
 - `ligule_session_open`: reopen an existing session. A session returned by the list tool must be opened before it can be used for a run or record read.
@@ -150,7 +150,7 @@ Without a Grant, `--operator` does not grant or elevate session Permission and c
 
 Run state and `operationId` values exist only in the current server process; each process retains at most 256 operation records. At capacity, a new run evicts the earliest created operation that has settled. An evicted ID can no longer be queried. If all retained operations are still running, a new run fails with a capacity error. An old `operationId` cannot be recovered after the server exits or restarts. Host persists session records, so a new server can reopen a session and read its history, but it cannot restore a run from the previous process.
 
-One server process can take ownership of at most 64 distinct sessions. Reopening a session already owned by that process does not use another slot. Once the limit is reached, it cannot create or open another session until the server restarts. Idle sessions keep their slots until the server exits because there is no per-session close tool.
+One server process can take ownership of at most 64 distinct sessions. Reopening a session already owned by that process does not use another slot. Once the limit is reached, it cannot create or open another session until the server restarts. Idle sessions keep their slot until `ligule_session_close` releases it, or until the server restarts.
 
 When the client disconnects or the server receives a termination signal, it cancels active runs, waits for Host calls to settle, and releases session locks and extension resources. Records already written remain available after restart; disconnect does not resume unfinished runs or preserve their old `operationId` values.
 

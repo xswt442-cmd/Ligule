@@ -8,7 +8,7 @@ import { listenFetchable } from './helpers/port.ts';
 
 for (const api of ['chat-completions', 'messages']) {
   for (const empty of [false, true]) {
-    test(`${api} compaction refuses ${empty ? 'an empty' : 'a truncated'} summary without changing records`, async () => {
+    test(`${api} compaction refuses ${empty ? 'an empty' : 'a truncated'} summary without changing the transcript`, async () => {
       const scratch = join(process.cwd(), 'testplace', 'tmp');
       await mkdir(scratch, { recursive: true });
       const directory = await mkdtemp(join(scratch, 'summary-completion-'));
@@ -41,7 +41,14 @@ for (const api of ['chat-completions', 'messages']) {
         const compaction = createCompaction({ provider, session, directory, id,
           limits: { contextTokens: 2000, compactThresholdRatio: 0.8, compactRetainRatio: 0.16, resultBytes: 16000 } });
         await assert.rejects(compaction.compactNow(), (error: unknown) => error instanceof Error && (error as { code?: string }).code === (empty ? 'provider_empty_response' : 'provider_output_exhausted'));
-        assert.deepEqual(await readFile(join(directory, `${id}.jsonl`)), before);
+        const beforeLines = before.toString('utf8').split('\n').filter((line) => line !== '');
+        const afterLines = (await readFile(join(directory, `${id}.jsonl`), 'utf8')).split('\n').filter((line) => line !== '');
+        assert.deepEqual(afterLines.slice(0, beforeLines.length), beforeLines, 'a refused summary leaves every existing event untouched');
+        const appended = afterLines.slice(beforeLines.length).map((line) => JSON.parse(line) as Record<string, unknown>);
+        assert.equal(appended.length, 1, 'the refused request is still accounted exactly once');
+        assert.equal(appended[0].kind, 'usage');
+        assert.equal(appended[0].source, 'summary');
+        assert.equal(appended[0].input, null, 'a summary that never reported tokens stays unknown');
         await assert.rejects(readFile(join(directory, `${id}.checkpoint.json`)), (error: unknown) => error instanceof Error && (error as { code?: string }).code === 'ENOENT');
       } finally {
         if (previous === undefined) delete process.env.SUMMARY_TEST_KEY; else process.env.SUMMARY_TEST_KEY = previous;

@@ -15,18 +15,24 @@ export interface ReviewEvidenceOptions {
   readonly tool?: string;
   /** 最多保留几条历史。 */
   readonly historyLimit?: number;
-  /** 当前 Grant 是否有效；undefined 表示本次没有 Grant 约束。 */
-  readonly grantActive?: boolean;
 }
 
 type RawEvent = { readonly seq?: unknown; readonly kind?: unknown };
 
-/** 授权是否仍然有效：撤销与到期都算失效，复审只认仍然有效的授权。 */
-export function isGrantActive(grant: { readonly revokedAt: string | null; readonly expiresAt: string | null }, now = Date.now()): boolean {
-  if (grant.revokedAt !== null) return false;
-  if (grant.expiresAt === null) return true;
+/** 授权状态：撤销与到期分开，调用方可以据此给出不同的错误码。 */
+export type GrantState = 'active' | 'revoked' | 'expired' | 'unknown';
+
+export function grantState(grant: { readonly revokedAt: string | null; readonly expiresAt: string | null }, now = Date.now()): GrantState {
+  if (grant.revokedAt !== null) return 'revoked';
+  if (grant.expiresAt === null) return 'active';
   const expires = Date.parse(grant.expiresAt);
-  return Number.isFinite(expires) && expires > now;
+  if (!Number.isFinite(expires)) return 'unknown';
+  return expires > now ? 'active' : 'expired';
+}
+
+/** 授权是否仍然有效：撤销、到期或到期时间不可解析都算失效，复审只认仍然有效的授权。 */
+export function isGrantActive(grant: { readonly revokedAt: string | null; readonly expiresAt: string | null }, now = Date.now()): boolean {
+  return grantState(grant, now) === 'active';
 }
 
 function textOf(event: Record<string, unknown>): string | undefined {
@@ -69,48 +75,35 @@ function summarizeToolParams(params: unknown): string {
   return '';
 }
 
-/**
- * 从原始记录里挑出复审需要的证据。读取失败返回 `undefined`：调用方必须放弃自动放行，
- * 绝不能沿用上一份快照，也不能把“读不出来”当成“没有约束”。
- */
 /** 权限等级：数值越大越宽松；只用于判断“这一次是不是收紧”。 */
 const PROFILE_LEVEL: Record<string, number> = { 'read-only': 0, 'workspace-write': 1, 'full-access': 2 };
 const NETWORK_LEVEL: Record<string, number> = { disabled: 0, policy: 1, unrestricted: 2 };
+
+/** Host 判定为“不能自动放行”时给出的固定结论：只允许转人工，绝不改成放行。 */
+export type ReviewHandoffOutcome = {
+  readonly decision: 'ask-human';
+  readonly reasonCode: 'review_evidence_unavailable' | 'review_grant_inactive';
+  readonly reason: string;
+};
+
+function handoff(reasonCode: ReviewHandoffOutcome['reasonCode'], reason: string): ReviewHandoffOutcome {
+  return { decision: 'ask-human', reasonCode, reason };
+}
 
 /**
  * 证据读不到时的固定结论。授权的安全性依赖“证据仍然是当前的”，
  * 所以这里只允许转人工：绝不复用上一轮缓存的约束去做自动放行。
  */
-export type StaleReviewOutcome = {
-  readonly decision: 'ask-human';
-  readonly reasonCode: 'review_evidence_unavailable';
-  readonly reason: string;
-};
-
-export function staleReviewOutcome(): StaleReviewOutcome {
-  return {
-    decision: 'ask-human',
-    reasonCode: 'review_evidence_unavailable',
-    reason: 'the session log could not be read, so the review evidence is stale',
-  };
+export function staleReviewOutcome(): ReviewHandoffOutcome {
+  return handoff('review_evidence_unavailable', 'the session log could not be read, so the review evidence is stale');
 }
 
 /**
  * Grant 失效时的固定结论。撤销、到期或重读失败都由 Host 判定，
  * 提示词里的 `active="false"` 只是事实，不能成为自动放行的依据。
  */
-export type InactiveGrantOutcome = {
-  readonly decision: 'ask-human';
-  readonly reasonCode: 'review_grant_inactive';
-  readonly reason: string;
-};
-
-export function inactiveGrantOutcome(): InactiveGrantOutcome {
-  return {
-    decision: 'ask-human',
-    reasonCode: 'review_grant_inactive',
-    reason: 'the grant behind this session is revoked, expired or unreadable',
-  };
+export function inactiveGrantOutcome(): ReviewHandoffOutcome {
+  return handoff('review_grant_inactive', 'the grant behind this session is revoked, expired or unreadable');
 }
 
 /**
@@ -180,7 +173,8 @@ export async function selectReviewEvidence(
       continue;
     }
     if (kind === 'tool') {
-      const name = typeof event.tool === 'string' ? event.tool : typeof event.name === 'string' ? event.name : '';
+      // 工具事件统一用 `tool` 记录名字；没有名字的旧记录不猜字段，直接当无名工具。
+      const name = typeof event.tool === 'string' ? event.tool : '';
       if (options.tool !== undefined && name !== options.tool) continue;
       const decision = typeof event.decision === 'string' ? event.decision : undefined;
       const params = summarizeToolParams(event.params ?? event.args);
@@ -192,10 +186,6 @@ export async function selectReviewEvidence(
       if (history.length > historyLimit) history.shift();
       continue;
     }
-  }
-  if (options.grantActive === false) {
-    const last = events.reduce<number | undefined>((found, event) => seqOf(event) ?? found, undefined);
-    revoked.push({ seq: last ?? 0, source: 'grant', text: 'the operator grant is not active' });
   }
   return { constraints, revoked, history };
 }

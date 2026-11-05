@@ -8,7 +8,7 @@ import { getStaticTOMLValue, parseTOML, traverseNodes, VisitorKeys, type AST } f
 import lockfile from 'proper-lockfile';
 import { isDeepStrictEqual } from 'node:util';
 import { KernelError, KernelRuntimeError } from './error.js';
-import { POLICY_MODES, POLICY_SEMANTICS } from './policy.js';
+import { isPolicyRule, POLICY_MODES, POLICY_SEMANTICS } from './policy.js';
 import { modelSelection, modelServices, selectionLiteral, servicesLiteral } from './model-services.js';
 
 /** `[[policy.rules]]` 中的一条工具规则。 */
@@ -661,10 +661,15 @@ export function rulesOfLayer(parsed: Record<string, unknown>): PolicyRule[] {
       throw new KernelError('config_edit_shape_unsupported', { detail: 'a rule is not a table' });
     }
     const given = item as Record<string, unknown>;
-    return Object.fromEntries(RULE_FIELDS.flatMap((key) => {
+    const built = Object.fromEntries(RULE_FIELDS.flatMap((key) => {
       const value = given[key];
       return typeof value === 'string' && value !== '' ? [[key, value]] : [];
-    })) as unknown as PolicyRule;
+    }));
+    // 读回来的规则来自用户手写的 TOML：必须过与写入同一套校验，不能靠断言当成 PolicyRule。
+    if (!isPolicyRule(built)) {
+      throw new KernelError('config_edit_shape_unsupported', { detail: 'a rule is missing its tool or decision' });
+    }
+    return built;
   });
 }
 
@@ -680,7 +685,7 @@ export function expectedRules(current: PolicyRule[], op: RuleOp, index: number, 
       if (value === undefined) delete target[key];
       else target[key] = value;
     }
-    list[index] = target as unknown as PolicyRule;
+    list[index] = target as PolicyRule;
   }
   return list;
 }

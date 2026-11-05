@@ -11,7 +11,8 @@ import { createHash } from 'node:crypto';
 /** 输入选择版本：装配或事实口径变化时递增，写入审计记录以区分历史判定。 */
 export const REVIEW_INPUT_VERSION = 2;
 
-export const REVIEW_DECISIONS = Object.freeze(['allow', 'deny', 'ask-human'] as const);
+// 复审的三种裁决；运行时只在解析回复时用它校验枚举，类型由它派生。
+const REVIEW_DECISIONS = Object.freeze(['allow', 'deny', 'ask-human'] as const);
 export type ReviewDecision = (typeof REVIEW_DECISIONS)[number];
 
 export type EvidenceSource = 'user' | 'controller' | 'permission' | 'policy' | 'grant' | 'tool';
@@ -170,8 +171,9 @@ function dynamicSection(facts: ReviewFacts, options: { readonly history: boolean
   return lines.join('\n');
 }
 
-/** 粗略 token 估算：英文按 4 字符、CJK 按 1.5 字符折算，只用于预算取舍。 */
-export function estimateTokens(text: string): number {
+/** 粗略 token 估算：英文按 4 字符、CJK 按 1.5 字符折算，只用于复审预算取舍。
+ * 与 `session/usage.ts` 的同名概念算法不同（那边按字节折算模型输入），所以名字区分开。 */
+export function estimatePromptTokens(text: string): number {
   let wide = 0;
   for (const character of text) {
     const code = character.codePointAt(0) ?? 0;
@@ -201,7 +203,8 @@ export function buildReviewInput(facts: ReviewFacts, budget: { readonly maxInput
     return { ok: false, code: 'review_evidence_missing', estimatedInputTokens: 0, detail: 'the pending call has no tool name or arguments' };
   }
   // 授权事实至少要有一项：用户约束、规则表、授权文件，或者这次的权限与工作区边界。
-  // 后者单独出现也足够——复审判断的是“这次调用是否越出已授权的范围”。
+  // Host 组装 facts 时总会带上 permission 与 boundary，因此这条在正常链路上不会触发；
+  // 它保护的是“调用方只给了工具名和参数”的退化输入，不拿空白事实去问模型。
   const hasConstraints = (facts.evidence?.constraints.length ?? 0) > 0 || facts.userInstructions.length > 0;
   if (!hasConstraints && (facts.rules ?? []).length === 0
     && facts.grant === undefined && facts.permission === undefined && facts.boundary === undefined) {
@@ -209,14 +212,14 @@ export function buildReviewInput(facts: ReviewFacts, budget: { readonly maxInput
   }
   const system = SYSTEM_PROMPT;
   const withHistory = `${staticSection(facts)}\n\n${dynamicSection(facts)}`;
-  const full = estimateTokens(system) + estimateTokens(withHistory);
+  const full = estimatePromptTokens(system) + estimatePromptTokens(withHistory);
   if (full <= budget.maxInputTokens) {
     const fingerprint = createHash('sha256').update(canonical({ tool: facts.tool, args: facts.args, command: facts.command })).digest('hex');
     return { ok: true, input: { system, user: withHistory, fingerprint, inputVersion: REVIEW_INPUT_VERSION, estimatedInputTokens: full }, includedSeqs: includedSeqsOf(facts, { history: true }) };
   }
   // 先只去掉历史，再判断是否仍然超预算。
   const withoutHistory = `${staticSection(facts)}\n\n${dynamicSection(facts, { history: false })}`;
-  const trimmed = estimateTokens(system) + estimateTokens(withoutHistory);
+  const trimmed = estimatePromptTokens(system) + estimatePromptTokens(withoutHistory);
   if (trimmed <= budget.maxInputTokens) {
     const fingerprint = createHash('sha256').update(canonical({ tool: facts.tool, args: facts.args, command: facts.command })).digest('hex');
     return { ok: true, input: { system, user: withoutHistory, fingerprint, inputVersion: REVIEW_INPUT_VERSION, estimatedInputTokens: trimmed }, includedSeqs: includedSeqsOf(facts, { history: false }) };

@@ -283,20 +283,6 @@ export function positiveInteger(value: string | undefined, name: string): number
   return parsed;
 }
 
-export function benchmarkTimeoutMs(
-  plan: { tasks: readonly unknown[]; concurrency: number; timeout_multipliers: { task: number; agent: number; agent_setup: number } },
-  taskCount: number,
-  override: number | undefined,
-): number {
-  if (override !== undefined) return override;
-  const waves = Math.ceil(taskCount / Math.max(1, plan.concurrency));
-  const perTaskSeconds = 900 * plan.timeout_multipliers.task
-    + 900 * plan.timeout_multipliers.agent
-    + 360 * plan.timeout_multipliers.agent_setup
-    + 300;
-  return Math.max(30 * 60 * 1000, Math.ceil(waves * perTaskSeconds * 1.5) * 1000);
-}
-
 export function timeoutBasis(plan: { concurrency: number; timeout_multipliers: { task: number; agent: number; agent_setup: number } }, taskCount: number): {
   waves: number; perTaskSeconds: number; multiplier: number;
 } {
@@ -309,6 +295,17 @@ export function timeoutBasis(plan: { concurrency: number; timeout_multipliers: {
       + 300,
     multiplier: 1.5,
   };
+}
+
+export function benchmarkTimeoutMs(
+  plan: { tasks: readonly unknown[]; concurrency: number; timeout_multipliers: { task: number; agent: number; agent_setup: number } },
+  taskCount: number,
+  override: number | undefined,
+): number {
+  if (override !== undefined) return override;
+  // 与报告里的基数同源：改系数只需要改一处。
+  const basis = timeoutBasis(plan, taskCount);
+  return Math.max(30 * 60 * 1000, Math.ceil(basis.waves * basis.perTaskSeconds * basis.multiplier) * 1000);
 }
 
 export function countsOf(summary: Record<string, unknown>): TaskCounts | undefined {

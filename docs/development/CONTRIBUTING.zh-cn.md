@@ -43,7 +43,7 @@ pnpm --filter ligule-desktop run dev
 
 ## 基准测试
 
-`pnpm run bench:perf` 运行确定性的 Harness 场景（CLI 首轮任务、Session JSONL 解析/读取/列表、Shell 输出、MCP 回执生命周期），原始样本与 JSON/Markdown 摘要写入 `testplace/benchmarks/`。`pnpm run bench:agent` 通过 Harbor 适配器运行冻结的 `terminal-bench@2.0` 计划；需要 Docker、CLI tarball、提供方设置、冻结数据集，以及为没有 Node 的镜像准备的 Node 24 Linux 运行时。两个命令都会记录 Git SHA、tarball 摘要、模型/API、预算与平台。缺少前置条件时报告 `BLOCKED`，不会当作得分。详见 [evals/perf/README.md](../../evals/perf/README.md) 与 [evals/agent/README.md](../../evals/agent/README.md)。
+`pnpm run bench:perf` 运行确定性的 Harness 场景（CLI 首轮任务、Session JSONL 解析/读取/列表、Shell 输出、MCP 回执生命周期），原始样本与 JSON/Markdown 摘要写入 `testplace/benchmarks/`。`pnpm run bench:agent` 通过 Harbor 适配器运行冻结的 `terminal-bench@2.0` 计划；需要 Docker、CLI tarball、提供方设置、冻结数据集，以及为没有 Node 的镜像准备的 Node 24 Linux 运行时。`bench:perf` 记录 Git SHA 与平台；`bench:agent` 另外记录 tarball 摘要、模型/API 与预算。缺少前置条件时报告 `BLOCKED`，不会当作得分。详见 [evals/perf/README.md](../../evals/perf/README.md) 与 [evals/agent/README.md](../../evals/agent/README.md)。
 
 ## 让改动可核验
 
