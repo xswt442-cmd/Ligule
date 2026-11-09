@@ -101,13 +101,13 @@ function deadline<T>(pending: Promise<T>, label: string): Promise<T> {
   })]).finally(() => clearTimeout(timer));
 }
 
-// A host finishes sandbox and permission probing before it answers the first request. On Windows
-// that costs seconds to tens of seconds depending on the workspace size (measured here: about
-// 6.4s for a small workspace, about 25s for this repository), and it has nothing to do with the
-// request handling under test. The readiness phase gets its own allowance while every protocol
-// request after it keeps the 10s deadline, so the product timeout is not enlarged and a failure
-// still points at the phase that was actually slow.
-const STARTUP_READY_MS = 60_000;
+// A host finishes module loading, sandbox and permission probing before it answers the first
+// request. Windows startup measured about 6.4s for a small workspace and about 25s for this
+// repository; WSL importing the shared E: workspace's Core barrel measured 76.9s with the process
+// blocked in p9_client_rpc. Startup gets a separate allowance; every protocol request after it
+// keeps the 10s deadline, so the product timeout is unchanged and failures still identify the
+// phase that was slow.
+const STARTUP_READY_MS = 180_000;
 
 async function ready(client: Connection, label = 'Host') {
   const limit = Date.now() + STARTUP_READY_MS;
