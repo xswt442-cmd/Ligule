@@ -7,6 +7,8 @@ import type { ModelSelection } from './model-catalog';
 import { defaultNotifications, notificationsFrom, type NotificationPreferences } from './notifications.ts';
 
 const SETTINGS_RPC_TIMEOUT_MS = 60_000;
+// The first Host-backed settings read can include filesystem-cold startup; keep writes on the shorter request budget.
+const PREFS_READ_RPC_TIMEOUT_MS = 90_000;
 
 // 支持六种具名配色，具体颜色定义在 `styles/01-foundation.css` 的 `data-palette` 变量中。
 export const PALETTES = ['ink', 'parchment', 'sky', 'graphite', 'forest', 'dusk'] as const;
@@ -240,7 +242,7 @@ export function loadSettings(client: Client): Promise<Settings> {
   const loading = (async () => {
     await state.tail;
     try {
-      const result = objectValue(await client.call('prefs.read', {}, SETTINGS_RPC_TIMEOUT_MS));
+      const result = objectValue(await client.call('prefs.read', {}, PREFS_READ_RPC_TIMEOUT_MS));
       if (result === undefined || typeof result.version !== 'string') {
         throw Object.assign(new Error('prefs_read_version_invalid'), { code: 'prefs_read_version_invalid' });
       }
