@@ -511,6 +511,18 @@ const processHistory: TuiInputHistory = {
   },
 };
 
+function maxTranscriptSequence(events: readonly TuiRecord[]): number {
+  return events.reduce((maximum, event) => Math.max(maximum, event.seq), -1);
+}
+
+function transcriptRows(events: readonly TuiRecord[], locale: Locale): TranscriptItem[] {
+  return events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq })));
+}
+
+function appendUnseenTranscript(events: readonly TuiRecord[], after: number, locale: Locale): TranscriptItem[] {
+  return transcriptRows(events.filter((event) => event.seq > after), locale);
+}
+
 export function App({ client, sessionId: firstSessionId, info = {}, interactive = true, stdout, history = processHistory, inputs, keys, trust, modes, locale = 'zh' }: AppProps) {
   const t = useCallback((zh: string, en: string) => chooseText(locale, zh, en), [locale]);
   const app = useApp();
@@ -521,6 +533,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   activeSession.current = sessionId;
   const [geometry, setGeometry] = useState({ columns: stdout?.columns ?? 80, rows: stdout?.rows ?? 24 });
   const [rows, setRows] = useState<TranscriptItem[]>([]);
+  const lastTranscriptSequence = useRef(-1);
   const [live, setLive] = useState({ text: '', reasoning: '' });
   const [ask, setAsk] = useState<AskState | null>(null);
   // 一个提问请求包含一至四道题；逐题填写，最后一题提交后统一发送答复。
@@ -644,6 +657,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, []);
   const push = useCallback((...added: TranscriptItem[]) => {
     if (!alive.current) return;
+    for (const row of added) {
+      if (Number.isSafeInteger(row.seq)) lastTranscriptSequence.current = Math.max(lastTranscriptSequence.current, row.seq!);
+    }
     setRows((current) => [...current, ...added]);
   }, []);
   const reportMcpTrustOutcome = useCallback((owner: string, outcome: TranscriptItem) => {
@@ -898,6 +914,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     let timer: ReturnType<typeof setTimeout> | undefined;
     let cursor = 0;
     let operationId: string | null = null;
+    let gapNotifiedOperationId: string | null = null;
     let inFlight = false;
     let lastFailure = '';
     const projectRoot = info.boundary ?? '';
@@ -908,7 +925,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     const refreshTranscript = async () => {
       const read = await client.request('session.observe', { projectRoot, sessionId, limit: 400, fullResults: true });
       if (disposed || activeSession.current !== sessionId) return;
-      setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
+      const unseen = appendUnseenTranscript(read.events, lastTranscriptSequence.current, locale);
+      lastTranscriptSequence.current = Math.max(lastTranscriptSequence.current, maxTranscriptSequence(read.events));
+      push(...unseen);
       setExternalModel(externalModelFrom(read.events));
     };
     const poll = async () => {
@@ -926,6 +945,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         if (currentOperationId !== operationId) {
           operationId = currentOperationId;
           cursor = 0;
+          gapNotifiedOperationId = null;
           setExternalSnapshot(snapshot);
           nextDelay = 0;
           return;
@@ -944,6 +964,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         }
         if (snapshot.eventGap) {
           cursor = Math.max(0, (snapshot.firstAvailableCursor ?? cursor + 1) - 1);
+          if (gapNotifiedOperationId !== operationId) {
+            gapNotifiedOperationId = operationId;
+            push({ kind: 'error', text: t(
+              '外控实时事件出现缺口；正在刷新可用的持久会话记录，未写入记录的流式片段可能缺失。',
+              'External live events have a gap. Persisted Session records are being refreshed; stream chunks not yet written to the Session may be missing.',
+            ) });
+          }
           void refreshTranscript().catch((error: unknown) => push({ kind: 'error', text: t(`外控会话转录读取失败：${errorCode(error) ?? 'session_observe_failed'}`, `Could not refresh external transcript: ${errorCode(error) ?? 'session_observe_failed'}`) }));
         }
         cursor = Math.max(cursor, snapshot.nextCursor);
@@ -1788,6 +1815,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           setStatus(null);
           setDetail(null);
           setSessionPicker(null);
+          lastTranscriptSequence.current = -1;
           setRows([]);
           setLive({ text: '', reasoning: '' });
           push({ kind: 'meta', text: t(`新会话 ${created.sessionId.slice(0, 8)}`, `New session ${created.sessionId.slice(0, 8)}`) });
@@ -1987,7 +2015,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           setAsk(null);
           setQuery(null);
           setSessionPicker(null);
-          setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
+          lastTranscriptSequence.current = maxTranscriptSequence(read.events);
+          setRows(transcriptRows(read.events, locale));
           setLive({ text: '', reasoning: '' });
           setDetail(null);
           const row = listed.sessions.find((item) => item.id === picked.id);
@@ -2075,7 +2104,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             return;
           }
           adopted = true;
-          setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
+          lastTranscriptSequence.current = maxTranscriptSequence(read.events);
+          setRows(transcriptRows(read.events, locale));
           setLive({ text: '', reasoning: '' });
           push({ kind: 'meta', text: t('已接管外控会话，后续输入由 TUI 直接提交。', 'External session taken over; new input now runs through this TUI.') });
         } catch (error) {
