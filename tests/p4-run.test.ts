@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { link, mkdtemp, mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createConnection } from '../core/dist/host/connection.js';
 import { readRunResult, runResultPage, publishRunResult } from '../core/dist/session/run.js';
@@ -16,6 +16,7 @@ import { listenFetchable } from './helpers/port.ts';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 const cli = join(repository, 'tui', 'dist', 'cli.js');
+const testTempRoot = resolve(process.env.LIGULE_TEST_TEMP_ROOT ?? join(repository, 'testplace', 'tmp'));
 
 function sampleResult(runId: string, sessionId: string, text = 'verified result'): RunResult {
   return {
@@ -37,7 +38,7 @@ async function findSessionRecord(directory: string, sessionId: string): Promise<
 }
 
 test('run result sidecars enforce identity, integrity, bounds, links, and valid paging', async () => {
-  const output = join(repository, 'testplace', 'p4-runs');
+  const output = join(testTempRoot, 'p4-runs');
   await mkdir(output, { recursive: true });
   const directory = await mkdtemp(join(output, 'p4-run-result-'));
   const sessionId = 'p4-result-session';
@@ -89,6 +90,7 @@ test('run result sidecars enforce identity, integrity, bounds, links, and valid 
     await assert.rejects(publishRunResult(directory, 'workspace-one', sessionId, oversizedRunId, oversized), { code: 'run_result_too_large' });
     assert.deepEqual(await readdir(directory), []);
   } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });
 
@@ -120,7 +122,7 @@ async function ready(client: Connection, label = 'Host') {
 }
 
 test('durable run submission deduplicates a live retry and rejects a payload conflict', async () => {
-  const output = join(repository, 'testplace', 'p4-runs');
+  const output = join(testTempRoot, 'p4-runs');
   await mkdir(output, { recursive: true });
   const root = await mkdtemp(join(output, 'p4-run-live-'));
   const data = join(root, 'data');
@@ -235,7 +237,7 @@ test('durable run submission deduplicates a live retry and rejects a payload con
 });
 
 test('run.wait reads the run owned by the caller scope and ignores a claimed origin', async () => {
-  const output = join(repository, 'testplace', 'p4-runs');
+  const output = join(testTempRoot, 'p4-runs');
   await mkdir(output, { recursive: true });
   const root = await mkdtemp(join(output, 'p4-run-wait-default-'));
   const data = join(root, 'data');
