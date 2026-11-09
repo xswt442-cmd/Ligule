@@ -46,7 +46,7 @@ The canary image uses a locally available base image so the check does not depen
 
 ## Plan and scoring
 
-The plan fixes the dataset version, task IDs, one attempt per task, concurrency, model-call/timeout budget, and the verifier authority. Harbor's task verifier runs in its own environment and decides pass/fail. The runner uses the existing `evals.harbor.ligule_agent:LiguleAgent` adapter and `--allow-full-access` behavior inside the task container; it does not create approvals or read verifier files.
+The plan fixes the dataset version, task IDs, attempts, concurrency, model-call/timeout budget, and verifier authority. Optional `policy_mode: "auto"` selects the normal Policy chain for a plan; when omitted, the existing Terminal-Bench plan retains its `never` mode. Harbor's task verifier runs in its own environment and decides pass/fail. The runner uses the existing `evals.harbor.ligule_agent:LiguleAgent` adapter and `--allow-full-access` behavior inside the task container; it does not create approvals or read verifier files.
 
 After Harbor returns (including a failed or timed-out execution), the runner scans the actual trial `result.json` files and writes `manifest.json` in the run directory. It maps every planned task to an executed attempt or a `not_run` entry with a reason, records each trial's result and trajectory path, and then invokes the existing report tool. A malformed trial result fails manifest generation instead of being silently reclassified as not-run. The manifest never assigns pass/fail itself:
 

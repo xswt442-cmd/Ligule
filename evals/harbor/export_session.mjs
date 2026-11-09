@@ -8,7 +8,7 @@ import { SPILL_NAME } from '@ligule/core/kernel/result.js';
 import { sessionTurnToAtif } from '@ligule/core/session/atif.js';
 import { setTrusted } from '@ligule/core/kernel/workspace-trust.js';
 
-import { BENCHMARK_POLICY_MODE } from './policy-mode.mjs';
+import { BENCHMARK_POLICY_MODE, policyModeForCli } from './policy-mode.mjs';
 
 export { BENCHMARK_POLICY_MODE };
 
@@ -286,8 +286,9 @@ export function runCli(cli, args, { cwd, env, timeoutMs }) {
   });
 }
 
-export function buildCliArgs({ instruction, sessionDirectory, api, baseUrl, model, apiKeyEnv, modelCalls, timeoutMs, requestTimeoutMs, outputTokens }) {
+export function buildCliArgs({ instruction, sessionDirectory, api, baseUrl, model, apiKeyEnv, modelCalls, timeoutMs, requestTimeoutMs, outputTokens, policyMode }) {
   if (api !== 'messages' && api !== 'chat-completions') throw new Error('ligule_api_unsupported');
+  const actualPolicyMode = policyModeForCli(policyMode);
   if (!isAbsolute(sessionDirectory) || typeof model !== 'string' || model.trim() === '' || model.length > 256
     || typeof instruction !== 'string' || instruction.trim() === '') throw new Error('ligule_run_input_invalid');
   const url = new URL(baseUrl);
@@ -304,7 +305,7 @@ export function buildCliArgs({ instruction, sessionDirectory, api, baseUrl, mode
     ['host.sessionDirectory', sessionDirectory], ['model.api', api], ['model.baseURL', baseUrl],
     ['model.model', model], ['model.apiKeyEnv', apiKeyEnv], ['loop.modelCalls', modelCalls],
     ['loop.totalModelCalls', modelCalls], ['loop.taskTimeoutMs', timeoutMs], ['loop.requestTimeoutMs', requestTimeoutMs],
-    ['policy.mode', BENCHMARK_POLICY_MODE],
+    ['policy.mode', actualPolicyMode],
   ];
   if (outputTokens !== undefined) values.push(['model.outputTokens', outputTokens]);
   return [
@@ -331,7 +332,7 @@ async function writeResult(logsDirectory, result) {
 }
 
 // 基准容器里没有交互式信任确认，任务目录必须由评测器显式信任；
-// 不受信任时 `git`、解释器与项目脚本在 `never` 下仍会被拒（exec_workspace_untrusted）。
+// 工作区信任与计划选择的 Policy 模式是独立状态。
 export async function ensureWorkspaceTrust(directory) {
   await setTrusted(directory, true);
 }
@@ -350,6 +351,7 @@ async function runMode(args) {
   const modelCalls = Number(takeOption(args, '--model-calls'));
   const timeoutMs = Number(takeOption(args, '--timeout-ms'));
   const requestTimeoutMs = Number(takeOption(args, '--request-timeout-ms'));
+  const policyMode = takeOption(args, '--policy-mode', false);
   const outputTokensValue = takeOption(args, '--output-tokens', false);
   const outputTokens = outputTokensValue === undefined ? undefined : Number(outputTokensValue);
   if (args.length > 0) throw new Error('ligule_export_unexpected_arguments');
@@ -364,7 +366,7 @@ async function runMode(args) {
   await ensureWorkspaceTrust(process.cwd());
 
   const child = await runCli(cli, buildCliArgs({
-    instruction, sessionDirectory, api, baseUrl, model, apiKeyEnv, modelCalls, timeoutMs, requestTimeoutMs, outputTokens,
+    instruction, sessionDirectory, api, baseUrl, model, apiKeyEnv, modelCalls, timeoutMs, requestTimeoutMs, outputTokens, policyMode,
   }), {
     cwd: process.cwd(),
     env: buildCliEnvironment(process.env, homeDirectory, apiKeyEnv),

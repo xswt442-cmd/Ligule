@@ -188,6 +188,9 @@ test('forwards a per-request output-token budget to the CLI', async () => {
     const args = helper.buildCliArgs(options);
     assert.ok(args.includes('model.outputTokens=16384'));
     assert.throws(() => helper.buildCliArgs({ ...options, outputTokens: 0 }), /ligule_run_output_tokens_invalid/u);
+    const autoArgs = helper.buildCliArgs({ ...options, policyMode: 'auto' });
+    assert.ok(autoArgs.includes('policy.mode="auto"'));
+    assert.throws(() => helper.buildCliArgs({ ...options, policyMode: 'ask' }), /policy_mode_invalid/u);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

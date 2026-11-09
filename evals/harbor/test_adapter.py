@@ -195,6 +195,15 @@ class HarborAdapterTests(unittest.TestCase):
                     model_name="test-model",
                     ligule_output_tokens=0,
                 )
+            with self.assertRaisesRegex(ValueError, "ligule_policy_mode_invalid"):
+                LiguleAgent(
+                    logs_dir=Path(directory) / "logs",
+                    ligule_tarball=str(tarball),
+                    ligule_api="messages",
+                    ligule_base_url="https://api.example.test/v1",
+                    model_name="test-model",
+                    ligule_policy_mode="ask",
+                )
 
     def test_setup_proxy_url_rejects_embedded_credentials(self) -> None:
         with tempfile.TemporaryDirectory(dir=TEMP_ROOT) as directory:
@@ -526,6 +535,7 @@ class HarborAdapterTests(unittest.TestCase):
                 extra_env={"LIGULE_API_KEY": "test-only"},
                 environment_logs_dir=Path("/logs/agent"),
                 ligule_output_tokens=16_384,
+                ligule_policy_mode="auto",
             )
             agent.node_bin_directory = "/installed-agent/node-runtime/bin"
             environment = FakeEnvironment(agent.package["sha256"])
@@ -558,6 +568,7 @@ class HarborAdapterTests(unittest.TestCase):
             self.assertIn("export PATH=/installed-agent/node-runtime/bin", node_commands[0])
             self.assertIn("/installed-agent/node_modules/ligule/export_session.mjs", node_commands[0])
             self.assertIn("--output-tokens 16384", node_commands[0])
+            self.assertIn("--policy-mode auto", node_commands[0])
             self.assertEqual(len(command_envs), 2)
             self.assertEqual(command_envs[0].get("LIGULE_API_KEY"), "")
             self.assertEqual(command_envs[1].get("LIGULE_API_KEY"), "test-only")

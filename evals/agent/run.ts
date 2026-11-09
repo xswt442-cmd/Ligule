@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { activeBenchmarkOwner, benchmarkTimeoutMs, countsOf, createStateWriter, positiveInteger, prepareRunDirectory, providerUrlProblem, readTarballProvenance, runProcess, safeProviderUrl, timeoutBasis } from './lib.ts';
 import { outputDirectoryFor, writeManifest } from './manifest.ts';
 import type { ManifestPlan, RunIdentity } from './manifest.ts';
+import { policyModeFromPlan } from '../harbor/policy-mode.mjs';
 
 const repository = fileURLToPath(new URL('../..', import.meta.url));
 const HARBOR_VERSION = '0.25.0';
@@ -155,6 +156,7 @@ async function main(): Promise<void> {
   const planPath = resolve(option('plan') ?? join(repository, 'evals', 'agent', 'plan.json'));
 if (!existsSync(planPath)) throw new Error(`plan_missing:${planPath}`);
   const plan = JSON.parse(await readFile(planPath, 'utf8')) as Plan;
+  const policyMode = policyModeFromPlan(plan.policy_mode);
   const collectOnly = process.argv.includes('--collect-only');
   let validationTasks = plan.tasks;
   if (collectOnly) {
@@ -354,6 +356,7 @@ if (!existsSync(planPath)) throw new Error(`plan_missing:${planPath}`);
         ligule_model_calls: plan.model.model_calls,
         ligule_timeout_ms: plan.model.timeout_ms,
         ligule_request_timeout_ms: plan.model.request_timeout_ms,
+        ligule_policy_mode: policyMode,
         ...(nodeRuntime === undefined ? {} : {
           ligule_node_runtime_tarball: resolve(nodeRuntime),
           ligule_node_runtime_sha256: nodeRuntimeSha256,
