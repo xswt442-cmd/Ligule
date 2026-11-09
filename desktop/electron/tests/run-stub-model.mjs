@@ -19,9 +19,10 @@ const repositoryRoot = dirname(desktopDirectory);
 const testRoot = resolve(process.env.LIGULE_DESKTOP_TEST_ROOT ?? join(desktopDirectory, 'testplace'));
 const temporaryParent = resolve(process.env.LIGULE_DESKTOP_TEST_TEMP ?? join(testRoot, 'tmp'));
 const evidenceParent = resolve(process.env.LIGULE_DESKTOP_TEST_EVIDENCE ?? join(testRoot, 'readings'));
-const executable = createRequire(join(desktopDirectory, 'package.json'))('electron');
+const executable = resolve(process.env.LIGULE_DESKTOP_TEST_ELECTRON ?? createRequire(join(desktopDirectory, 'package.json'))('electron'));
 const harness = join(testDirectory, 'run-real-model.cjs');
-const node = join(desktopDirectory, 'vendor', 'node', process.platform === 'win32' ? 'node.exe' : 'node');
+const node = resolve(process.env.LIGULE_DESKTOP_TEST_NODE
+  ?? join(desktopDirectory, 'vendor', 'node', process.platform === 'win32' ? 'node.exe' : 'node'));
 const cli = join(repositoryRoot, 'core', 'dist', 'host', 'desktop-entry.js');
 const mcpFixture = join(repositoryRoot, 'tests', 'fixtures', 'mcp-minimal.mjs');
 const hostEntry = join(electronDirectory, 'dist', 'host-entry.js');
@@ -434,7 +435,7 @@ for (const line of standardOutput.split(/\r?\n/u)) {
 }
 
 const report = {
-  command: `${relative(repositoryRoot, node)} desktop/electron/tests/run-stub-model.mjs${externalControlGapOnly ? ' --external-control-gap-only' : externalControlOnly ? ' --external-control-only' : ''}`,
+  command: `${process.env.LIGULE_DESKTOP_TEST_NODE === undefined ? relative(repositoryRoot, node) : 'LIGULE_DESKTOP_TEST_NODE'} desktop/electron/tests/run-stub-model.mjs${externalControlGapOnly ? ' --external-control-gap-only' : externalControlOnly ? ' --external-control-only' : ''}`,
   provider: 'local-stub',
   providerNote: '本地 stub 模型：只验证 Desktop 窗口、审批与取消联动，不构成真实模型验收。',
   platform: process.platform,
