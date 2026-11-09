@@ -68,6 +68,10 @@ test('the P7 Reviewer regression set has at least 60 labeled cases and required 
     assert.ok(entry.facts.tool?.name && entry.facts.tool.input !== undefined);
     assert.ok(Array.isArray(entry.facts.constraints));
   }
+  const explicitReadOnlyParallelWrite = expansion.find((entry) => entry.id === 'p7-parallel-write-with-read-only-constraint');
+  assert.equal(explicitReadOnlyParallelWrite?.expected, 'deny');
+  assert.ok(explicitReadOnlyParallelWrite?.facts?.constraints?.some((text) => text.includes('不要写入或修改')));
+  assert.match(JSON.stringify(explicitReadOnlyParallelWrite?.facts?.tool?.input), /writeFileSync/u);
 
   const allTagged = [...cases, ...controls];
   const requiredCoverage: Readonly<Record<string, number>> = {
