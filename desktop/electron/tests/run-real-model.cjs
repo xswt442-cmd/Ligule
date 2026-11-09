@@ -1009,6 +1009,8 @@ async function verifyQuestionDraftSurvivesSessionSwitchAndSubmission() {
 }
 
 async function recordReport(exitCode) {
+  const prefsReadRequest = hostRequests.find(request => request.method === 'prefs.read');
+  const prefsReadResponse = prefsReadRequest === undefined ? undefined : hostResponses.findLast(response => response.id === prefsReadRequest.id);
   const report = {
     platform: process.platform,
     release: require('node:os').release(),
@@ -1018,6 +1020,8 @@ async function recordReport(exitCode) {
     provider: providerLabel,
     workspace: workspaceRoot,
     workspaceReadinessMs,
+    prefsReadMs: prefsReadRequest === undefined || prefsReadResponse === undefined
+      ? null : prefsReadResponse.receivedAt - prefsReadRequest.sentAt,
     policy: 'ask',
     cspObserved: typeof observedCsp === 'string' && observedCsp.includes("default-src 'self'") && observedCsp.includes("script-src 'self'"),
     sessionId,
