@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -14,7 +14,7 @@ import { createDelegationGrant, listDelegationGrants, revokeDelegationGrant } fr
 import type { CreateDelegationGrantInput } from '../dist/host/agent-control.js';
 import { setTrusted } from '../dist/kernel/workspace-trust.js';
 
-const testplace = resolve('testplace');
+const testplace = resolve(dirname(fileURLToPath(import.meta.url)), '../../../testplace/tmp');
 const runner = fileURLToPath(new URL('./fixtures/agent-control-mcp-server.mjs', import.meta.url));
 
 type FixturePaths = { directory: string; projectRoot: string; otherProject: string; home: string };
@@ -40,7 +40,10 @@ type ToolReply = {
     nextCursor: number;
     state: string;
     source: string;
-    events: { kind: string; source?: string }[];
+    events: { cursor?: number; kind: string; source?: string }[];
+    eventGap?: boolean;
+    firstAvailableCursor?: number;
+    hasMoreEvents?: boolean;
     effective: { permission: { profile: string; network: string }; policy: { mode: string }; search: unknown };
     delegation: DelegationView;
     records: { json: string }[];
@@ -94,7 +97,7 @@ async function connect(projectRoot: string, home: string, grantId: string | unde
   return { client, transport, stderr: () => stderr };
 }
 
-async function startModelServer() {
+async function startModelServer({ questionFirst = true, outputChunks = 1 }: { questionFirst?: boolean; outputChunks?: number } = {}) {
   const requests: unknown[] = [];
   let call = 0;
   const server = createServer(async (request, response) => {
@@ -102,16 +105,20 @@ async function startModelServer() {
     for await (const chunk of request) chunks.push(chunk);
     requests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
     call += 1;
-    const frames: unknown[] = call === 1
-      ? [
+    const questionFrames: unknown[] = [
           { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'local-question', type: 'function', function: {
             name: 'ask_user_question',
             arguments: JSON.stringify({ questions: JSON.stringify([{ question: 'Choose a route', options: [{ label: 'north' }, { label: 'south' }], multiSelect: false }]) }),
           } }] } }] },
           { choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] },
-        ]
+        ];
+    const output = questionFirst
+      ? ['The local answer was received.']
+      : Array.from({ length: outputChunks }, (_, index) => `P6 retained stream piece ${index.toString().padStart(3, '0')}.`);
+    const frames: unknown[] = questionFirst && call === 1
+      ? questionFrames
       : [
-          { choices: [{ index: 0, delta: { content: 'The local answer was received.' } }] },
+          ...output.map((content) => ({ choices: [{ index: 0, delta: { content } }] })),
           { choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] },
         ];
     response.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -468,6 +475,89 @@ test('Desktop human input and question answers reach the single MCP-owned real H
     } finally {
       await host?.release();
       await client.close();
+      if (previousHome === undefined) delete process.env.LIGULE_HOME;
+      else process.env.LIGULE_HOME = previousHome;
+      await model.close();
+    }
+  });
+});
+
+test('MCP Controller reports a clipped event cursor and pages the retained Host Run without replay', async (t) => {
+  await fixture(async ({ projectRoot, home }) => {
+    const model = await startModelServer({ questionFirst: false, outputChunks: 180 });
+    const previousHome = process.env.LIGULE_HOME;
+    let client: Client | undefined;
+    try {
+      await writeFile(join(home, 'config.toml'), [
+        '[model]',
+        'api = "chat-completions"',
+        `baseURL = "${model.baseURL}"`,
+        'model = "agent-control-gap-model"',
+        'apiKeyEnv = "LIGULE_AGENT_CONTROL_TEST_KEY"',
+        '',
+        '[loop]',
+        'iterations = 4',
+        'modelCalls = 4',
+        '',
+        '[policy]',
+        'mode = "ask"',
+        '',
+      ].join('\n'));
+      await setTrusted(projectRoot, true, join(home, 'tui-trust.json'));
+      process.env.LIGULE_HOME = home;
+      const connected = await connect(projectRoot, home, undefined, false, { LIGULE_AGENT_CONTROL_TEST_KEY: 'test-key' });
+      client = connected.client;
+      const created = await callTool(client, 'ligule_session_create', { projectRoot });
+      const sessionId = created.structuredContent.sessionId;
+      const started = await callTool(client, 'ligule_run_start', { sessionId, input: 'P6-emit-180-deltas' });
+      const operationId = started.structuredContent.operationId;
+      assert.equal(started.structuredContent.state, 'running');
+
+      const completed = await callTool(client, 'ligule_run_await', { operationId, timeoutMs: 10_000 });
+      assert.equal(completed.structuredContent.state, 'done');
+      assert.equal(model.requests.length, 1, 'reading pages never replays the Provider Run');
+
+      const first = await callTool(client, 'ligule_run_status', { operationId, after: 0, limit: 50 });
+      assert.equal(first.structuredContent.eventGap, true, 'the old cursor is explicitly marked as clipped');
+      assert.ok((first.structuredContent.firstAvailableCursor ?? 0) > 1);
+      assert.equal(first.structuredContent.events.length, 50, 'status pages are capped at 50 events');
+      assert.equal(first.structuredContent.hasMoreEvents, true);
+      const replay = await callTool(client, 'ligule_run_status', { operationId, after: 0, limit: 50 });
+      assert.deepEqual(replay.structuredContent.events.map((event) => event.cursor),
+        first.structuredContent.events.map((event) => event.cursor), 'repeating a cursor returns the same retained page');
+
+      const retained = [...first.structuredContent.events];
+      const pageSizes = [first.structuredContent.events.length];
+      let after = first.structuredContent.nextCursor;
+      let hasMore = first.structuredContent.hasMoreEvents === true;
+      while (hasMore) {
+        const page = await callTool(client, 'ligule_run_status', { operationId, after, limit: 50 });
+        assert.ok(page.structuredContent.events.length > 0, 'a positive hasMoreEvents flag must include another page');
+        assert.ok(page.structuredContent.events.length <= 50);
+        retained.push(...page.structuredContent.events);
+        pageSizes.push(page.structuredContent.events.length);
+        assert.ok(page.structuredContent.nextCursor > after, 'each page advances its cursor');
+        after = page.structuredContent.nextCursor;
+        hasMore = page.structuredContent.hasMoreEvents === true;
+      }
+      const firstAvailable = first.structuredContent.firstAvailableCursor!;
+      const cursors = retained.map((event) => event.cursor);
+      assert.equal(retained.length, 128, 'the Controller retains exactly its bounded event window');
+      assert.equal(new Set(cursors).size, cursors.length, 'pages contain no duplicate event cursor');
+      assert.deepEqual(cursors, Array.from({ length: 128 }, (_, index) => firstAvailable + index),
+        'the retained event window is contiguous and fully pageable');
+
+      const transcript = await callTool(client, 'ligule_session_read', { sessionId, limit: 50 });
+      const records = transcript.structuredContent.records.map((item) => JSON.parse(item.json) as SessionRecordLine);
+      const assistant = records.findLast((record) => record.kind === 'assistant');
+      const expected = Array.from({ length: 180 }, (_, index) => `P6 retained stream piece ${index.toString().padStart(3, '0')}.`).join('');
+      assert.equal(assistant?.text, expected, 'the durable Session record preserves the complete final model output');
+      t.diagnostic(`p6.event_gap=${JSON.stringify({ requestedDeltaChunks: 180, providerRequests: model.requests.length,
+        eventGap: first.structuredContent.eventGap, firstAvailableCursor: firstAvailable,
+        retainedEventCount: retained.length, pageSizes, firstRetainedCursor: cursors[0], lastRetainedCursor: cursors.at(-1),
+        durableAssistantCharacters: assistant?.text?.length })}`);
+    } finally {
+      await client?.close();
       if (previousHome === undefined) delete process.env.LIGULE_HOME;
       else process.env.LIGULE_HOME = previousHome;
       await model.close();
