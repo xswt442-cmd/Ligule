@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFile, cp, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -17,23 +17,31 @@ function runVerifier(taskDirectory, workspace) {
   });
 }
 
-test('the C01 fixture distinguishes the unsolved, solved, and regressed states', async () => {
-  const taskDirectory = join(codingTasks, 'c01');
+async function verifyFixture(taskId) {
+  const taskDirectory = join(codingTasks, taskId);
   await mkdir(temporaryRoot, { recursive: true });
-  const temporaryDirectory = await mkdtemp(join(temporaryRoot, 'ligule-p1-c01-'));
+  const temporaryDirectory = await mkdtemp(join(temporaryRoot, `ligule-p1-${taskId}-`));
   const workspace = join(temporaryDirectory, 'workspace');
   try {
     await cp(join(taskDirectory, 'environment', 'app'), workspace, { recursive: true });
     assert.notEqual(runVerifier(taskDirectory, workspace).status, 0, 'the initial task must fail its verifier');
 
-    await copyFile(join(taskDirectory, 'solution', 'app', 'src', 'contact.mjs'), join(workspace, 'src', 'contact.mjs'));
+    await cp(join(taskDirectory, 'solution', 'app'), workspace, { recursive: true, force: true });
     assert.equal(runVerifier(taskDirectory, workspace).status, 0, 'the reference behavior must pass independently');
 
-    await copyFile(join(taskDirectory, 'environment', 'app', 'src', 'contact.mjs'), join(workspace, 'src', 'contact.mjs'));
+    await cp(join(taskDirectory, 'environment', 'app'), workspace, { recursive: true, force: true });
     assert.notEqual(runVerifier(taskDirectory, workspace).status, 0, 'a regression must fail verification');
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
+}
+
+test('the C01 fixture distinguishes the unsolved, solved, and regressed states', async () => {
+  await verifyFixture('c01');
+});
+
+test('the C02 fixture distinguishes the unsolved, solved, and regressed states', async () => {
+  await verifyFixture('c02');
 });
 
 test('the C01 plans use auto and keep repeated runs limited to C01', async () => {
@@ -41,7 +49,7 @@ test('the C01 plans use auto and keep repeated runs limited to C01', async () =>
   const repeated = JSON.parse(await readFile(join(codingTasks, '..', 'coding-c01-repeat-plan.json'), 'utf8'));
   assert.equal(once.policy_mode, 'auto');
   assert.equal(once.attempts_per_task, 1);
-  assert.deepEqual(once.tasks.map((task) => task.id), ['c01']);
+  assert.deepEqual(once.tasks.map((task) => task.id), ['c01', 'c02']);
   assert.equal(repeated.policy_mode, 'auto');
   assert.equal(repeated.attempts_per_task, 3);
   assert.deepEqual(repeated.tasks.map((task) => task.id), ['c01']);
