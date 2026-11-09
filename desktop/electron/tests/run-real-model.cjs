@@ -461,6 +461,58 @@ async function verifyExternalControlEventGap({ observerSessionId, draftAwaySessi
     const scroller = document.querySelector('[data-virtuoso-scroller="true"]');
     return scroller !== null && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 40;
   })()`, 5_000, 'external_gap_transcript_not_at_latest');
+  await evaluate(`(() => {
+    const row = [...document.querySelectorAll('.row.answer[data-kind="answer"]')]
+      .find(item => item.textContent.includes(${JSON.stringify(finalGapMarker)}));
+    row?.scrollIntoView({ block: 'end', behavior: 'auto' });
+    return row !== undefined;
+  })()`);
+  await evaluate(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+  const gapVisibilityExpression = `(() => {
+    const matches = [...document.querySelectorAll('.row.answer[data-kind="answer"]')]
+      .filter(item => item.textContent.includes(${JSON.stringify(finalGapMarker)}));
+    const row = matches[0];
+    const scroller = row?.closest('[data-virtuoso-scroller="true"]');
+    const rowBounds = row?.getBoundingClientRect();
+    const scrollBounds = scroller?.getBoundingClientRect();
+    const style = row === undefined ? null : getComputedStyle(row);
+    const ancestors = [];
+    for (let item = row, depth = 0; item !== null && item !== undefined && depth < 6; item = item.parentElement, depth += 1) {
+      const itemStyle = getComputedStyle(item);
+      const bounds = item.getBoundingClientRect();
+      ancestors.push({ tag: item.tagName, className: String(item.className ?? ''), display: itemStyle.display,
+        visibility: itemStyle.visibility, opacity: itemStyle.opacity, overflowY: itemStyle.overflowY,
+        bounds: { top: bounds.top, bottom: bounds.bottom, height: bounds.height } });
+    }
+    return {
+      matchingRowCount: matches.length,
+      visibleInTranscript: row !== undefined && scroller !== null && rowBounds !== undefined && scrollBounds !== undefined
+        && rowBounds.height > 0 && rowBounds.bottom > scrollBounds.top && rowBounds.top < scrollBounds.bottom
+        && style?.display !== 'none' && style?.visibility !== 'hidden' && Number(style?.opacity ?? '1') > 0,
+      rowBounds: rowBounds === undefined ? null : { top: rowBounds.top, bottom: rowBounds.bottom, height: rowBounds.height },
+      scrollBounds: scrollBounds === undefined ? null : { top: scrollBounds.top, bottom: scrollBounds.bottom },
+      scrollMetrics: scroller === null || scroller === undefined ? null : {
+        top: scroller.scrollTop, height: scroller.clientHeight, scrollHeight: scroller.scrollHeight,
+      },
+      rowStyle: style === null ? null : { display: style.display, visibility: style.visibility, opacity: style.opacity, color: style.color },
+      ancestors,
+      marker: row?.textContent.includes(${JSON.stringify(finalGapMarker)}) === true,
+    };
+  })()`;
+  const visibilityStartedAt = Date.now();
+  const visibilityDeadline = visibilityStartedAt + 5_000;
+  let renderedGapState = await evaluate(gapVisibilityExpression);
+  while (!renderedGapState.visibleInTranscript && Date.now() < visibilityDeadline) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    renderedGapState = await evaluate(gapVisibilityExpression);
+  }
+  const renderedAssistantVisibilityWaitMs = Date.now() - visibilityStartedAt;
+  if (!renderedGapState.visibleInTranscript) {
+    writeFileSync(join(evidenceRoot, 'external-control-gap-not-visible.png'), (await mainWindow.webContents.capturePage()).toPNG());
+    writeFileSync(join(evidenceRoot, 'external-control-gap-not-visible.json'), `${JSON.stringify(renderedGapState, null, 2)}\n`, 'utf8');
+  }
+  assert.equal(renderedGapState.visibleInTranscript, true,
+    `the recovered assistant row must be visible in the transcript: ${JSON.stringify(renderedGapState)}`);
   const image = await mainWindow.webContents.capturePage();
   writeFileSync(join(evidenceRoot, 'external-control-event-gap.png'), image.toPNG());
   let oldControllerRefused = false;
@@ -492,6 +544,8 @@ async function verifyExternalControlEventGap({ observerSessionId, draftAwaySessi
     sessionUserRecords: gapUser.length,
     sessionAssistantRecords: gapAssistant.length,
     renderedAssistantRows: renderedGapRows,
+    renderedAssistantRowVisible: renderedGapState.visibleInTranscript,
+    renderedAssistantVisibilityWaitMs,
     oldControllerRefused,
   };
 }
