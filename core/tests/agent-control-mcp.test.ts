@@ -69,7 +69,7 @@ type ControlConfiguration = {
   delegation: DelegationView;
 };
 
-type SessionRecordLine = { kind?: string; origin?: string; text?: string; run?: { runId?: string } };
+type SessionRecordLine = { kind?: string; origin?: string; text?: string; status?: string; run?: { runId?: string } };
 
 async function fixture(run: (paths: FixturePaths) => unknown | Promise<unknown>) {
   await mkdir(testplace, { recursive: true });
@@ -92,9 +92,15 @@ async function connect(projectRoot: string, home: string, grantId: string | unde
   });
   const client = new Client({ name: 'agent-control-acceptance', version: 'test' });
   let stderr = '';
+  let childClosedAtMs: number | undefined;
   transport.stderr?.on('data', (chunk) => { stderr += chunk.toString(); });
   await client.connect(transport);
-  return { client, transport, stderr: () => stderr };
+  const onClose = transport.onclose;
+  transport.onclose = () => {
+    childClosedAtMs = Date.now();
+    onClose?.();
+  };
+  return { client, transport, stderr: () => stderr, childClosedAt: () => childClosedAtMs };
 }
 
 async function startModelServer({ questionFirst = true, outputChunks = 1 }: { questionFirst?: boolean; outputChunks?: number } = {}) {
@@ -606,7 +612,7 @@ test('MCP Controller reports a clipped event cursor and pages the retained Host 
   });
 });
 
-test('MCP Controller reconnects to the durable Run after stdio disconnect without replay', async () => {
+test('MCP Controller reconnects to the durable Run after stdio disconnect without replay', async (t) => {
   await fixture(async ({ projectRoot, home }) => {
     const model = await startHeldModelServer();
     const previousHome = process.env.LIGULE_HOME;
@@ -636,6 +642,8 @@ test('MCP Controller reconnects to the durable Run after stdio disconnect withou
         'first_controller_connect', 180_000,
       );
       firstClient = first.client;
+      const firstProcessId = first.transport.pid;
+      assert.equal(typeof firstProcessId, 'number', 'first MCP Server process must be observable');
       const made = await callTool(first.client, 'ligule_session_create', { projectRoot });
       assert.equal(made.isError, undefined, `${JSON.stringify(made)}\n${first.stderr()}`);
       const sessionId = made.structuredContent.sessionId;
@@ -649,8 +657,29 @@ test('MCP Controller reconnects to the durable Run after stdio disconnect withou
       const runId = started.structuredContent.receipt.runId;
       await withTimeout(model.requestStarted, 'provider_request_started', 10_000);
       assert.equal(model.requests.length, 1);
+      let heldStatus: ToolReply | undefined;
+      const deltaDeadline = Date.now() + 10_000;
+      while (Date.now() < deltaDeadline) {
+        heldStatus = await callTool(first.client, 'ligule_run_status', { operationId });
+        if (heldStatus.structuredContent.events.some((event) => {
+          const value = event as unknown as { kind: string; text?: string };
+          return value.kind === 'model.delta' && value.text?.includes('held until the Controller disconnects') === true;
+        })) break;
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+      }
+      assert.equal(heldStatus?.structuredContent.state, 'running', 'the held Provider response must still be in flight');
+      assert.equal(heldStatus?.structuredContent.events.some((event) => {
+        const value = event as unknown as { kind: string; text?: string };
+        return value.kind === 'model.delta' && value.text?.includes('held until the Controller disconnects') === true;
+      }), true, 'the Host must have consumed the partial Provider delta before disconnect');
 
+      const disconnectStartedAt = Date.now();
       await withTimeout(first.client.close(), 'first_controller_disconnect', 10_000);
+      const childClosedAt = first.childClosedAt();
+      assert.ok(childClosedAt !== undefined, 'the stdio transport must observe the Controller child process exit');
+      const disconnectDurationMs = childClosedAt - disconnectStartedAt;
+      assert.ok(disconnectDurationMs < 2_000,
+        `the Controller must exit before StdioClientTransport sends SIGTERM; close took ${disconnectDurationMs}ms`);
       firstClient = undefined;
       await withTimeout(model.responseClosed, 'provider_response_closed_after_disconnect', 10_000);
 
@@ -671,11 +700,17 @@ test('MCP Controller reconnects to the durable Run after stdio disconnect withou
       assert.equal(restored.isError, undefined, `${JSON.stringify(restored)}\n${second.stderr()}`);
       const receipt = restored.structuredContent.receipt as { runId: string; state: string };
       assert.equal(receipt.runId, runId);
-      assert.ok(['failed', 'cancelled', 'interrupted'].includes(receipt.state), `Run did not settle after disconnect: ${receipt.state}`);
+      assert.equal(receipt.state, 'cancelled', 'a graceful stdio disconnect must persist cancellation, not recovery interruption');
       const transcript = await callTool(second.client, 'ligule_session_read', { sessionId, limit: 50 });
       const records = transcript.structuredContent.records.map((item) => JSON.parse(item.json) as SessionRecordLine);
-      assert.equal(records.filter((item) => item.kind === 'user' && item.run?.runId === runId).length, 1);
+      const userRecords = records.filter((item) => item.kind === 'user' && item.run?.runId === runId);
+      const turn = records.findLast((item) => item.kind === 'turn');
+      assert.equal(userRecords.length, 1);
+      assert.equal(turn?.status, 'cancelled');
       assert.equal(model.requests.length, 1, 'reconnecting and reading the receipt must not replay the Provider Run');
+      t.diagnostic(`p6.controller_reconnect=${JSON.stringify({ firstProcessId, disconnectDurationMs,
+        oldOperationCode: codeOf(staleOperation), runId: receipt.runId, receiptState: receipt.state,
+        turnStatus: turn?.status, userRecords: userRecords.length, providerRequests: model.requests.length })}`);
     } finally {
       await firstClient?.close().catch(() => undefined);
       await secondClient?.close().catch(() => undefined);
