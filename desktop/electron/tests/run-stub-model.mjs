@@ -19,6 +19,10 @@ const repositoryRoot = dirname(desktopDirectory);
 const testRoot = resolve(process.env.LIGULE_DESKTOP_TEST_ROOT ?? join(desktopDirectory, 'testplace'));
 const temporaryParent = resolve(process.env.LIGULE_DESKTOP_TEST_TEMP ?? join(testRoot, 'tmp'));
 const evidenceParent = resolve(process.env.LIGULE_DESKTOP_TEST_EVIDENCE ?? join(testRoot, 'readings'));
+const workspaceRegistrationTimeoutMs = Number(process.env.LIGULE_DESKTOP_TEST_STARTUP_TIMEOUT_MS ?? 60_000);
+if (!Number.isSafeInteger(workspaceRegistrationTimeoutMs) || workspaceRegistrationTimeoutMs < 1) {
+  throw new Error('stub_model_startup_timeout_invalid');
+}
 const executable = resolve(process.env.LIGULE_DESKTOP_TEST_ELECTRON ?? createRequire(join(desktopDirectory, 'package.json'))('electron'));
 const harness = join(testDirectory, 'run-real-model.cjs');
 const node = resolve(process.env.LIGULE_DESKTOP_TEST_NODE
@@ -47,6 +51,7 @@ let hangRequests = false;
 const skillMcpProof = { skillToolAvailable: false, skillActivated: false, mcpInspectAvailable: false, mcpCallAvailable: false, mcpInspectRequested: false };
 const mcpInspectWireName = wireToolName('mcp.inspect');
 const mcpCallWireName = wireToolName('mcp.call');
+let workspaceRegistrationMs = null;
 
 function wireToolName(name) {
   if (/^[A-Za-z0-9_-]{1,64}$/u.test(name)) return name;
@@ -330,6 +335,7 @@ if (externalControlOnly) environment.LIGULE_EXTERNAL_CONTROL_ONLY = '1';
 if (externalControlGapOnly) environment.LIGULE_EXTERNAL_CONTROL_GAP_ONLY = '1';
 
 async function registerIsolatedWorkspace() {
+  const startedAt = process.hrtime.bigint();
   const preflight = spawn(node, [hostEntry, cli], {
     cwd: repositoryRoot,
     env: environment,
@@ -346,7 +352,7 @@ async function registerIsolatedWorkspace() {
     responseTimer = setTimeout(() => {
       preflight.kill();
       reject(new Error(`stub_model_workspace_registration_timeout:stderr=${preflightStderr.slice(-2_000)};stdout=${output.slice(-2_000)}`));
-    }, 60_000);
+    }, workspaceRegistrationTimeoutMs);
     preflight.once('error', error => { clearTimeout(responseTimer); reject(error); });
     preflight.stdout.setEncoding('utf8');
     preflight.stdout.on('data', chunk => {
@@ -387,6 +393,8 @@ async function registerIsolatedWorkspace() {
     if (preflight.exitCode === null) preflight.kill();
     await exit.catch(() => {});
     throw error;
+  } finally {
+    workspaceRegistrationMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
   }
 }
 
@@ -436,6 +444,7 @@ for (const line of standardOutput.split(/\r?\n/u)) {
 
 const report = {
   command: `${process.env.LIGULE_DESKTOP_TEST_NODE === undefined ? relative(repositoryRoot, node) : 'LIGULE_DESKTOP_TEST_NODE'} desktop/electron/tests/run-stub-model.mjs${externalControlGapOnly ? ' --external-control-gap-only' : externalControlOnly ? ' --external-control-only' : ''}`,
+  workspaceRegistrationMs,
   provider: 'local-stub',
   providerNote: '本地 stub 模型：只验证 Desktop 窗口、审批与取消联动，不构成真实模型验收。',
   platform: process.platform,
