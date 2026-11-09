@@ -448,7 +448,7 @@ async function verifyExternalControlEventGap({ observerSessionId, draftAwaySessi
     const image = await mainWindow.webContents.capturePage();
     writeFileSync(join(evidenceRoot, 'external-control-gap-render-failure.png'), image.toPNG());
     writeFileSync(join(evidenceRoot, 'external-control-gap-render-failure.json'), `${JSON.stringify({
-      desktopSessionObserveContainsAssistant: desktopAssistant?.text === expectedGapText,
+      controllerSessionContainsAssistant: gapAssistant[0]?.text === expectedGapText,
       current,
     }, null, 2)}\n`, 'utf8');
     throw Object.assign(error, { diagnostic: JSON.stringify({ current }) });
