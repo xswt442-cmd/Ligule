@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   createConfig, createDecisionChain, createKernel, createObservationLog, createPermissionContext, createTool, deleteTool, editTool, readTool,
   readOnlyTools, resolveRecycler, writeTool, writeTools,
@@ -13,11 +14,15 @@ import type { ToolContext } from '../dist/kernel/kernel.js';
 
 import { cleanSystemTrashEntry, findSystemTrashEntry, removeSystemTrashEntry } from './helpers/system-trash.ts';
 
+const repository = fileURLToPath(new URL('../..', import.meta.url));
+
 async function withWorkspace<TResult>(
   run: (workspace: string) => Promise<TResult>,
   { realRecycleBin = false }: { realRecycleBin?: boolean } = {},
 ): Promise<TResult> {
-  const root = await mkdtemp(join(process.cwd(), 'testplace', 'write-'));
+  const temporaryRoot = join(repository, 'testplace', 'tmp');
+  await mkdir(temporaryRoot, { recursive: true });
+  const root = await mkdtemp(join(temporaryRoot, 'write-'));
   const workspace = join(root, 'workspace');
   const previousXdgData = process.env.XDG_DATA_HOME;
   const originalRecycleSend = windowsRecycleBin.send;
@@ -534,6 +539,32 @@ test('write goes through the kernel and its failures reach the session log', asy
     await kernel.call('read', { path: 'note.txt' });
     assert.deepEqual(await kernel.call('write', { path: 'note.txt', content: 'two' }), { text: 'wrote note.txt (3 bytes)' });
     assert.equal(await readFile(join(workspace, 'note.txt'), 'utf8'), 'two');
+  });
+});
+
+test('Kernel rejects file writes that escape the boundary through parent and link paths', async () => {
+  await withWorkspace(async (workspace) => {
+    const outside = join(workspace, '..', 'outside-write-targets');
+    const target = join(outside, 'note.txt');
+    await mkdir(outside, { recursive: true });
+    await writeFile(target, 'keep outside');
+    await symlink(outside, join(workspace, 'escape'), process.platform === 'win32' ? 'junction' : 'dir');
+
+    const kernel = createKernel({ config: createConfig({ user: { boundary: workspace } }), permission: workspaceWrite });
+    kernel.register(writeTool);
+    try {
+      await assert.rejects(
+        () => kernel.call('write', { path: '../outside-write-targets/note.txt', content: 'overwrite' }),
+        { code: 'path_escapes_boundary' },
+      );
+      await assert.rejects(
+        () => kernel.call('write', { path: 'escape/note.txt', content: 'overwrite' }),
+        { code: 'path_escapes_through_link' },
+      );
+      assert.equal(await readFile(target, 'utf8'), 'keep outside');
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 });
 
