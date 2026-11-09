@@ -48,12 +48,16 @@ test('the C03 fixture distinguishes the unsolved, solved, and regressed states',
   await verifyFixture('c03');
 });
 
+test('the C04 fixture distinguishes the unsolved, solved, and regressed states', async () => {
+  await verifyFixture('c04');
+});
+
 test('the C01 plans use auto and keep repeated runs limited to C01', async () => {
   const once = JSON.parse(await readFile(join(codingTasks, '..', 'coding-plan.json'), 'utf8'));
   const repeated = JSON.parse(await readFile(join(codingTasks, '..', 'coding-c01-repeat-plan.json'), 'utf8'));
   assert.equal(once.policy_mode, 'auto');
   assert.equal(once.attempts_per_task, 1);
-  assert.deepEqual(once.tasks.map((task) => task.id), ['c01', 'c02', 'c03']);
+  assert.deepEqual(once.tasks.map((task) => task.id), ['c01', 'c02', 'c03', 'c04']);
   assert.equal(repeated.policy_mode, 'auto');
   assert.equal(repeated.attempts_per_task, 3);
   assert.deepEqual(repeated.tasks.map((task) => task.id), ['c01']);
