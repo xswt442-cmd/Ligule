@@ -7,6 +7,8 @@ const { app, session } = require('electron');
 
 const repositoryRoot = resolve(__dirname, '../../..');
 const desktopRoot = join(repositoryRoot, 'desktop');
+const hostNodeRuntime = resolve(process.env.LIGULE_DESKTOP_TEST_NODE
+  ?? join(desktopRoot, 'vendor', 'node', process.platform === 'win32' ? 'node.exe' : 'node'));
 const workspaceRoot = process.env.LIGULE_REAL_MODEL_WORKSPACE;
 const evidenceRoot = process.env.LIGULE_REAL_MODEL_EVIDENCE;
 const userDataRoot = process.env.LIGULE_REAL_MODEL_USER_DATA;
@@ -211,8 +213,7 @@ async function createApplication() {
     iconPath: join(desktopRoot, 'assets', 'app-icon.png'),
   });
   phase = 'resolve_host_runtime';
-  const node = join(desktopRoot, 'vendor', 'node', process.platform === 'win32' ? 'node.exe' : 'node');
-  const runtime = resolveHostRuntime({ repositoryRoot, node, environment: process.env });
+  const runtime = resolveHostRuntime({ repositoryRoot, node: hostNodeRuntime, environment: process.env });
   host = new HostController({
     ...runtime,
     hostEntry: runtime.hostEntry,
@@ -1009,7 +1010,7 @@ async function recordReport(exitCode) {
     platform: process.platform,
     release: require('node:os').release(),
     electron: process.versions.electron,
-    hostNode: require('node:child_process').execFileSync(join(desktopRoot, 'vendor', 'node', process.platform === 'win32' ? 'node.exe' : 'node'), ['--version'], { encoding: 'utf8', windowsHide: process.platform === 'win32' }).trim(),
+    hostNode: require('node:child_process').execFileSync(hostNodeRuntime, ['--version'], { encoding: 'utf8', windowsHide: process.platform === 'win32' }).trim(),
     applicationPage: security.APP_PAGE,
     provider: providerLabel,
     workspace: workspaceRoot,
