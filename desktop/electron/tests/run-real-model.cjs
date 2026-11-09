@@ -27,8 +27,11 @@ const hostRequests = [];
 // 真实模型验收和本地 stub 回归共用窗口驱动程序；提供方标签只用于报告。
 const providerLabel = process.env.LIGULE_MODEL_PROVIDER_LABEL ?? '真实模型';
 const evidenceName = process.env.LIGULE_MODEL_EVIDENCE_NAME ?? 'real-model';
+const workspaceStartupTimeoutMs = Number(process.env.LIGULE_DESKTOP_TEST_STARTUP_TIMEOUT_MS ?? 60_000);
+if (!Number.isSafeInteger(workspaceStartupTimeoutMs) || workspaceStartupTimeoutMs < 1) throw new Error('desktop_test_startup_timeout_invalid');
 const hostResponses = [];
 let nextExternalSendResponseGate = null;
+let workspaceReadinessMs = null;
 
 function holdNextExternalSendResponse() {
   if (nextExternalSendResponseGate !== null) throw Object.assign(new Error('external_send_response_gate_already_set'), { code: 'external_send_response_gate_already_set' });
@@ -1014,6 +1017,7 @@ async function recordReport(exitCode) {
     applicationPage: security.APP_PAGE,
     provider: providerLabel,
     workspace: workspaceRoot,
+    workspaceReadinessMs,
     policy: 'ask',
     cspObserved: typeof observedCsp === 'string' && observedCsp.includes("default-src 'self'") && observedCsp.includes("script-src 'self'"),
     sessionId,
@@ -1032,7 +1036,9 @@ async function runChecks() {
   assert.equal(preferences.contextIsolation, true);
   assert.equal(preferences.nodeIntegration, false);
 
-  const workspaceRegistration = await requestHost('workspaces.list', {}, 60_000);
+  const workspaceReadinessStartedAt = process.hrtime.bigint();
+  const workspaceRegistration = await requestHost('workspaces.list', {}, workspaceStartupTimeoutMs);
+  workspaceReadinessMs = Number(process.hrtime.bigint() - workspaceReadinessStartedAt) / 1_000_000;
   assert.ok(workspaceRegistration.workspaces.some(item => resolve(item.directory) === resolve(workspaceRoot)), 'isolated_workspace_not_registered');
 
   // 新会话默认只读；审批用例先通过真实设置控件授予工作区文件工具写入权限。
