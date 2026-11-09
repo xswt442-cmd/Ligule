@@ -69,7 +69,7 @@ type ControlConfiguration = {
   delegation: DelegationView;
 };
 
-type SessionRecordLine = { kind?: string; origin?: string; text?: string; status?: string; run?: { runId?: string } };
+type SessionRecordLine = { kind?: string; origin?: string; text?: string; seq?: number; userSeq?: number; status?: string; run?: { runId?: string } };
 
 async function fixture(run: (paths: FixturePaths) => unknown | Promise<unknown>) {
   await mkdir(testplace, { recursive: true });
@@ -92,15 +92,15 @@ async function connect(projectRoot: string, home: string, grantId: string | unde
   });
   const client = new Client({ name: 'agent-control-acceptance', version: 'test' });
   let stderr = '';
-  let childClosedAtMs: number | undefined;
-  transport.stderr?.on('data', (chunk) => { stderr += chunk.toString(); });
-  await client.connect(transport);
+  let childClosedAtNs: bigint | undefined;
   const onClose = transport.onclose;
   transport.onclose = () => {
-    childClosedAtMs = Date.now();
+    childClosedAtNs = process.hrtime.bigint();
     onClose?.();
   };
-  return { client, transport, stderr: () => stderr, childClosedAt: () => childClosedAtMs };
+  transport.stderr?.on('data', (chunk) => { stderr += chunk.toString(); });
+  await client.connect(transport);
+  return { client, transport, stderr: () => stderr, childClosedAt: () => childClosedAtNs };
 }
 
 async function startModelServer({ questionFirst = true, outputChunks = 1 }: { questionFirst?: boolean; outputChunks?: number } = {}) {
@@ -673,13 +673,13 @@ test('MCP Controller reconnects to the durable Run after stdio disconnect withou
         return value.kind === 'model.delta' && value.text?.includes('held until the Controller disconnects') === true;
       }), true, 'the Host must have consumed the partial Provider delta before disconnect');
 
-      const disconnectStartedAt = Date.now();
+      const disconnectStartedAt = process.hrtime.bigint();
       await withTimeout(first.client.close(), 'first_controller_disconnect', 10_000);
       const childClosedAt = first.childClosedAt();
       assert.ok(childClosedAt !== undefined, 'the stdio transport must observe the Controller child process exit');
-      const disconnectDurationMs = childClosedAt - disconnectStartedAt;
-      assert.ok(disconnectDurationMs < 2_000,
-        `the Controller must exit before StdioClientTransport sends SIGTERM; close took ${disconnectDurationMs}ms`);
+      const disconnectDurationMs = Number(childClosedAt - disconnectStartedAt) / 1_000_000;
+      assert.ok(disconnectDurationMs < 1_900,
+        `the Controller must exit with headroom before StdioClientTransport sends SIGTERM; close took ${disconnectDurationMs}ms`);
       firstClient = undefined;
       await withTimeout(model.responseClosed, 'provider_response_closed_after_disconnect', 10_000);
 
@@ -698,7 +698,7 @@ test('MCP Controller reconnects to the durable Run after stdio disconnect withou
 
       const restored = await callTool(second.client, 'ligule_run_get', { sessionId, requestKey });
       assert.equal(restored.isError, undefined, `${JSON.stringify(restored)}\n${second.stderr()}`);
-      const receipt = restored.structuredContent.receipt as { runId: string; state: string };
+      const receipt = restored.structuredContent.receipt as { runId: string; state: string; userSeq: number };
       assert.equal(receipt.runId, runId);
       assert.equal(receipt.state, 'cancelled', 'a graceful stdio disconnect must persist cancellation, not recovery interruption');
       const transcript = await callTool(second.client, 'ligule_session_read', { sessionId, limit: 50 });
@@ -706,6 +706,8 @@ test('MCP Controller reconnects to the durable Run after stdio disconnect withou
       const userRecords = records.filter((item) => item.kind === 'user' && item.run?.runId === runId);
       const turn = records.findLast((item) => item.kind === 'turn');
       assert.equal(userRecords.length, 1);
+      assert.equal(userRecords[0].seq, receipt.userSeq);
+      assert.equal(turn?.userSeq, receipt.userSeq, 'the cancelled turn must belong to the recovered Run Receipt');
       assert.equal(turn?.status, 'cancelled');
       assert.equal(model.requests.length, 1, 'reconnecting and reading the receipt must not replay the Provider Run');
       t.diagnostic(`p6.controller_reconnect=${JSON.stringify({ firstProcessId, disconnectDurationMs,
