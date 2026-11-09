@@ -379,6 +379,119 @@ async function selectNewSessionPermission(profile) {
   })()`, 5_000, 'new_session_permission_not_applied');
 }
 
+async function verifyExternalControlEventGap({ observerSessionId, draftAwaySessionId, mcpClient, takeoverAfter = false }) {
+  await evaluate(`(() => {
+    const item = [...document.querySelectorAll('.session-item')].find(button => button.title.endsWith(${JSON.stringify(` · ${draftAwaySessionId}`)}));
+    item?.click();
+    return item !== undefined;
+  })()`);
+  await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${draftAwaySessionId}`)}) === true
+    && document.querySelector('.external-session-composer') === null`, 10_000, 'external_gap_switch_away_failed');
+  const gapStart = await mcpClient.callTool({ name: 'ligule_run_start', arguments: {
+    sessionId: observerSessionId,
+    input: 'desktop-external-control-gap',
+  } });
+  if (gapStart.isError === true) throw Object.assign(new Error('external_gap_run_start_failed'), { code: JSON.parse(gapStart.content?.[0]?.text ?? '{}').code ?? 'external_gap_run_start_failed' });
+  const gapOperationId = gapStart.structuredContent?.operationId;
+  if (typeof gapOperationId !== 'string') throw Object.assign(new Error('external_gap_operation_id_missing'), { code: 'external_gap_operation_id_missing' });
+  const gapCompleted = await mcpClient.callTool({ name: 'ligule_run_await', arguments: {
+    operationId: gapOperationId, timeoutMs: 20_000,
+  } });
+  if (gapCompleted.isError === true) throw Object.assign(new Error('external_gap_run_await_failed'), { code: JSON.parse(gapCompleted.content?.[0]?.text ?? '{}').code ?? 'external_gap_run_await_failed' });
+  assert.equal(gapCompleted.structuredContent?.state, 'done', 'external_gap_run_did_not_complete');
+  const gapStatus = await mcpClient.callTool({ name: 'ligule_run_status', arguments: {
+    operationId: gapOperationId, after: 0, limit: 50,
+  } });
+  assert.equal(gapStatus.isError, undefined, 'external_gap_status_failed');
+  assert.equal(gapStatus.structuredContent?.eventGap, true, 'the old external Cursor must report a real event gap');
+  assert.ok(gapStatus.structuredContent?.firstAvailableCursor > 1, 'the retained window must begin after the stale Cursor');
+  assert.equal(gapStatus.structuredContent?.events.length, 50, 'the status page remains bounded at 50 events');
+
+  const gapTranscript = await mcpClient.callTool({ name: 'ligule_session_read', arguments: { sessionId: observerSessionId, limit: 50 } });
+  const gapRecords = gapTranscript.structuredContent.records.map(item => JSON.parse(item.json));
+  const gapUser = gapRecords.filter(item => item.kind === 'user' && item.text === 'desktop-external-control-gap');
+  const gapAssistant = gapRecords.filter(item => item.kind === 'assistant'
+    && typeof item.text === 'string' && item.text.includes('P6 desktop retained stream piece 179.'));
+  const expectedGapText = Array.from({ length: 180 }, (_, index) => `P6 desktop retained stream piece ${String(index).padStart(3, '0')}.`).join('');
+  assert.equal(gapUser.length, 1, 'the controller input must be recorded once');
+  assert.equal(gapAssistant.length, 1, 'the final assistant record must be persisted once');
+  assert.equal(gapAssistant[0].text, expectedGapText, 'the persistent Session must retain the complete output');
+  const gapStubState = await fetch(`${process.env.LIGULE_STUB_CONTROL}/state`).then(response => response.json());
+  const gapChunkRequests = gapStubState.externalGapRequests;
+  assert.equal(gapChunkRequests, 1, 'the deterministic Provider streamed one 180-chunk request');
+
+  await evaluate(`(() => {
+    const item = [...document.querySelectorAll('.session-item')].find(button => button.title.endsWith(${JSON.stringify(` · ${observerSessionId}`)}));
+    item?.click();
+    return item !== undefined;
+  })()`);
+  await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${observerSessionId}`)}) === true`, 10_000, 'external_gap_return_failed');
+  await waitFor(`(() => {
+    const note = document.querySelector('.external-control-note')?.textContent ?? '';
+    return note.includes('Some live updates left the event window') || note.includes('部分实时更新已滚出事件窗口');
+  })()`, 15_000, 'external_gap_warning_missing');
+  const finalGapMarker = 'P6 desktop retained stream piece 179.';
+  try {
+    await waitFor(`([...document.querySelectorAll('.row.answer[data-kind="answer"]')]
+      .some(row => row.textContent.includes(${JSON.stringify(finalGapMarker)})))`, 15_000, 'external_gap_transcript_not_rendered');
+  } catch (error) {
+    const current = await evaluate(`({
+      activeSession: document.querySelector('.session-item.active')?.title ?? null,
+      gapNote: document.querySelector('.external-control-note')?.textContent ?? null,
+      answerRows: [...document.querySelectorAll('.row.answer[data-kind="answer"]')].map(row => row.textContent.slice(-120)),
+      latestVisibleText: document.querySelector('.center')?.innerText.slice(-1_200) ?? '',
+    })`);
+    const image = await mainWindow.webContents.capturePage();
+    writeFileSync(join(evidenceRoot, 'external-control-gap-render-failure.png'), image.toPNG());
+    writeFileSync(join(evidenceRoot, 'external-control-gap-render-failure.json'), `${JSON.stringify({
+      desktopSessionObserveContainsAssistant: desktopAssistant?.text === expectedGapText,
+      current,
+    }, null, 2)}\n`, 'utf8');
+    throw Object.assign(error, { diagnostic: JSON.stringify({ current }) });
+  }
+  const renderedGapRows = await evaluate(`([...document.querySelectorAll('.row.answer[data-kind="answer"]')]
+    .filter(row => row.textContent.includes(${JSON.stringify(finalGapMarker)})).length)`);
+  assert.equal(renderedGapRows, 1, 'the recovered assistant record is rendered exactly once');
+  await evaluate(`document.querySelector('.jump-latest')?.click(); true`);
+  await waitFor(`(() => {
+    const scroller = document.querySelector('[data-virtuoso-scroller="true"]');
+    return scroller !== null && scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop <= 40;
+  })()`, 5_000, 'external_gap_transcript_not_at_latest');
+  const image = await mainWindow.webContents.capturePage();
+  writeFileSync(join(evidenceRoot, 'external-control-event-gap.png'), image.toPNG());
+  let oldControllerRefused = false;
+  if (takeoverAfter) {
+    await evaluate(`(() => {
+      const button = [...document.querySelectorAll('.external-control-head button')].find(item => /接管会话|Take over/u.test(item.textContent ?? ''));
+      button?.click();
+      return button !== undefined;
+    })()`);
+    await waitFor(`document.querySelector('.confirm .confirm-lead')?.textContent.includes('停止外控') === true
+      || document.querySelector('.confirm .confirm-lead')?.textContent.includes('Stop external control') === true`, 5_000, 'external_gap_takeover_confirmation_missing');
+    await evaluate(`(() => {
+      const button = [...document.querySelectorAll('.confirm-actions button')].find(item => /接管|Take over/u.test(item.textContent ?? ''));
+      button?.click();
+      return button !== undefined;
+    })()`);
+    await waitFor(`document.querySelector('.external-control') === null
+      && document.querySelector('textarea.composer-input')?.readOnly === false`, 20_000, 'external_gap_takeover_not_completed');
+    const refused = await mcpClient.callTool({ name: 'ligule_run_start', arguments: { sessionId: observerSessionId, input: 'after gap takeover' } });
+    assert.equal(refused.isError, true, 'the previous Controller must lose write access after takeover');
+    assert.equal(JSON.parse(refused.content?.[0]?.text ?? '{}').code, 'control_session_taken_over');
+    oldControllerRefused = true;
+  }
+  return {
+    firstAvailableCursor: gapStatus.structuredContent.firstAvailableCursor,
+    statusEventCount: gapStatus.structuredContent.events.length,
+    providerChunks: 180,
+    providerRequests: gapChunkRequests,
+    sessionUserRecords: gapUser.length,
+    sessionAssistantRecords: gapAssistant.length,
+    renderedAssistantRows: renderedGapRows,
+    oldControllerRefused,
+  };
+}
+
 async function verifyExternalSessionControl() {
   const coreRequire = createRequire(join(repositoryRoot, 'core', 'package.json'));
   const { Client } = coreRequire('@modelcontextprotocol/sdk/client');
@@ -481,6 +594,11 @@ async function verifyExternalSessionControl() {
       return details?.open === true && (text.includes('权限上限') || text.includes('Permission ceiling'));
     })()`, 10_000, 'external_session_grant_details_missing');
 
+    if (process.env.LIGULE_EXTERNAL_CONTROL_GAP_ONLY === '1') {
+      const gapMetrics = await verifyExternalControlEventGap({ observerSessionId, draftAwaySessionId, mcpClient, takeoverAfter: true });
+      return `Desktop 外控缺口恢复通过：${JSON.stringify(gapMetrics)}。真实 Electron 窗口由本地 Stub Provider 驱动。`;
+    }
+
     const baseline = (await fetch(`${process.env.LIGULE_STUB_CONTROL}/state`).then(response => response.json())).requests;
     const started = await mcpClient.callTool({ name: 'ligule_run_start', arguments: {
       sessionId: observerSessionId,
@@ -528,10 +646,21 @@ async function verifyExternalSessionControl() {
       if (!questionPending) throw Object.assign(error, { code: 'external_control_question_not_pending', diagnostic });
       throw Object.assign(error, { diagnostic });
     }
-    await waitFor(`(() => {
-      const source = document.querySelector('.row.question[data-source="controller"] .question-source')?.textContent ?? '';
-      return source.includes('外部 Agent') || source.includes('External agent');
-    })()`, 10_000, 'external_controller_message_source_not_visible');
+    try {
+      await waitFor(`(() => {
+        const source = document.querySelector('.row.question[data-source="controller"] .question-source')?.textContent ?? '';
+        return source.includes('外部 Agent') || source.includes('External agent');
+      })()`, 10_000, 'external_controller_message_source_not_visible');
+    } catch (error) {
+      const sourceRows = await evaluate(`([...document.querySelectorAll('.row.question')].map(row => ({
+        source: row.dataset.source ?? null, className: row.className, text: row.textContent,
+      })))`);
+      const liveQuestion = await evaluate(`document.querySelector('.external-control .question')?.textContent ?? null`);
+      const image = await mainWindow.webContents.capturePage();
+      writeFileSync(join(evidenceRoot, 'external-controller-source-missing.png'), image.toPNG());
+      writeFileSync(join(evidenceRoot, 'external-controller-source-missing.json'), `${JSON.stringify({ sourceRows, liveQuestion }, null, 2)}\n`, 'utf8');
+      throw Object.assign(error, { diagnostic: JSON.stringify({ sourceRows, liveQuestion }) });
+    }
     const questionDraft = 'desktop-external-question-draft';
     const enteredQuestion = await evaluate(`(() => {
       const card = document.querySelector('.external-control .question');
@@ -619,6 +748,7 @@ async function verifyExternalSessionControl() {
     assert.equal(userRecords.some(item => item.origin === 'controller' && item.text === 'desktop-external-control-question'), true, 'external_controller_origin_missing');
     assert.equal(userRecords.some(item => item.origin === 'human' && item.text === 'desktop-human-control-followup'), true, 'human_origin_missing');
     assert.equal(userRecords.some(item => item.origin === 'human' && item.text === laterDraft), false, 'newer_external_guidance_must_remain_unsent');
+    const gapMetrics = await verifyExternalControlEventGap({ observerSessionId, draftAwaySessionId, mcpClient });
 
     const approvalStart = await mcpClient.callTool({ name: 'ligule_run_start', arguments: {
       sessionId: observerSessionId,
@@ -690,7 +820,7 @@ async function verifyExternalSessionControl() {
         return active?.title.endsWith(${JSON.stringify(` · ${previousSessionId}`)}) === true && input?.readOnly === false;
       })()`, 10_000, 'observer_previous_session_restore_failed');
     }
-    return '真实 Electron 窗口验证普通会话与外控会话的问题草稿切换会话后保留，并覆盖一次性 fetch 审批、排队消息、取消和接管；批准的请求访问隔离本机测试端点，接管后原 MCP Host 的写入请求被拒绝。模型由本地固定 SSE stub 驱动，不构成真实模型验收';
+    return `真实 Electron 窗口验证外控事件缺口提示与持久转录恢复；gap=${JSON.stringify(gapMetrics)}；并覆盖草稿切换、fetch 审批、队列、取消和接管。Provider 为本地固定 SSE stub，不构成真实模型验收。`;
   } finally {
     await fetch(`${process.env.LIGULE_STUB_CONTROL}/hang`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hang: false }) }).catch(() => {});
     await mcpClient.close().catch(() => {});
