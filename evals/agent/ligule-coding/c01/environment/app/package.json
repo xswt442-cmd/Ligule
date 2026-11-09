@@ -1,0 +1,8 @@
+{
+  "name": "ligule-p1-c01",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  }
+}

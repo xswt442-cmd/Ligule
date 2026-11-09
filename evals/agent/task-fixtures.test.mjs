@@ -1,0 +1,48 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { copyFile, cp, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const repository = fileURLToPath(new URL('../..', import.meta.url));
+const codingTasks = join(repository, 'evals', 'agent', 'ligule-coding');
+const temporaryRoot = join(repository, 'testplace', 'tmp');
+
+function runVerifier(taskDirectory, workspace) {
+  return spawnSync(process.execPath, [join(taskDirectory, 'tests', 'verify.mjs'), workspace], {
+    cwd: workspace,
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+}
+
+test('the C01 fixture distinguishes the unsolved, solved, and regressed states', async () => {
+  const taskDirectory = join(codingTasks, 'c01');
+  await mkdir(temporaryRoot, { recursive: true });
+  const temporaryDirectory = await mkdtemp(join(temporaryRoot, 'ligule-p1-c01-'));
+  const workspace = join(temporaryDirectory, 'workspace');
+  try {
+    await cp(join(taskDirectory, 'environment', 'app'), workspace, { recursive: true });
+    assert.notEqual(runVerifier(taskDirectory, workspace).status, 0, 'the initial task must fail its verifier');
+
+    await copyFile(join(taskDirectory, 'solution', 'app', 'src', 'contact.mjs'), join(workspace, 'src', 'contact.mjs'));
+    assert.equal(runVerifier(taskDirectory, workspace).status, 0, 'the reference behavior must pass independently');
+
+    await copyFile(join(taskDirectory, 'environment', 'app', 'src', 'contact.mjs'), join(workspace, 'src', 'contact.mjs'));
+    assert.notEqual(runVerifier(taskDirectory, workspace).status, 0, 'a regression must fail verification');
+  } finally {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test('the C01 plans use auto and keep repeated runs limited to C01', async () => {
+  const once = JSON.parse(await readFile(join(codingTasks, '..', 'coding-plan.json'), 'utf8'));
+  const repeated = JSON.parse(await readFile(join(codingTasks, '..', 'coding-c01-repeat-plan.json'), 'utf8'));
+  assert.equal(once.policy_mode, 'auto');
+  assert.equal(once.attempts_per_task, 1);
+  assert.deepEqual(once.tasks.map((task) => task.id), ['c01']);
+  assert.equal(repeated.policy_mode, 'auto');
+  assert.equal(repeated.attempts_per_task, 3);
+  assert.deepEqual(repeated.tasks.map((task) => task.id), ['c01']);
+});
