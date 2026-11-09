@@ -137,6 +137,47 @@ async function startModelServer({ questionFirst = true, outputChunks = 1 }: { qu
   };
 }
 
+async function startHeldModelServer() {
+  const requests: unknown[] = [];
+  let resolveRequestStarted!: () => void;
+  let resolveResponseClosed!: () => void;
+  const requestStarted = new Promise<void>((resolveStarted) => { resolveRequestStarted = resolveStarted; });
+  const responseClosed = new Promise<void>((resolveClosed) => { resolveResponseClosed = resolveClosed; });
+  const server = createServer(async (request, response) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of request) chunks.push(chunk);
+    requests.push(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+    response.once('close', resolveResponseClosed);
+    response.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
+    response.write(`data: ${JSON.stringify({ choices: [{ index: 0, delta: { content: 'held until the Controller disconnects' } }] })}\n\n`);
+    resolveRequestStarted();
+  });
+  await new Promise<void>((resolveListen, rejectListen) => {
+    server.once('error', rejectListen);
+    server.listen(0, '127.0.0.1', () => resolveListen());
+  });
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('test_provider_address_missing');
+  return {
+    baseURL: `http://127.0.0.1:${address.port}/v1`,
+    requests,
+    requestStarted,
+    responseClosed,
+    async close() {
+      server.closeAllConnections();
+      await new Promise<void>((resolveClose, rejectClose) => server.close((error) => error ? rejectClose(error) : resolveClose()));
+    },
+  };
+}
+
+function withTimeout<T>(pending: Promise<T>, label: string, timeoutMs: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    pending,
+    new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs); }),
+  ]).finally(() => { if (timer !== undefined) clearTimeout(timer); });
+}
+
 function codeOf(result: unknown) {
   const first = (result as { content?: { type: string; text?: string }[] }).content?.find((item) => item.type === 'text');
   if (first === undefined) return undefined;
@@ -558,6 +599,86 @@ test('MCP Controller reports a clipped event cursor and pages the retained Host 
         durableAssistantCharacters: assistant?.text?.length })}`);
     } finally {
       await client?.close();
+      if (previousHome === undefined) delete process.env.LIGULE_HOME;
+      else process.env.LIGULE_HOME = previousHome;
+      await model.close();
+    }
+  });
+});
+
+test('MCP Controller reconnects to the durable Run after stdio disconnect without replay', async () => {
+  await fixture(async ({ projectRoot, home }) => {
+    const model = await startHeldModelServer();
+    const previousHome = process.env.LIGULE_HOME;
+    let firstClient: Client | undefined;
+    let secondClient: Client | undefined;
+    try {
+      await setTrusted(projectRoot, true, join(home, 'tui-trust.json'));
+      await writeFile(join(home, 'config.toml'), [
+        '[model]',
+        'api = "chat-completions"',
+        `baseURL = "${model.baseURL}"`,
+        'model = "agent-control-disconnect-model"',
+        'apiKeyEnv = "LIGULE_AGENT_CONTROL_TEST_KEY"',
+        '',
+        '[loop]',
+        'iterations = 3',
+        'modelCalls = 3',
+        '',
+        '[policy]',
+        'mode = "ask"',
+        '',
+      ].join('\n'));
+      process.env.LIGULE_HOME = home;
+
+      const first = await withTimeout(
+        connect(projectRoot, home, undefined, false, { LIGULE_AGENT_CONTROL_TEST_KEY: 'test-key' }),
+        'first_controller_connect', 180_000,
+      );
+      firstClient = first.client;
+      const made = await callTool(first.client, 'ligule_session_create', { projectRoot });
+      assert.equal(made.isError, undefined, `${JSON.stringify(made)}\n${first.stderr()}`);
+      const sessionId = made.structuredContent.sessionId;
+      const requestKey = 'p6-controller-disconnect';
+      const started = await callTool(first.client, 'ligule_run_start', {
+        sessionId, input: 'P6-held-controller-disconnect', requestKey,
+      });
+      assert.equal(started.isError, undefined, `${JSON.stringify(started)}\n${first.stderr()}`);
+      assert.equal(started.structuredContent.state, 'running');
+      const operationId = started.structuredContent.operationId;
+      const runId = started.structuredContent.receipt.runId;
+      await withTimeout(model.requestStarted, 'provider_request_started', 10_000);
+      assert.equal(model.requests.length, 1);
+
+      await withTimeout(first.client.close(), 'first_controller_disconnect', 10_000);
+      firstClient = undefined;
+      await withTimeout(model.responseClosed, 'provider_response_closed_after_disconnect', 10_000);
+
+      const second = await withTimeout(
+        connect(projectRoot, home, undefined, false, { LIGULE_AGENT_CONTROL_TEST_KEY: 'test-key' }),
+        'second_controller_connect', 180_000,
+      );
+      secondClient = second.client;
+      const opened = await callTool(second.client, 'ligule_session_open', { projectRoot, sessionId });
+      assert.equal(opened.isError, undefined, `${JSON.stringify(opened)}\n${second.stderr()}`);
+      assert.equal(opened.structuredContent.sessionId, sessionId);
+
+      const staleOperation = await callTool(second.client, 'ligule_run_status', { operationId });
+      assert.equal(staleOperation.isError, true);
+      assert.equal(codeOf(staleOperation), 'operation_not_found');
+
+      const restored = await callTool(second.client, 'ligule_run_get', { sessionId, requestKey });
+      assert.equal(restored.isError, undefined, `${JSON.stringify(restored)}\n${second.stderr()}`);
+      const receipt = restored.structuredContent.receipt as { runId: string; state: string };
+      assert.equal(receipt.runId, runId);
+      assert.ok(['failed', 'cancelled', 'interrupted'].includes(receipt.state), `Run did not settle after disconnect: ${receipt.state}`);
+      const transcript = await callTool(second.client, 'ligule_session_read', { sessionId, limit: 50 });
+      const records = transcript.structuredContent.records.map((item) => JSON.parse(item.json) as SessionRecordLine);
+      assert.equal(records.filter((item) => item.kind === 'user' && item.run?.runId === runId).length, 1);
+      assert.equal(model.requests.length, 1, 'reconnecting and reading the receipt must not replay the Provider Run');
+    } finally {
+      await firstClient?.close().catch(() => undefined);
+      await secondClient?.close().catch(() => undefined);
       if (previousHome === undefined) delete process.env.LIGULE_HOME;
       else process.env.LIGULE_HOME = previousHome;
       await model.close();
