@@ -65,3 +65,13 @@ test('coding and canary plans use auto while repeated runs stay limited to C01',
   assert.equal(canary.policy_mode, 'auto');
   assert.deepEqual(canary.tasks.map((task) => task.id), ['canary']);
 });
+
+test('all coding verifier images pin Node 24 for separate execution', async () => {
+  const digest = '361718c444e49af2ca5a110c83ba6a8901143f23ab285ebbef0341f391f482a9';
+  const archive = `ADD --checksum=sha256:${digest} https://nodejs.org/dist/v24.22.2/node-v24.22.2-linux-x64.tar.gz /tmp/node-v24.22.2-linux-x64.tar.gz`;
+  for (const taskId of ['c01', 'c02', 'c03', 'c04']) {
+    const dockerfile = await readFile(join(codingTasks, taskId, 'environment', 'Dockerfile'), 'utf8');
+    assert.ok(dockerfile.includes(archive), `${taskId} must pin the official Node archive digest`);
+    assert.ok(dockerfile.includes('ENV PATH="/opt/node-v24.22.2/bin:${PATH}"'), `${taskId} must expose Node to its separate verifier`);
+  }
+});
