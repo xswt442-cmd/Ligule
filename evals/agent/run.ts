@@ -5,7 +5,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { arch, platform, release } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { activeBenchmarkOwner, benchmarkTimeoutMs, countsOf, createStateWriter, positiveInteger, prepareRunDirectory, providerUrlProblem, readTarballProvenance, runProcess, safeProviderUrl, timeoutBasis } from './lib.ts';
+import { activeBenchmarkOwner, benchmarkTimeoutMs, countsOf, createStateWriter, positiveInteger, prepareRunDirectory, providerUrlProblem, readTarballProvenance, runProcess, safeProviderUrl, setupProxyUrlProblem, timeoutBasis } from './lib.ts';
 import { outputDirectoryFor, writeManifest } from './manifest.ts';
 import type { ManifestPlan, RunIdentity } from './manifest.ts';
 import { policyModeFromPlan } from '../harbor/policy-mode.mjs';
@@ -256,6 +256,8 @@ if (!existsSync(planPath)) throw new Error(`plan_missing:${planPath}`);
   }
   const nodeRuntime = process.env.LIGULE_BENCH_NODE_RUNTIME;
   const nodeRuntimeSha256 = process.env.LIGULE_BENCH_NODE_RUNTIME_SHA256;
+  const setupProxyUrl = process.env.LIGULE_BENCH_SETUP_PROXY_URL;
+  const setupProxyProblem = setupProxyUrlProblem(setupProxyUrl);
   const defaultRunDirectory = join(repository, 'testplace', 'benchmarks', `agent-${new Date().toISOString().replace(/[:.]/g, '-')}`);
   const runDirectory = await prepareRunDirectory(option('output'), force, defaultRunDirectory);
 
@@ -278,6 +280,12 @@ if (!existsSync(planPath)) throw new Error(`plan_missing:${planPath}`);
           ? 'LIGULE_BENCH_NODE_RUNTIME and LIGULE_BENCH_NODE_RUNTIME_SHA256 must be supplied together'
           : `${resolve(nodeRuntime)} sha256=${nodeRuntimeSha256}`,
     },
+    ...(setupProxyUrl === undefined ? {} : {
+      setupProxyUrl: {
+        ok: setupProxyProblem === undefined,
+        detail: setupProxyProblem ?? 'set (value not recorded)',
+      },
+    }),
   };
   if (nodeRuntime !== undefined && nodeRuntimeSha256 !== undefined && existsSync(nodeRuntime)) {
     const actual = await sha256(nodeRuntime);
@@ -363,6 +371,7 @@ if (!existsSync(planPath)) throw new Error(`plan_missing:${planPath}`);
         }),
         ...(process.env.LIGULE_BENCH_BUILD_TOOLS === '1' ? { ligule_install_build_tools: true } : {}),
         ...(process.env.LIGULE_BENCH_APT_MIRROR === undefined ? {} : { ligule_setup_apt_mirror: process.env.LIGULE_BENCH_APT_MIRROR }),
+        ...(setupProxyUrl === undefined ? {} : { ligule_setup_proxy_url: setupProxyUrl }),
       },
       env: { LIGULE_API_KEY: '${LIGULE_API_KEY}' },
     }],

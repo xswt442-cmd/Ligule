@@ -6,7 +6,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { benchmarkTimeoutMs, countsOf, createStateWriter, positiveInteger, prepareRunDirectory, readTarballProvenance, timeoutBasis } from './lib.ts';
+import { benchmarkTimeoutMs, countsOf, createStateWriter, positiveInteger, prepareRunDirectory, readTarballProvenance, setupProxyUrlProblem, timeoutBasis } from './lib.ts';
 import { writeManifest } from './manifest.ts';
 import { policyModeFromPlan } from '../harbor/policy-mode.mjs';
 
@@ -75,6 +75,50 @@ test('benchmark options reject zero repeats and invalid integers', () => {
   assert.throws(() => positiveInteger('1.5', 'total_timeout_ms'), /positive_integer/u);
   assert.equal(positiveInteger('7', 'total_timeout_ms'), 7);
   assert.equal(positiveInteger(undefined, 'total_timeout_ms'), undefined);
+});
+
+test('apt setup proxy accepts only unauthenticated HTTP(S) origins', () => {
+  assert.equal(setupProxyUrlProblem(undefined), undefined);
+  assert.equal(setupProxyUrlProblem('http://http.docker.internal:3128'), undefined);
+  assert.equal(setupProxyUrlProblem('https://proxy.example:8443/'), undefined);
+  assert.notEqual(setupProxyUrlProblem('socks5://proxy.example:1080'), undefined);
+  assert.notEqual(setupProxyUrlProblem('http://user:password@proxy.example:3128'), undefined);
+  assert.notEqual(setupProxyUrlProblem('http://proxy.example:3128/path'), undefined);
+  assert.notEqual(setupProxyUrlProblem('http://proxy.example:3128/?token=secret'), undefined);
+});
+
+test('runner blocks and redacts invalid apt setup proxies before writing a Harbor job', async () => {
+  const temporaryRoot = join(repository, 'testplace', 'tmp');
+  await mkdir(temporaryRoot, { recursive: true });
+  const root = await mkdtemp(join(temporaryRoot, 'ligule-proxy-blocked-'));
+  try {
+    const output = join(root, 'run');
+    const invalidProxy = 'http://proxy-user:private-value@proxy.example:3128';
+    const env: NodeJS.ProcessEnv = { ...process.env, LIGULE_BENCH_SETUP_PROXY_URL: invalidProxy };
+    delete env.LIGULE_API_KEY;
+    delete env.LIGULE_BENCH_BASE_URL;
+    delete env.LIGULE_BENCH_MODEL;
+    delete env.LIGULE_BENCH_TARBALL;
+    const result = run([
+      '--plan', 'evals/agent/canary-plan.json',
+      '--tasks', 'canary',
+      '--dataset-dir', join(repository, 'evals', 'agent', 'canary', 'ligule-canary'),
+      '--output', output,
+    ], { env });
+    assert.equal(result.status, 2, result.stdout + result.stderr);
+    const record = JSON.parse(await readFile(join(output, 'run.json'), 'utf8')) as {
+      executionStatus: string;
+      checks: { setupProxyUrl?: { ok: boolean; detail: string } };
+    };
+    assert.equal(record.executionStatus, 'blocked');
+    assert.equal(record.checks.setupProxyUrl?.ok, false);
+    assert.equal(record.checks.setupProxyUrl?.detail, 'LIGULE_BENCH_SETUP_PROXY_URL must be an unauthenticated HTTP(S) origin');
+    assert.equal(JSON.stringify(record).includes('private-value'), false);
+    assert.equal(`${result.stdout}${result.stderr}`.includes('private-value'), false);
+    await assert.rejects(readFile(join(output, 'job.json'), 'utf8'), { code: 'ENOENT' });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('the outer timeout scales with tasks and concurrency and accepts an explicit override', () => {
