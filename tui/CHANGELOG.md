@@ -8,11 +8,21 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ### 简体中文
 
+**改进**
+
+- `edit` 支持一次精确修改多个唯一且互不重叠的片段；旧单锚点参数仍可用，结果提供有界 Diff。
+- 同一 Host 对同一路径的 `create`、`write`、`edit`、`delete` 按顺序执行；文件操作报错后会复核目标，并区分已确认状态与无法确认的结果。
+
 **修复**
 
 - 外控事件发生缺口后，从 Host 刷新持久转录并按 Session 序号显示尚未见过的记录；过期刷新不会回退当前游标，也不会伪造未持久化的实时增量。
 
 ### English
+
+**Improved**
+
+- `edit` can update multiple unique, non-overlapping text ranges in one exact-match call. The single-anchor form remains supported, and results include a bounded diff.
+- Within one Host, `create`, `write`, `edit`, and `delete` calls targeting the same path run in order. After a filesystem error, the target is rechecked and the result reports a confirmed state or an unknown outcome.
 
 **Fixed**
 

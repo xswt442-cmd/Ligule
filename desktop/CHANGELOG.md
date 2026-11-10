@@ -10,6 +10,8 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 **改进**
 
+- `edit` 支持一次精确修改多个唯一且互不重叠的片段；旧单锚点参数仍可用，结果提供有界 Diff。
+- 同一 Host 对同一路径的 `create`、`write`、`edit`、`delete` 按顺序执行；文件操作报错后会复核目标，并区分已确认状态与无法确认的结果。
 - 外控事件窗口出现缺口时，Desktop 会提示可能缺少未落盘的实时片段，并从 Host 刷新可核验的持久转录；恢复过程保留会话记录顺序。
 
 **修复**
@@ -20,6 +22,8 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 **Improved**
 
+- `edit` can update multiple unique, non-overlapping text ranges in one exact-match call. The single-anchor form remains supported, and results include a bounded diff.
+- Within one Host, `create`, `write`, `edit`, and `delete` calls targeting the same path run in order. After a filesystem error, the target is rechecked and the result reports a confirmed state or an unknown outcome.
 - When external-control events fall outside the retained window, Desktop warns that transient updates may be missing and refreshes the verifiable persisted transcript from the Host while preserving session record order.
 
 **Fixed**
