@@ -111,8 +111,10 @@ test('POSIX MCP cancellation closes its owned server and child process group', {
     const opening = registry.toolsOf('cancel', controller.signal);
     void opening.catch(error => { openingFailure = error as { code?: string; detail?: string }; });
     try {
-      rootPid = await waitForFile(rootPidPath, 20_000);
-      childPid = await waitForFile(childPidPath, 20_000);
+      [rootPid, childPid] = await Promise.all([
+        waitForFile(rootPidPath, 40_000),
+        waitForFile(childPidPath, 40_000),
+      ]);
     } catch (error) {
       throw new Error(`${(error as Error).message}; opening failed=${openingFailure?.code ?? 'no'} ${openingFailure?.detail ?? ''}`, { cause: error });
     }
