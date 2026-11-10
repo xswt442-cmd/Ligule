@@ -6,6 +6,18 @@ This file records user-visible changes for the CLI/npm product only. Desktop ins
 
 ## [Unreleased]
 
+### 简体中文
+
+**修复**
+
+- 外控事件发生缺口后，从 Host 刷新持久转录并按 Session 序号显示尚未见过的记录；过期刷新不会回退当前游标，也不会伪造未持久化的实时增量。
+
+### English
+
+**Fixed**
+
+- After an external-control event gap, TUI refreshes the persisted transcript from the Host and displays unseen records by Session sequence. A stale refresh cannot rewind the cursor, and missing live deltas are never fabricated.
+
 ## [0.1.2] - 2026-11-05
 
 ### 简体中文

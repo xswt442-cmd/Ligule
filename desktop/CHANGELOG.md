@@ -6,6 +6,26 @@ This file records Ligule Desktop installer and application changes only. CLI/TUI
 
 ## [Unreleased]
 
+### 简体中文
+
+**改进**
+
+- 外控事件窗口出现缺口时，Desktop 会提示可能缺少未落盘的实时片段，并从 Host 刷新可核验的持久转录；恢复过程保留会话记录顺序。
+
+**修复**
+
+- 慢速冷启动期间，Host 偏好设置读取与写入使用独立的等待期限，避免读取在 Host 完成初始化前提前失败。
+
+### English
+
+**Improved**
+
+- When external-control events fall outside the retained window, Desktop warns that transient updates may be missing and refreshes the verifiable persisted transcript from the Host while preserving session record order.
+
+**Fixed**
+
+- Host preference reads now have a separate startup allowance from writes, preventing a slow cold start from failing before the Host finishes initializing.
+
 ## [0.1.2] - 2026-11-05
 
 ### 简体中文
