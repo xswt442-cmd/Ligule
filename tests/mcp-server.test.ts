@@ -1053,7 +1053,12 @@ test('operator tools configure real sessions, answer Host interactions, and run 
     const claimedHardDenyTool = await findHistoryRecord(context.client, sessionId,
       (record) => record.kind === 'tool' && record.seq > baselineHardDenyTool.record.seq && record.json.includes('policy-forbidden.txt'));
     assert.ok(claimedHardDenyTool, 'the forged-claim boundary attempt is recorded');
+    const baselineHardDenyResult = JSON.parse(baselineHardDenyTool.record.json).result;
     const claimedHardDenyResult = JSON.parse(claimedHardDenyTool.record.json).result;
+    assert.equal(baselineHardDenyResult.kind, 'failure');
+    assert.equal(baselineHardDenyResult.code, 'path_escapes_boundary');
+    assert.equal(claimedHardDenyResult.kind, 'failure');
+    assert.equal(claimedHardDenyResult.code, 'path_escapes_boundary');
     t.diagnostic(`Controller claim boundary comparison: ${JSON.stringify({
       withoutClaimState: hardDenyDone.state, withClaimState: hardDenyClaimDone.state,
       withoutClaimInteractions: hardDenyDone.pendingInteractions.length,
