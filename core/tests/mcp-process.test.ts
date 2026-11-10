@@ -94,7 +94,7 @@ test('Windows MCP connection failure cleans the captured server process tree', {
   }
 });
 
-test('POSIX MCP cancellation closes its owned server and child process group', { skip: !posixProcessGroupsAvailable, timeout: 60_000 }, async () => {
+test('POSIX MCP cancellation closes its owned server and child process group', { skip: !posixProcessGroupsAvailable, timeout: 60_000 }, async (t) => {
   const scratch = join(process.cwd(), 'testplace');
   await mkdir(scratch, { recursive: true });
   const root = await mkdtemp(join(scratch, 'mcp-posix-cancel-'));
@@ -106,10 +106,15 @@ test('POSIX MCP cancellation closes its owned server and child process group', {
   const controller = new AbortController();
   let rootPid: number;
   let childPid: number;
+  let openingStatus: 'pending' | 'fulfilled' | 'rejected' = 'pending';
   let openingFailure: { code?: string; detail?: string } | undefined;
   try {
+    const startedAt = performance.now();
     const opening = registry.toolsOf('cancel', controller.signal);
-    void opening.catch(error => { openingFailure = error as { code?: string; detail?: string }; });
+    void opening.then(
+      () => { openingStatus = 'fulfilled'; },
+      error => { openingStatus = 'rejected'; openingFailure = error as { code?: string; detail?: string }; },
+    );
     try {
       [rootPid, childPid] = await Promise.all([
         waitForFile(rootPidPath, 40_000),
@@ -118,11 +123,17 @@ test('POSIX MCP cancellation closes its owned server and child process group', {
     } catch (error) {
       throw new Error(`${(error as Error).message}; opening failed=${openingFailure?.code ?? 'no'} ${openingFailure?.detail ?? ''}`, { cause: error });
     }
+    const pidsReadyAt = performance.now();
     assert.equal(processExists(rootPid), true);
     assert.equal(processExists(childPid), true);
+    assert.equal(openingStatus, 'pending', `MCP toolsOf settled before cancellation: ${openingStatus} ${openingFailure?.code ?? ''} ${openingFailure?.detail ?? ''}`);
+    const abortAt = performance.now();
     controller.abort(new Error('test cancellation'));
     await assert.rejects(opening);
+    const openingRejectedAt = performance.now();
     await Promise.all([waitForExit(rootPid), waitForExit(childPid)]);
+    const processesExitedAt = performance.now();
+    t.diagnostic(`MCP cancellation timings: pid-markers=${Math.round(pidsReadyAt - startedAt)}ms, abort-to-rejection=${Math.round(openingRejectedAt - abortAt)}ms, abort-to-process-exit=${Math.round(processesExitedAt - abortAt)}ms`);
   } finally {
     await registry.close().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
