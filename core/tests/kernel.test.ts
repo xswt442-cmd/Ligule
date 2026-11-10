@@ -257,6 +257,31 @@ test('root object anyOf validates mutually exclusive tool argument forms before 
   assert.equal(calls, 2, 'invalid form combinations are rejected before tool execution');
 });
 
+test('an outer object type remains enforced before nested anyOf alternatives', async () => {
+  const kernel = createKernel();
+  let calls = 0;
+  kernel.register(makeTool('typed-union', {
+    parameters: {
+      type: 'object',
+      properties: {
+        value: {
+          type: 'object',
+          anyOf: [
+            { type: 'string' },
+            { type: 'object', properties: { ok: { type: 'boolean' } }, required: ['ok'], additionalProperties: false },
+          ],
+        },
+      },
+      required: ['value'],
+    },
+    run: async () => { calls += 1; return 'accepted'; },
+  }));
+
+  await assert.rejects(kernel.call('typed-union', { value: 'must remain an object' }), { code: 'tool_args_invalid' });
+  assert.equal(await kernel.call('typed-union', { value: { ok: true } }), 'accepted');
+  assert.equal(calls, 1, 'the outer type constraint is enforced before anyOf can accept another type');
+});
+
 test('bounded object arrays validate every item before tool execution', async () => {
   const kernel = createKernel();
   let calls = 0;
