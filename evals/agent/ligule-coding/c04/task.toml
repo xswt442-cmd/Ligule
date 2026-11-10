@@ -19,7 +19,7 @@ environment_mode = "separate"
 [environment]
 build_timeout_sec = 600.0
 network_mode = "allowlist"
-allowed_hosts = ["registry.npmjs.org", "nodejs.org", "cdn.sheetjs.com"]
+allowed_hosts = ["registry.npmjs.org", "nodejs.org", "cdn.sheetjs.com", "mirrors.tuna.tsinghua.edu.cn"]
 workdir = "/app"
 cpus = 1
 memory = "2G"
