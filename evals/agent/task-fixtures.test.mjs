@@ -52,13 +52,16 @@ test('the C04 fixture distinguishes the unsolved, solved, and regressed states',
   await verifyFixture('c04');
 });
 
-test('the C01 plans use auto and keep repeated runs limited to C01', async () => {
+test('coding and canary plans use auto while repeated runs stay limited to C01', async () => {
   const once = JSON.parse(await readFile(join(codingTasks, '..', 'coding-plan.json'), 'utf8'));
   const repeated = JSON.parse(await readFile(join(codingTasks, '..', 'coding-c01-repeat-plan.json'), 'utf8'));
+  const canary = JSON.parse(await readFile(join(codingTasks, '..', 'canary-plan.json'), 'utf8'));
   assert.equal(once.policy_mode, 'auto');
   assert.equal(once.attempts_per_task, 1);
   assert.deepEqual(once.tasks.map((task) => task.id), ['c01', 'c02', 'c03', 'c04']);
   assert.equal(repeated.policy_mode, 'auto');
   assert.equal(repeated.attempts_per_task, 3);
   assert.deepEqual(repeated.tasks.map((task) => task.id), ['c01']);
+  assert.equal(canary.policy_mode, 'auto');
+  assert.deepEqual(canary.tasks.map((task) => task.id), ['canary']);
 });
