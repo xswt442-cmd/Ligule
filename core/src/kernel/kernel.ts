@@ -15,6 +15,7 @@ import { bindScript, requiresManualApprovalForProjectCommand, requiresTrustedWor
 import { boundaryOf, workingDirectoryOf } from '../capability/limits.js';
 import { resolveWithin } from '../capability/paths.js';
 import { isTrusted } from './workspace-trust.js';
+import { createFileWriteQueue, fileWriteTargetKey, type FileWriteQueue } from './file-write-queue.js';
 
 export interface ToolContext {
   readonly config: ConfigSnapshot;
@@ -105,6 +106,8 @@ export interface KernelOptions {
   readonly permission?: PermissionContext;
   readonly permissionForCall?: () => PermissionContext;
   readonly policyOverrideForSession?: () => PolicyMode | null;
+  /** Shared by Sessions that belong to the same Host; omitted Kernels get a private queue. */
+  readonly fileWriteQueue?: FileWriteQueue;
 }
 
 export interface Kernel {
@@ -173,6 +176,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
   const policy = options.policy;
   const permission = options.permission ?? DEFAULT_PERMISSION_CONTEXT;
   const session = options.session;
+  const fileWriteQueue = options.fileWriteQueue ?? createFileWriteQueue();
   const logger = createLogger(options.logger);
   // 文件观察记录与工具表具有相同生命周期；覆盖文件前必须与此前读取的版本匹配。
   const observations = createObservationLog();
@@ -424,7 +428,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       // 配置指定的解释器不可用时返回错误，不自动切换到另一种语法或程序。
       // 参数中声明命令的工具直接取参数；参数不含命令的工具（用户声明的命令工具）
       // 通过 `commandOf` 在选定后端后合成最终命令行，判定与执行用同一段文本。
-      let shell;
+      let shell: ShellSelection | undefined;
       let commandText: string | undefined;
       const declaredCommand = tool.commandArgument !== undefined && typeof args?.[tool.commandArgument] === 'string'
         ? args[tool.commandArgument] as string
@@ -557,12 +561,36 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       };
       let success: ReturnType<typeof resultOf>;
       try {
-          value = await tool.run(args, { ...context, permission: callPermission, signal: options.signal, target: network, shell,
+          const runTool = (runPermission: PermissionContext) => tool.run(args, { ...context, permission: runPermission, signal: options.signal, target: network, shell,
             ...(preflightResult === undefined ? {} : { preflightResult }),
             ...(options.runId === undefined ? {} : { runId: options.runId }),
             ...(options.executionId === undefined ? {} : { executionId: options.executionId }),
             ...(options.callId === undefined ? {} : { callId: options.callId }),
-            ...(approvedScriptBinding === undefined ? {} : { scriptBinding: approvedScriptBinding }), });
+            ...(approvedScriptBinding === undefined ? {} : { scriptBinding: approvedScriptBinding }) });
+          if (['create', 'write', 'edit', 'delete'].includes(name) && typeof args.path === 'string') {
+            const target = await resolveWithin(boundaryOf(config), args.path, { forWrite: true, cwd: workingDirectoryOf(config) });
+            value = await fileWriteQueue.run(target, async () => {
+              const latestPermission = currentPermission();
+              const latestDenial = permissionDenial(latestPermission, tool.access);
+              if (latestDenial !== undefined) {
+                throw new KernelError(latestDenial.code, { detail: latestDenial.reason });
+              }
+              // A queued operation may outlive a path or permission change. Recheck the
+              // effective write target after acquiring the Host-scoped path slot.
+              const currentTarget = await resolveWithin(boundaryOf(config), args.path as string,
+                { forWrite: true, cwd: workingDirectoryOf(config) });
+              if (name !== 'delete' && fileWriteTargetKey(currentTarget) !== fileWriteTargetKey(target)) {
+                throw new KernelError('write_target_changed', { detail: `${args.path} resolved to a different file while waiting for the Host write queue` });
+              }
+              if (options.signal?.aborted) {
+                const reason = options.signal.reason;
+                throw reason instanceof KernelError ? reason : new KernelError('loop_cancelled', { cause: reason });
+              }
+              return await runTool(latestPermission);
+            }, options.signal);
+          } else {
+            value = await runTool(callPermission);
+          }
           success = resultOf(value);
       } catch (error) {
         // 工具抛出未包装的错误时，转换为稳定错误码并将原始错误保存在 cause 中。

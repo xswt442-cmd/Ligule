@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -8,6 +9,8 @@ import {
   createConfig, createDecisionChain, createKernel, createObservationLog, createPermissionContext, createTool, deleteTool, editTool, readTool,
   readOnlyTools, resolveRecycler, writeTool, writeTools,
 } from '../dist/index.js';
+import { createFileWriteQueue } from '../dist/kernel/file-write-queue.js';
+import { withTestFileWriter } from '../dist/tools/write.js';
 import { windowsRecycleBin } from '../dist/capability/recycle.js';
 import type { PolicyAskResult, PolicyQuestion } from '../dist/kernel/policy.js';
 import type { ToolContext } from '../dist/kernel/kernel.js';
@@ -20,7 +23,7 @@ async function withWorkspace<TResult>(
   run: (workspace: string) => Promise<TResult>,
   { realRecycleBin = false }: { realRecycleBin?: boolean } = {},
 ): Promise<TResult> {
-  const temporaryRoot = join(repository, 'testplace', 'tmp');
+  const temporaryRoot = process.env.LIGULE_TEST_TEMP_ROOT ?? join(repository, 'testplace', 'tmp');
   await mkdir(temporaryRoot, { recursive: true });
   const root = await mkdtemp(join(temporaryRoot, 'write-'));
   const workspace = join(root, 'workspace');
@@ -650,6 +653,144 @@ test('write goes through the kernel and its failures reach the session log', asy
     await kernel.call('read', { path: 'note.txt' });
     assert.deepEqual(await kernel.call('write', { path: 'note.txt', content: 'two' }), { text: 'wrote note.txt (3 bytes)' });
     assert.equal(await readFile(join(workspace, 'note.txt'), 'utf8'), 'two');
+  });
+});
+
+test('shared Host write queue lets only one stale whole-file write proceed', async () => {
+  await withWorkspace(async (workspace) => {
+    const original = 'o'.repeat(512 * 1024);
+    const contents = ['a'.repeat(original.length), 'b'.repeat(original.length)];
+    const target = join(workspace, 'note.txt');
+    await writeFile(target, original);
+    const fileWriteQueue = createFileWriteQueue();
+    const kernels = contents.map(() => {
+      const kernel = createKernel({
+        config: createConfig({ user: { boundary: workspace, limits: { readBytes: 1024 * 1024, resultBytes: 2 * 1024 * 1024 } } }),
+        permission: workspaceWrite,
+        fileWriteQueue,
+      });
+      kernel.register(readTool);
+      kernel.register(writeTool);
+      return kernel;
+    });
+    await Promise.all(kernels.map((kernel) => kernel.call('read', { path: 'note.txt' })));
+
+    const outcomes = await Promise.allSettled(kernels.map((kernel, index) => kernel.call('write', { path: 'note.txt', content: contents[index]! })));
+    assert.equal(outcomes.filter((outcome) => outcome.status === 'fulfilled').length, 1);
+    const failed = outcomes.find((outcome) => outcome.status === 'rejected') as PromiseRejectedResult | undefined;
+    assert.equal(failed?.reason?.code, 'write_version_stale');
+    const winner = outcomes.findIndex((outcome) => outcome.status === 'fulfilled');
+    assert.equal(await readFile(target, 'utf8'), contents[winner]);
+  });
+});
+
+test('file mutation rechecks permission after waiting for its Host path slot', async () => {
+  await withWorkspace(async (workspace) => {
+    const target = join(workspace, 'note.txt');
+    await writeFile(target, 'original');
+    let markStarted!: () => void;
+    let releaseQueue!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const hold = new Promise<void>((resolve) => { releaseQueue = resolve; });
+    let currentPermission = workspaceWrite;
+    const queue = {
+      async run<TResult>(_path: string, operation: () => Promise<TResult>) {
+        markStarted();
+        await hold;
+        return operation();
+      },
+    };
+    const kernel = createKernel({
+      config: createConfig({ user: { boundary: workspace } }),
+      permission: workspaceWrite,
+      permissionForCall: () => currentPermission,
+      fileWriteQueue: queue,
+    });
+    kernel.register(editTool);
+    const pending = kernel.call('edit', { path: 'note.txt', anchor: 'original', replacement: 'changed' });
+    await started;
+    currentPermission = createPermissionContext('read-only', 'disabled', {
+      filesystemRead: 'unavailable', filesystemWrite: 'unavailable', network: 'unavailable', process: 'unavailable',
+    });
+    releaseQueue();
+    await assert.rejects(pending, { code: 'permission_read_only' });
+    assert.equal(await readFile(target, 'utf8'), 'original');
+  });
+});
+
+test('a separate process can still change a file between write version check and the actual write', async () => {
+  await withWorkspace(async (workspace) => {
+    const target = join(workspace, 'note.txt');
+    await writeFile(target, 'original');
+    const kernel = createKernel({
+      config: createConfig({ user: { boundary: workspace } }),
+      permission: workspaceWrite,
+    });
+    kernel.register(readTool);
+    kernel.register(withTestFileWriter(writeTool, async (path, content) => {
+        const script = `import { writeFileSync } from 'node:fs'; writeFileSync(${JSON.stringify(path)}, 'external process change')`;
+        execFileSync(process.execPath, ['--input-type=module', '-e', script]);
+        await writeFile(path, content, 'utf8');
+      }));
+    await kernel.call('read', { path: 'note.txt' });
+    await kernel.call('write', { path: 'note.txt', content: 'model replacement' });
+
+    // The Host queue cannot coordinate a different process; it does not provide cross-process CAS.
+    assert.equal(await readFile(target, 'utf8'), 'model replacement');
+  });
+});
+
+test('create, write, and edit report unknown when a failed filesystem write leaves partial content', async () => {
+  await withWorkspace(async (workspace) => {
+    const partialWriter = async (target: string, content: string, exclusive: boolean) => {
+      await writeFile(target, content.slice(0, 3), exclusive ? { encoding: 'utf8', flag: 'wx' } : 'utf8');
+      throw Object.assign(new Error('injected write interruption'), { code: 'EIO' });
+    };
+    const config = createConfig({ user: { boundary: workspace } });
+    const createKernelWithWriter = () => createKernel({ config, permission: workspaceWrite });
+
+    const createKernelInstance = createKernelWithWriter();
+    createKernelInstance.register(withTestFileWriter(createTool, partialWriter));
+    await assert.rejects(createKernelInstance.call('create', { path: 'created.txt', content: 'new complete content' }), { code: 'create_outcome_unknown' });
+    assert.equal(await readFile(join(workspace, 'created.txt'), 'utf8'), 'new');
+
+    await writeFile(join(workspace, 'write.txt'), 'original content');
+    const writeKernel = createKernelWithWriter();
+    writeKernel.register(readTool);
+    writeKernel.register(withTestFileWriter(writeTool, partialWriter));
+    await writeKernel.call('read', { path: 'write.txt' });
+    await assert.rejects(writeKernel.call('write', { path: 'write.txt', content: 'replacement content' }), { code: 'write_outcome_unknown' });
+    assert.equal(await readFile(join(workspace, 'write.txt'), 'utf8'), 'rep');
+
+    await writeFile(join(workspace, 'edit.txt'), 'prefix OLD suffix');
+    const editKernel = createKernelWithWriter();
+    editKernel.register(withTestFileWriter(editTool, partialWriter));
+    await assert.rejects(editKernel.call('edit', { path: 'edit.txt', anchor: 'OLD', replacement: 'NEW VALUE' }), { code: 'edit_outcome_unknown' });
+    assert.equal(await readFile(join(workspace, 'edit.txt'), 'utf8'), 'pre');
+  });
+});
+
+test('write classifies a failed I/O as unchanged or completed only after reading the file back', async () => {
+  await withWorkspace(async (workspace) => {
+    const target = join(workspace, 'note.txt');
+    await writeFile(target, 'original');
+    let completesBeforeThrow = false;
+    const kernel = createKernel({ config: createConfig({ user: { boundary: workspace } }), permission: workspaceWrite });
+    kernel.register(readTool);
+    kernel.register(withTestFileWriter(writeTool, async (path, content) => {
+        if (completesBeforeThrow) await writeFile(path, content, 'utf8');
+        throw Object.assign(new Error('injected write I/O error'), { code: 'EIO' });
+      }));
+    await kernel.call('read', { path: 'note.txt' });
+
+    await assert.rejects(kernel.call('write', { path: 'note.txt', content: 'replacement' }), { code: 'write_failed_unchanged' });
+    assert.equal(await readFile(target, 'utf8'), 'original');
+
+    completesBeforeThrow = true;
+    assert.deepEqual(await kernel.call('write', { path: 'note.txt', content: 'replacement' }), {
+      text: 'wrote note.txt (11 bytes)',
+    });
+    assert.equal(await readFile(target, 'utf8'), 'replacement');
   });
 });
 

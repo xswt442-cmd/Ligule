@@ -16,6 +16,7 @@ interface EditChange { oldText: string; newText: string }
 interface EditArguments { path: string; anchor?: string; replacement?: string; changes?: EditChange[] }
 interface DeleteArguments { path: string }
 const DELETE_TARGET_SNAPSHOT = Symbol('delete-target-snapshot');
+const TEST_FILE_WRITER = Symbol('test-file-writer');
 const MAX_EDIT_CHANGES = 32;
 const MAX_EDIT_CHANGE_BYTES = 64 * 1024;
 const MAX_EDIT_DIFF_CHARACTERS = 8 * 1024;
@@ -33,7 +34,10 @@ interface DeleteTargetSnapshot {
   readonly mtimeMs: number;
   readonly ctimeMs: number;
 }
-type WriteToolContext = Pick<ToolContext, 'config' | 'observations' | 'signal' | 'preflightResult'>;
+type WriteToolContext = Pick<ToolContext, 'config' | 'observations' | 'signal' | 'preflightResult'> & {
+  readonly [TEST_FILE_WRITER]?: FileWriter;
+};
+type FileWriter = (target: string, content: string, exclusive: boolean) => Promise<void>;
 
 interface MatchedEdit extends EditChange {
   readonly index: number;
@@ -126,6 +130,59 @@ function lineCount(text: string): number {
   return /(?:\r\n|\n|\r)$/u.test(text) ? lines - 1 : lines;
 }
 
+type WriteOutcome = 'written' | 'unchanged' | 'unknown';
+
+async function outcomeAfterWriteError(target: string, before: Buffer | undefined, expected: Buffer): Promise<WriteOutcome> {
+  let after: Buffer;
+  try { after = await readFile(target); }
+  catch (error) {
+    if (before === undefined && errorCode(error) === 'ENOENT') return 'unchanged';
+    return 'unknown';
+  }
+  if (after.equals(expected)) return 'written';
+  if (before !== undefined && after.equals(before)) return 'unchanged';
+  return 'unknown';
+}
+
+function writeFailure(operation: 'create' | 'write' | 'edit', path: string, cause: unknown, outcome: Exclude<WriteOutcome, 'written'>): KernelError {
+  if (outcome === 'unchanged') {
+    return new KernelError(`${operation}_failed_unchanged`, {
+      cause,
+      detail: `${path} is confirmed unchanged after the file operation failed; correct the I/O problem before retrying`,
+    });
+  }
+  return new KernelError(`${operation}_outcome_unknown`, {
+    cause,
+    detail: `${path} may have changed partially after the file operation failed; read it again before retrying`,
+  });
+}
+
+async function persistTextFile(
+  target: string,
+  content: string,
+  context: { readonly [TEST_FILE_WRITER]?: FileWriter },
+  exclusive = false,
+): Promise<void> {
+  if (context[TEST_FILE_WRITER] !== undefined) return context[TEST_FILE_WRITER]!(target, content, exclusive);
+  if (exclusive) return writeFile(target, content, { encoding: 'utf8', flag: 'wx' });
+  return writeFile(target, content, 'utf8');
+}
+
+/** Fault-injection adapter for file-write outcome tests; not exposed by the public barrel. */
+export function withTestFileWriter<TTool>(tool: TTool, writer: FileWriter): TTool {
+  if (typeof tool !== 'object' || tool === null || !('run' in tool) || typeof tool.run !== 'function') {
+    throw new TypeError('withTestFileWriter requires a tool definition');
+  }
+  const definition = tool as unknown as ToolDefinition<unknown>;
+  if (!['create', 'write', 'edit'].includes(definition.name)) throw new TypeError('withTestFileWriter requires a built-in file write tool');
+  return {
+    ...definition,
+    run(args: unknown, context: ToolContext) {
+      return definition.run(args, { ...context, [TEST_FILE_WRITER]: writer } as ToolContext);
+    },
+  } as unknown as TTool;
+}
+
 async function deleteTargetSnapshot(args: DeleteArguments, config: ToolContext['config']): Promise<DeleteTargetSnapshot> {
   assertNoLegacyTrashConfig(config);
   const boundary = boundaryOf(config);
@@ -200,17 +257,19 @@ export const createTool = {
     },
     required: ['path', 'content'],
   },
-  async run(args: CreateArguments, { config, observations }: WriteToolContext) {
+  async run(args: CreateArguments, { config, observations, ...context }: WriteToolContext) {
     const boundary = boundaryOf(config);
     const target = await resolveWithin(boundary, args.path, { forWrite: true, cwd: workingDirectoryOf(config) });
     await mkdir(dirname(target), { recursive: true });
     try {
-      await writeFile(target, args.content, { encoding: 'utf8', flag: 'wx' });
+      await persistTextFile(target, args.content, context, true);
     } catch (error) {
       if (errorCode(error) === 'EEXIST') {
         throw new KernelError('create_target_exists', { detail: `${args.path} already exists; use write to replace its whole content or edit to change one part of it` });
       }
-      throw error;
+      const expected = Buffer.from(args.content, 'utf8');
+      const outcome = await outcomeAfterWriteError(target, undefined, expected);
+      if (outcome !== 'written') throw writeFailure('create', args.path, error, outcome);
     }
     observations?.observe(target, versionOf(Buffer.from(args.content, 'utf8')));
     return { text: `created ${toPosix(relative(boundary, target))} (${Buffer.byteLength(args.content, 'utf8')} bytes)` };
@@ -232,7 +291,7 @@ export const writeTool = {
   // `write` 仅修改已存在文件；新建由 `create` 处理。
   // 覆盖前必须匹配此前完整读取时记录的版本，拒绝使用过时内容覆盖文件。
   // 版本检查与写入不是底层原子操作，不能防止并发写入之间的竞态。
-  async run(args: WriteArguments, { config, observations }: WriteToolContext) {
+  async run(args: WriteArguments, { config, observations, ...context }: WriteToolContext) {
     const boundary = boundaryOf(config);
     const target = await resolveWithin(boundary, args.path, { forWrite: true, cwd: workingDirectoryOf(config) });
     let before;
@@ -250,8 +309,13 @@ export const writeTool = {
     if (observed !== versionOf(before)) {
       throw new KernelError('write_version_stale', { detail: `${args.path} changed since it was read; read it again before replacing its content` });
     }
-    await writeFile(target, args.content, 'utf8');
-    observations?.observe(target, versionOf(Buffer.from(args.content, 'utf8')));
+    const expected = Buffer.from(args.content, 'utf8');
+    try { await persistTextFile(target, args.content, context); }
+    catch (error) {
+      const outcome = await outcomeAfterWriteError(target, before, expected);
+      if (outcome !== 'written') throw writeFailure('write', args.path, error, outcome);
+    }
+    observations?.observe(target, versionOf(expected));
     return { text: `wrote ${toPosix(relative(boundary, target))} (${Buffer.byteLength(args.content, 'utf8')} bytes)` };
   },
 } satisfies ToolDefinition<WriteArguments>;
@@ -303,7 +367,7 @@ export const editTool = {
       throw new KernelError('edit_arguments_conflict', { detail: 'provide either anchor and replacement or changes, but not both' });
     }
   },
-  async run(args: EditArguments, { config, observations }: WriteToolContext) {
+  async run(args: EditArguments, { config, observations, ...context }: WriteToolContext) {
     const boundary = boundaryOf(config);
     const hasLegacyArguments = Object.hasOwn(args, 'anchor') || Object.hasOwn(args, 'replacement');
     const hasChanges = Object.hasOwn(args, 'changes');
@@ -326,9 +390,11 @@ export const editTool = {
       throw new KernelError('edit_anchor_empty', { detail: 'an anchor of only whitespace would match anywhere; give the text to locate' });
     }
     const target = await resolveWithin(boundary, args.path, { forWrite: true, cwd: workingDirectoryOf(config) });
-    let text;
+    let text: string;
+    let before: Buffer;
     try {
-      text = await readFile(target, 'utf8');
+      before = await readFile(target);
+      text = before.toString('utf8');
     } catch (error) {
       // 目标不存在时应使用 `create`。
       const code = errorCode(error);
@@ -343,8 +409,13 @@ export const editTool = {
         throw new KernelError('edit_anchor_ambiguous', { detail: `the anchor appears ${hits} times in ${args.path}; widen it until one occurrence is left` });
       }
       const updated = text.replace(args.anchor!, () => args.replacement!);
-      await writeFile(target, updated, 'utf8');
-      observations?.observe(target, versionOf(Buffer.from(updated, 'utf8')));
+      const expected = Buffer.from(updated, 'utf8');
+      try { await persistTextFile(target, updated, context); }
+      catch (error) {
+        const outcome = await outcomeAfterWriteError(target, before, expected);
+        if (outcome !== 'written') throw writeFailure('edit', args.path, error, outcome);
+      }
+      observations?.observe(target, versionOf(expected));
       return { text: `edited ${toPosix(relative(boundary, target))}` };
     }
 
@@ -356,8 +427,13 @@ export const editTool = {
     const result = {
       text: `edited ${toPosix(relative(boundary, target))} (${matched.length} changes; first changed line ${matched[0]!.line}; ${removed} removed/${added} added lines)\nDiff${diff.truncated ? ' (truncated)' : ''}:\n${diff.text}`,
     };
-    await writeFile(target, updated, 'utf8');
-    observations?.observe(target, versionOf(Buffer.from(updated, 'utf8')));
+    const expected = Buffer.from(updated, 'utf8');
+    try { await persistTextFile(target, updated, context); }
+    catch (error) {
+      const outcome = await outcomeAfterWriteError(target, before, expected);
+      if (outcome !== 'written') throw writeFailure('edit', args.path, error, outcome);
+    }
+    observations?.observe(target, versionOf(expected));
     return result;
   },
 } satisfies ToolDefinition<EditArguments>;
