@@ -213,6 +213,50 @@ test('nested parameter schemas validate objects, string arrays, enums, anyOf, an
   await assert.rejects(kernel.call('delegate', { ...valid, result: false }), { code: 'tool_args_invalid' });
 });
 
+test('root object anyOf validates mutually exclusive tool argument forms before execution', async () => {
+  const kernel = createKernel();
+  let calls = 0;
+  kernel.register(makeTool('edit-form', {
+    parameters: {
+      type: 'object',
+      anyOf: [
+        {
+          type: 'object',
+          properties: {
+            path: { type: 'string' },
+            anchor: { type: 'string' },
+            replacement: { type: 'string' },
+          },
+          required: ['path', 'anchor', 'replacement'],
+          additionalProperties: false,
+        },
+        {
+          type: 'object',
+          properties: {
+            path: { type: 'string' },
+            changes: { type: 'array', items: { type: 'object', properties: {
+              oldText: { type: 'string' }, newText: { type: 'string' },
+            }, required: ['oldText', 'newText'], additionalProperties: false } },
+          },
+          required: ['path', 'changes'],
+          additionalProperties: false,
+        },
+      ],
+    },
+    run: async () => { calls += 1; return 'accepted'; },
+  }));
+
+  assert.equal(await kernel.call('edit-form', { path: 'a.txt', anchor: 'old', replacement: 'new' }), 'accepted');
+  assert.equal(await kernel.call('edit-form', { path: 'a.txt', changes: [{ oldText: 'old', newText: 'new' }] }), 'accepted');
+  for (const args of [
+    { path: 'a.txt' },
+    { path: 'a.txt', anchor: 'old' },
+    { path: 'a.txt', anchor: 'old', replacement: 'new', changes: [{ oldText: 'old', newText: 'new' }] },
+    { path: 'a.txt', changes: [{ oldText: 'old', newText: 'new', extra: true }] },
+  ]) await assert.rejects(kernel.call('edit-form', args), { code: 'tool_args_invalid' });
+  assert.equal(calls, 2, 'invalid form combinations are rejected before tool execution');
+});
+
 test('bounded object arrays validate every item before tool execution', async () => {
   const kernel = createKernel();
   let calls = 0;

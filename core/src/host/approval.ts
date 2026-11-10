@@ -62,6 +62,14 @@ function displayText(value: string, maximum = DISPLAY_TEXT_CHARACTERS): string {
 function contentOf(tool: string, args: Record<string, unknown>): string | undefined {
   if ((tool === 'create' || tool === 'write') && typeof args.content === 'string') return args.content;
   if (tool === 'edit' && typeof args.replacement === 'string') return args.replacement;
+  if (tool === 'edit' && Array.isArray(args.changes)) {
+    return args.changes.map((change, index) => {
+      if (!isRecord(change)) return `Change ${index + 1}: invalid`;
+      const oldText = typeof change.oldText === 'string' ? change.oldText : '(missing oldText)';
+      const newText = typeof change.newText === 'string' ? change.newText : '(missing newText)';
+      return `Change ${index + 1}:\n- ${oldText}\n+ ${newText}`;
+    }).join('\n');
+  }
   return undefined;
 }
 

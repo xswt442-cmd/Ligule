@@ -72,6 +72,19 @@ assert.equal(
   changeBody(changeOf('edit', { path: 'x.md', anchor: '旧的一行', replacement: '新的一行' }), {}),
   'x.md：替换匹配内容\n原内容:\n- 旧的一行\n新内容:\n+ 新的一行',
 );
+const multiEditArgs = {
+  path: 'x.ts',
+  changes: [
+    { oldText: 'first old\nsecond old', newText: 'first new' },
+    { oldText: 'other old', newText: '' },
+  ],
+};
+const multiEdit = changeOf('edit', multiEditArgs);
+assert.equal(multiEdit.summary, 'x.ts：精确替换 2 处（删除 3 行，写入 1 行）');
+assert.deepEqual(multiEdit.diff, { added: 1, removed: 3 });
+assert.match(changeBody(multiEdit, multiEditArgs), /- \[1\]\n- first old\n- second old/u);
+assert.match(changeBody(multiEdit, multiEditArgs), /\+ \[2\]\n\+ （空）/u);
+assert.equal(changeOf('edit', { path: 'x.ts', changes: [] }).action, '', 'invalid batches must not be summarized as a valid edit');
 assert.equal(changeBody(changeOf('delete', { path: 'x.md' }), {}), '若系统回收站不可用或拒绝目标，操作会报错并保留原文件');
 assert.deepEqual(write.notes, ['自动允许 (auto)']);
 assert.equal(write.text, '写了 3 行');

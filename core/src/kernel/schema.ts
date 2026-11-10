@@ -93,7 +93,7 @@ function validateSchemaNode(
     if (!Array.isArray(schema.anyOf) || schema.anyOf.length === 0) {
       violations.push(`${path}.anyOf must be a non-empty array of schemas`);
     } else {
-      if (Object.keys(schema).some((key) => key !== 'anyOf' && key !== 'description')) {
+      if (Object.keys(schema).some((key) => key !== 'anyOf' && key !== 'description' && !(key === 'type' && type === 'object'))) {
         violations.push(`${path}.anyOf cannot be combined with other validation keywords`);
       }
       schema.anyOf.forEach((branch, index) => {

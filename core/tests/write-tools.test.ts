@@ -136,6 +136,106 @@ test('edit replaces the one occurrence the anchor locates', async () => {
   });
 });
 
+test('edit applies multiple exact changes through the kernel without a prior read and preserves file formatting', async () => {
+  await withWorkspace(async (workspace) => {
+    const target = join(workspace, 'formatted.txt');
+    const original = Buffer.from('\uFEFFfirst = 1;\r\nsecond = 2;\r\nlast = 3;', 'utf8');
+    const expected = Buffer.from('\uFEFFfirst = 10;\r\nsecond = 20;\r\nlast = 3;', 'utf8');
+    await writeFile(target, original);
+    const kernel = createKernel({ config: createConfig({ user: { boundary: workspace } }), permission: workspaceWrite });
+    kernel.register(editTool);
+    kernel.register(writeTool);
+
+    const result = await kernel.call('edit', {
+      path: 'formatted.txt',
+      changes: [
+        { oldText: 'second = 2;', newText: 'second = 20;' },
+        { oldText: 'first = 1;', newText: 'first = 10;' },
+      ],
+    }) as { text: string };
+
+    assert.deepEqual(await readFile(target), expected);
+    assert.match(result.text, /2 changes/);
+    assert.match(result.text, /first changed line 1/);
+    assert.match(result.text, /- first = 1;/);
+    assert.match(result.text, /\+ first = 10;/);
+    assert.doesNotMatch(result.text, /last = 3;/, 'the display diff must not echo an unchanged line');
+    assert.deepEqual(await kernel.call('write', { path: 'formatted.txt', content: 'observation refreshed' }), {
+      text: 'wrote formatted.txt (21 bytes)',
+    });
+  });
+});
+
+test('edit applies an empty replacement without changing untouched CRLF or the final newline state', async () => {
+  await withWorkspace(async (workspace) => {
+    const target = join(workspace, 'delete-line.txt');
+    const original = Buffer.from('start\r\nremove this\r\nend', 'utf8');
+    await writeFile(target, original);
+    const kernel = createKernel({ config: createConfig({ user: { boundary: workspace } }), permission: workspaceWrite });
+    kernel.register(editTool);
+
+    const result = await kernel.call('edit', {
+      path: 'delete-line.txt',
+      changes: [{ oldText: 'remove this\r\n', newText: '' }],
+    }) as { text: string };
+
+    assert.deepEqual(await readFile(target), Buffer.from('start\r\nend', 'utf8'));
+    assert.match(result.text, /1 removed\/0 added lines/);
+    assert.match(result.text, /\+ \(empty\)/);
+  });
+});
+
+test('multi-edit rejects every invalid match as a whole before changing file bytes', async () => {
+  await withWorkspace(async (workspace) => {
+    const target = join(workspace, 'batch.txt');
+    const kernel = createKernel({ config: createConfig({ user: { boundary: workspace } }), permission: workspaceWrite });
+    kernel.register(editTool);
+    const cases: { source: string; args: Record<string, unknown>; code: string }[] = [
+      { source: 'first second', args: { changes: [{ oldText: 'first', newText: 'FIRST' }, { oldText: 'missing', newText: 'MISSING' }] }, code: 'edit_change_not_found' },
+      { source: 'same same', args: { changes: [{ oldText: 'same', newText: 'other' }] }, code: 'edit_change_ambiguous' },
+      { source: 'ababa', args: { changes: [{ oldText: 'aba', newText: 'x' }] }, code: 'edit_change_ambiguous' },
+      { source: 'abcdefghij', args: { changes: [{ oldText: 'abcdef', newText: 'x' }, { oldText: 'defghi', newText: 'y' }] }, code: 'edit_changes_overlap' },
+      { source: 'keep', args: { changes: [{ oldText: 'keep', newText: 'keep' }] }, code: 'edit_changes_noop' },
+      { source: 'keep', args: { changes: [{ oldText: '', newText: 'insert' }] }, code: 'edit_change_old_text_empty' },
+      { source: 'keep', args: { changes: [] }, code: 'edit_changes_empty' },
+      { source: 'keep', args: { anchor: 'keep', replacement: 'new', changes: [{ oldText: 'keep', newText: 'new' }] }, code: 'edit_arguments_conflict' },
+      { source: 'keep', args: {}, code: 'tool_args_invalid' },
+      { source: 'a'.repeat(33_000), args: { changes: [{ oldText: 'a'.repeat(33_000), newText: 'b'.repeat(33_000) }] }, code: 'edit_changes_too_large' },
+    ];
+
+    for (const item of cases) {
+      const original = Buffer.from(item.source, 'utf8');
+      await writeFile(target, original);
+      await assert.rejects(
+        kernel.call('edit', { path: 'batch.txt', ...item.args }),
+        (error) => (error as { code?: string }).code === item.code,
+        `expected ${item.code}`,
+      );
+      assert.deepEqual(await readFile(target), original, `${item.code} must leave the whole file unchanged`);
+    }
+  });
+});
+
+test('multi-edit result truncates a large display diff and does not include untouched file content', async () => {
+  await withWorkspace(async (workspace) => {
+    const target = join(workspace, 'large-diff.txt');
+    const original = `${'a'.repeat(5_000)}\nprivate untouched tail`;
+    await writeFile(target, original);
+    const kernel = createKernel({ config: createConfig({ user: { boundary: workspace } }), permission: workspaceWrite });
+    kernel.register(editTool);
+
+    const result = await kernel.call('edit', {
+      path: 'large-diff.txt',
+      changes: [{ oldText: 'a'.repeat(5_000), newText: 'b'.repeat(5_000) }],
+    }) as { text: string };
+    const marker = 'Diff (truncated):\n';
+    assert.match(result.text, /diff truncated at 8192 characters/);
+    assert.ok(result.text.includes(marker));
+    assert.equal(result.text.slice(result.text.indexOf(marker) + marker.length).length, 8_192);
+    assert.doesNotMatch(result.text, /private untouched tail/);
+  });
+});
+
 test('edit preserves replacement tokens as literal file content through the kernel', async () => {
   await withWorkspace(async (workspace) => {
     const kernel = createKernel({ config: createConfig({ user: { boundary: workspace } }), permission: workspaceWrite });
@@ -176,6 +276,17 @@ test('edit rejects a missing target, an anchor that is not there, and an anchor 
       (error) => (error as { code?: string }).code === 'edit_anchor_ambiguous',
     );
     assert.equal(await readFile(join(workspace, 'twice.txt'), 'utf8'), 'x x');
+  });
+});
+
+test('multi-edit keeps the existing write permission classification', async () => {
+  await withWorkspace(async (workspace) => {
+    const kernel = createKernel({ config: createConfig({ user: { boundary: workspace } }) });
+    kernel.register(editTool);
+    await assert.rejects(
+      kernel.call('edit', { path: 'note.txt', changes: [{ oldText: 'old', newText: 'new' }] }),
+      { code: 'permission_read_only' },
+    );
   });
 });
 
@@ -542,7 +653,7 @@ test('write goes through the kernel and its failures reach the session log', asy
   });
 });
 
-test('Kernel rejects file writes that escape the boundary through parent and link paths', async () => {
+test('Kernel rejects writes and multi-edits that escape the boundary through parent and link paths', async () => {
   await withWorkspace(async (workspace) => {
     const outside = join(workspace, '..', 'outside-write-targets');
     const target = join(outside, 'note.txt');
@@ -552,13 +663,22 @@ test('Kernel rejects file writes that escape the boundary through parent and lin
 
     const kernel = createKernel({ config: createConfig({ user: { boundary: workspace } }), permission: workspaceWrite });
     kernel.register(writeTool);
+    kernel.register(editTool);
     try {
       await assert.rejects(
         () => kernel.call('write', { path: '../outside-write-targets/note.txt', content: 'overwrite' }),
         { code: 'path_escapes_boundary' },
       );
       await assert.rejects(
+        () => kernel.call('edit', { path: '../outside-write-targets/note.txt', changes: [{ oldText: 'keep outside', newText: 'overwrite' }] }),
+        { code: 'path_escapes_boundary' },
+      );
+      await assert.rejects(
         () => kernel.call('write', { path: 'escape/note.txt', content: 'overwrite' }),
+        { code: 'path_escapes_through_link' },
+      );
+      await assert.rejects(
+        () => kernel.call('edit', { path: 'escape/note.txt', changes: [{ oldText: 'keep outside', newText: 'overwrite' }] }),
         { code: 'path_escapes_through_link' },
       );
       assert.equal(await readFile(target, 'utf8'), 'keep outside');
@@ -569,10 +689,15 @@ test('Kernel rejects file writes that escape the boundary through parent and lin
 });
 
 test('the seven tools satisfy the registration contract and all reach the manifest', () => {
-  const kernel = createKernel();
+  const kernel = createKernel({ permission: workspaceWrite });
   for (const tool of [...readOnlyTools, ...writeTools]) kernel.register(tool);
   assert.deepEqual(kernel.list(), ['create', 'delete', 'edit', 'find', 'read', 'search', 'write']);
-  for (const entry of kernel.manifest()) {
+  const manifest = kernel.manifest();
+  for (const entry of manifest) {
     assert.deepEqual(Object.keys(entry).sort(), ['description', 'name', 'parameters']);
   }
+  const edit = manifest.find((entry) => entry.name === 'edit');
+  assert.ok(edit);
+  const forms = edit.parameters.anyOf as Record<string, unknown>[];
+  assert.deepEqual(forms.map((form) => form.required), [['path', 'anchor', 'replacement'], ['path', 'changes']]);
 });
