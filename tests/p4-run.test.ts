@@ -112,11 +112,19 @@ const STARTUP_READY_MS = 180_000;
 async function ready(client: Connection, label = 'Host') {
   const limit = Date.now() + STARTUP_READY_MS;
   for (;;) {
-    const answered = await Promise.race([
-      client.request('prefs.read', {}).then(() => true, () => false),
-      new Promise(resolve => setTimeout(() => resolve(false), 1_000)),
+    // A closed connection never answers again, so waiting out the startup budget would only
+    // hide the real failure. Only errors that leave the connection usable are retried.
+    const outcome = await Promise.race([
+      client.request('prefs.read', {}).then(() => 'answered' as const, (error: unknown) => {
+        const code = typeof error === 'object' && error !== null && 'code' in error
+          ? String((error as { code?: unknown }).code)
+          : '';
+        if (code === 'connection_closed') throw error;
+        return 'retry' as const;
+      }),
+      new Promise<'retry'>(resolve => setTimeout(() => resolve('retry'), 1_000)),
     ]);
-    if (answered) return;
+    if (outcome === 'answered') return;
     if (Date.now() > limit) throw new Error(`${label} did not answer within ${STARTUP_READY_MS}ms`);
   }
 }
