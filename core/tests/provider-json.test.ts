@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createChatCompletionsProvider } from '../dist/model/chat-completions.js';
 import { createMessagesProvider } from '../dist/model/messages.js';
 import { createKernel, createLoop } from '../dist/index.js';
+import { editTool } from '../dist/tools/write.js';
 import type { ModelRequest, ProviderEvent } from '../dist/kernel/loop.js';
 import { listenFetchable } from './helpers/port.ts';
 
@@ -125,6 +126,23 @@ test('Messages parses a real non-streaming JSON response and cache usage', async
     assert.equal(requests[0].body.stream, false);
     assert.equal(requests[0].headers.accept, 'application/json');
     assert.equal(requests[0].url, '/v1/messages');
+  });
+});
+
+test('Messages sends the edit root anyOf schema unchanged', async () => {
+  await withJsonEndpoint('messages', {
+    id: 'msg-schema', type: 'message', role: 'assistant', content: [{ type: 'text', text: 'ok' }],
+    stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 1 },
+  }, async (provider, requests) => {
+    await collect(provider.stream({ system: '', messages: [], tools: [editTool] }));
+    const tools = requests[0].body.tools as Array<Record<string, unknown>>;
+    assert.equal(editTool.parameters.type, 'object');
+    assert.ok(Array.isArray(editTool.parameters.anyOf));
+    assert.deepEqual(tools, [{
+      name: 'edit',
+      description: editTool.description,
+      input_schema: editTool.parameters,
+    }]);
   });
 });
 
