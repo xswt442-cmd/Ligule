@@ -13,5 +13,6 @@ assert.equal(contact.displayName({ firstName: ' ', lastName: '' }), '');
 assert.equal(contact.normalizePhone('(415) 555-0123'), '+14155550123');
 assert.equal(contact.normalizePhone('1 (415) 555-0123'), '+14155550123');
 assert.equal(contact.normalizePhone('+44 (20) 7946-0958'), '+442079460958');
+assert.equal(contact.normalizePhone('call (415) 555-0123'), null);
 assert.equal(contact.normalizePhone('12345'), null);
 assert.equal(contact.priorityLabel(' Needs Review '), 'NEEDS REVIEW');
