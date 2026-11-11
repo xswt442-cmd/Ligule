@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -121,6 +122,24 @@ function expectedSummary(value) {
     && Object.keys(value).length === 2 && value.errors === 1 && value.warnings === 2;
 }
 
+// 验收必须自己造输入：缺参数、坏 JSON、未知级别都要由 verifier 独立触发，
+// 否则只做了 `--json` 的方案也能拿满分。
+async function assertRejected(cli, args, workspace, label) {
+  const result = await runChild([cli, ...args], workspace);
+  assertProcessSucceeded(result, label, 2);
+  assert.equal(result.stdout === '', true, `${label} wrote stdout`);
+  assert.equal(result.stderr.trim() !== '', true, `${label} did not write stderr`);
+}
+
+async function withFixtureFile(path, content, run) {
+  await writeFile(path, content, 'utf8');
+  try {
+    await run();
+  } finally {
+    await rm(path, { force: true });
+  }
+}
+
 function verifierFailureText(error, fallback) {
   const message = error instanceof Error ? error.message : fallback;
   const output = Buffer.from(`${message}\n`, 'utf8');
@@ -150,9 +169,17 @@ export async function verify(workspace) {
   assertProcessSucceeded(human, 'human summary');
   assert.equal(human.stdout === 'Errors: 1, Warnings: 2\n', true, 'human summary did not match expected text');
 
-  const invalid = await runChild([cli, '--unknown', data], workspace);
-  assertProcessSucceeded(invalid, 'unknown option', 2);
-  assert.equal(invalid.stderr.trim() !== '', true, 'unknown option did not write stderr');
+  await assertRejected(cli, [], workspace, 'missing input');
+  await assertRejected(cli, ['--unknown', data], workspace, 'unknown option');
+  await withFixtureFile(join(workspace, 'verify-malformed-events.json'), '[\n  { "id": "v-1", "level": "error" }\n', async () => {
+    await assertRejected(cli, [join(workspace, 'verify-malformed-events.json')], workspace, 'malformed JSON input');
+  });
+  await withFixtureFile(join(workspace, 'verify-unknown-level.json'), '[{ "id": "v-2", "level": "fatal" }]\n', async () => {
+    await assertRejected(cli, [join(workspace, 'verify-unknown-level.json')], workspace, 'unknown event level');
+  });
+  await withFixtureFile(join(workspace, 'verify-not-an-array.json'), '{ "id": "v-3", "level": "error" }\n', async () => {
+    await assertRejected(cli, [join(workspace, 'verify-not-an-array.json')], workspace, 'non-array input');
+  });
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {

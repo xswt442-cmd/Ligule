@@ -234,13 +234,22 @@ test('the C04 verifier preserves passing CLI results with verbose stderr', async
     await mkdir(join(workspace, 'test'), { recursive: true });
     await mkdir(join(workspace, 'bin'), { recursive: true });
     await writeFile(join(workspace, 'test', 'summary.test.mjs'), 'export {};\n');
-    await writeFile(join(workspace, 'events.json'), '{}\n');
+    await writeFile(join(workspace, 'events.json'), '[{"id":"e-1","level":"error"},{"id":"e-2","level":"warning"}]\n');
     await writeFile(join(workspace, 'bin', 'summary.mjs'), [
+      "import { readFileSync } from 'node:fs';",
+      "const args = process.argv.slice(2).filter((argument) => argument !== '--json');",
       "const json = process.argv.includes('--json');",
-      "const invalid = process.argv.includes('--unknown');",
-      "if (invalid) { process.stderr.write('x'.repeat(131072)); process.exitCode = 2; }",
-      "else if (json) { process.stderr.write('x'.repeat(131072)); process.stdout.write('{\"errors\":1,\"warnings\":2}\\n'); }",
-      "else process.stdout.write('Errors: 1, Warnings: 2\\n');",
+      "const invalid = args.includes('--unknown') || args.length !== 1;",
+      "const fail = () => { process.stderr.write('x'.repeat(131072)); process.exitCode = 2; };",
+      "if (invalid) fail();",
+      "else {",
+      "  try {",
+      "    const events = JSON.parse(readFileSync(args[0], 'utf8'));",
+      "    if (!Array.isArray(events) || events.some((event) => !['error', 'warning'].includes(event?.level))) throw new Error('bad');",
+      "    if (json) { process.stderr.write('x'.repeat(131072)); process.stdout.write('{\"errors\":1,\"warnings\":2}\\n'); }",
+      "    else process.stdout.write('Errors: 1, Warnings: 2\\n');",
+      "  } catch { fail(); }",
+      "}",
       '',
     ].join('\n'));
     const result = runVerifier(taskDirectory, workspace);

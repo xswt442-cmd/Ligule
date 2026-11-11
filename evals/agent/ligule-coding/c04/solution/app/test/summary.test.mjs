@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 
 const cli = resolve('bin/summary.mjs');
 const events = resolve('events.json');
@@ -21,5 +23,31 @@ test('the JSON flag works before and after the input path', () => {
     const result = run(args);
     assert.equal(result.status, 0);
     assert.deepEqual(JSON.parse(result.stdout), { errors: 1, warnings: 2 });
+  }
+});
+
+test('invalid input is rejected with a message on stderr', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'summary-cli-'));
+  try {
+    const malformed = join(directory, 'malformed.json');
+    writeFileSync(malformed, '[\n  { "id": "x", "level": "error" }\n');
+    const unknownLevel = join(directory, 'unknown-level.json');
+    writeFileSync(unknownLevel, '[{ "id": "x", "level": "fatal" }]\n');
+    const notAnArray = join(directory, 'not-an-array.json');
+    writeFileSync(notAnArray, '{ "id": "x", "level": "error" }\n');
+    const cases = [
+      ['missing input', []],
+      ['malformed JSON', [malformed]],
+      ['unknown event level', [unknownLevel]],
+      ['non-array input', [notAnArray]],
+      ['unknown option', ['--unknown', events]],
+    ];
+    for (const [label, args] of cases) {
+      const result = run(args);
+      assert.equal(result.status, 2, `${label} must exit with status 2`);
+      assert.notEqual(result.stderr.trim(), '', `${label} must explain itself on stderr`);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
 });
