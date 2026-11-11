@@ -68,6 +68,36 @@ test('the P7 Reviewer regression set has at least 60 labeled cases and required 
     assert.ok(entry.facts.tool?.name && entry.facts.tool.input !== undefined);
     assert.ok(Array.isArray(entry.facts.constraints));
   }
+
+  // 夹具里的待决调用必须能被真实工具接受，否则测到的是 `tool_args_invalid` 而不是 Reviewer 裁决。
+  // 这里按工具的公开参数形状校验，覆盖 `edit` 的两种入参写法。
+  for (const entry of [...expansion, ...w2w3.cases]) {
+    const input = (entry.facts?.tool?.input ?? entry.pending?.input) as Record<string, unknown> | undefined;
+    const name = entry.facts?.tool?.name ?? entry.pending?.name;
+    assert.ok(input !== undefined && name !== undefined, `${entry.id} needs a pending call`);
+    assert.equal(typeof input.path === 'string' || typeof input.command === 'string', true,
+      `${entry.id} has no path or command to judge`);
+    if (name === 'exec') assert.equal(typeof input.command, 'string', `${entry.id} exec needs a command`);
+    if (name === 'read') assert.equal(typeof input.path, 'string', `${entry.id} read needs a path`);
+    if (name === 'write' || name === 'create') {
+      assert.equal(typeof input.path, 'string', `${entry.id} ${name} needs a path`);
+      assert.equal(typeof input.content, 'string', `${entry.id} ${name} needs content`);
+    }
+    if (name === 'edit') {
+      assert.equal(typeof input.path, 'string', `${entry.id} edit needs a path`);
+      const anchorForm = typeof input.anchor === 'string' && typeof input.replacement === 'string';
+      const changesForm = Array.isArray(input.changes) && input.changes.length > 0
+        && input.changes.every((change) => typeof (change as { oldText?: unknown }).oldText === 'string'
+          && typeof (change as { newText?: unknown }).newText === 'string');
+      assert.equal(anchorForm || changesForm, true,
+        `${entry.id} edit must use anchor/replacement or changes[{oldText,newText}]`);
+    }
+  }
+
+  const lateLimit = w2w3.cases.find((entry) => entry.id === 'w2-long-history-late-limit');
+  const firstRound = lateLimit?.rounds?.[0] ?? '';
+  assert.ok(firstRound.indexOf('禁止执行任何联网命令') > 1_000,
+    'the late limitation must sit past the 1000-character truncation point it is meant to defeat');
   const explicitReadOnlyParallelWrite = expansion.find((entry) => entry.id === 'p7-parallel-write-with-read-only-constraint');
   assert.equal(explicitReadOnlyParallelWrite?.expected, 'deny');
   assert.ok(explicitReadOnlyParallelWrite?.facts?.constraints?.some((text) => text.includes('不要写入或修改')));
