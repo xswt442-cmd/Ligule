@@ -13,6 +13,7 @@ import { copyToClipboard, lastAnswer } from './clipboard.js';
 import { titleEscape, titleText } from './output.js';
 import { providerDiagnosticText, runtimeFailureText } from './errors.js';
 import { capabilityOf, projectRecord, resultParts, type TranscriptItem, type TuiRecord } from './transcript.js';
+import { collectTranscriptPages } from './transcript-pages.js';
 import { VERSION } from '../version.js';
 import { ChoicePanel, HelpPanel, PanelFrame, type PanelChoice } from './panels.js';
 import { SessionPicker } from './session-picker.js';
@@ -922,13 +923,41 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (timer !== undefined) clearTimeout(timer);
       timer = setTimeout(() => { timer = undefined; void poll(); }, delayMs);
     };
+    // 缺口可能跨越多页：从最新一页开始按 `before` 向更早翻，直到覆盖上次的序号再按时间顺序追加。
+    // 翻到页数上限仍未覆盖时如实提示，不能把没读到的旧记录当作已经补齐。
+    const TRANSCRIPT_PAGE_LIMIT = 50;
     const refreshTranscript = async () => {
-      const read = await client.request('session.observe', { projectRoot, sessionId, limit: 400, fullResults: true });
+      const prior = lastTranscriptSequence.current;
+      const collected = await collectTranscriptPages(async (before) => {
+        const observed = await client.request('session.observe', {
+          projectRoot,
+          sessionId,
+          limit: 400,
+          fullResults: true,
+          ...(before === undefined ? {} : { before }),
+        });
+        return observed.events;
+      }, prior, TRANSCRIPT_PAGE_LIMIT, () => disposed || activeSession.current !== sessionId);
       if (disposed || activeSession.current !== sessionId) return;
-      const unseen = appendUnseenTranscript(read.events, lastTranscriptSequence.current, locale);
-      lastTranscriptSequence.current = Math.max(lastTranscriptSequence.current, maxTranscriptSequence(read.events));
+      const events = [...collected.pages].reverse().flat();
+      const unseen = appendUnseenTranscript(events, prior, locale);
+      lastTranscriptSequence.current = Math.max(prior, maxTranscriptSequence(events));
       push(...unseen);
-      setExternalModel(externalModelFrom(read.events));
+      // 持久记录补齐后，之前流式收到的同一段回答不再是最新状态：留着会让界面显示一份不完整的重复预览。
+      const durableKinds = new Set(unseen.map((item) => item.kind));
+      if (durableKinds.has('assistant') || durableKinds.has('reasoning')) {
+        setLive((current) => ({
+          text: durableKinds.has('assistant') ? '' : current.text,
+          reasoning: durableKinds.has('reasoning') ? '' : current.reasoning,
+        }));
+      }
+      setExternalModel(externalModelFrom(collected.pages[0] ?? []));
+      if (!collected.complete) {
+        push({ kind: 'error', text: t(
+          `外控会话的记录超过 ${TRANSCRIPT_PAGE_LIMIT} 页仍未覆盖上次序号；更早的未读记录可能无法补齐`,
+          `The external transcript gap spans more than ${TRANSCRIPT_PAGE_LIMIT} pages; earlier unseen records may stay incomplete`,
+        ) });
+      }
     };
     const poll = async () => {
       if (disposed || inFlight) return;
