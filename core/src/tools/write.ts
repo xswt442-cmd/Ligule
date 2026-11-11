@@ -19,7 +19,7 @@ const DELETE_TARGET_SNAPSHOT = Symbol('delete-target-snapshot');
 const TEST_FILE_WRITER = Symbol('test-file-writer');
 const MAX_EDIT_CHANGES = 32;
 const MAX_EDIT_CHANGE_BYTES = 64 * 1024;
-const MAX_EDIT_DIFF_CHARACTERS = 8 * 1024;
+const MAX_EDIT_DIFF_BYTES = 8 * 1024;
 interface DeleteTargetSnapshot {
   readonly [DELETE_TARGET_SNAPSHOT]: true;
   readonly target: string;
@@ -111,6 +111,19 @@ function applyEdits(text: string, matched: MatchedEdit[]): string {
   return output.join('');
 }
 
+function truncateToBytes(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
+  let bytes = 0;
+  let end = 0;
+  for (const character of text) {
+    const size = Buffer.byteLength(character, 'utf8');
+    if (bytes + size > maxBytes) break;
+    bytes += size;
+    end += character.length;
+  }
+  return text.slice(0, end);
+}
+
 function editDiff(matched: MatchedEdit[]): { text: string; truncated: boolean } {
   const sections = matched.map((change) => {
     const removed = change.oldText.split(/\r\n|\n|\r/u).map((line) => `- ${line}`);
@@ -119,9 +132,10 @@ function editDiff(matched: MatchedEdit[]): { text: string; truncated: boolean } 
       : change.newText.split(/\r\n|\n|\r/u).map((line) => `+ ${line}`);
     return [`@@ edit ${change.index + 1} at line ${change.line} @@`, ...removed, ...added].join('\n');
   }).join('\n');
-  if (sections.length <= MAX_EDIT_DIFF_CHARACTERS) return { text: sections, truncated: false };
-  const suffix = `\n… diff truncated at ${MAX_EDIT_DIFF_CHARACTERS} characters`;
-  return { text: `${sections.slice(0, MAX_EDIT_DIFF_CHARACTERS - suffix.length)}${suffix}`, truncated: true };
+  if (Buffer.byteLength(sections, 'utf8') <= MAX_EDIT_DIFF_BYTES) return { text: sections, truncated: false };
+  const suffix = `\n… diff truncated at ${MAX_EDIT_DIFF_BYTES} bytes`;
+  const budget = MAX_EDIT_DIFF_BYTES - Buffer.byteLength(suffix, 'utf8');
+  return { text: `${truncateToBytes(sections, budget)}${suffix}`, truncated: true };
 }
 
 function lineCount(text: string): number {

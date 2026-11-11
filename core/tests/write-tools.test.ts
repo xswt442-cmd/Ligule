@@ -232,10 +232,32 @@ test('multi-edit result truncates a large display diff and does not include unto
       changes: [{ oldText: 'a'.repeat(5_000), newText: 'b'.repeat(5_000) }],
     }) as { text: string };
     const marker = 'Diff (truncated):\n';
-    assert.match(result.text, /diff truncated at 8192 characters/);
+    assert.match(result.text, /diff truncated at 8192 bytes/u);
     assert.ok(result.text.includes(marker));
-    assert.equal(result.text.slice(result.text.indexOf(marker) + marker.length).length, 8_192);
+    const diff = result.text.slice(result.text.indexOf(marker) + marker.length);
+    assert.ok(Buffer.byteLength(diff, 'utf8') <= 8_192, 'the display diff must stay within its byte budget');
     assert.doesNotMatch(result.text, /private untouched tail/);
+  });
+});
+
+test('multi-edit truncation counts UTF-8 bytes rather than code units', async () => {
+  await withWorkspace(async (workspace) => {
+    const target = join(workspace, 'multibyte-diff.txt');
+    const original = '汉'.repeat(3_000);
+    await writeFile(target, original);
+    const kernel = createKernel({ config: createConfig({ user: { boundary: workspace } }), permission: workspaceWrite });
+    kernel.register(editTool);
+
+    const result = await kernel.call('edit', {
+      path: 'multibyte-diff.txt',
+      changes: [{ oldText: original, newText: '字'.repeat(3_000) }],
+    }) as { text: string };
+    const marker = 'Diff (truncated):\n';
+    assert.match(result.text, /diff truncated at 8192 bytes/u);
+    const diff = result.text.slice(result.text.indexOf(marker) + marker.length);
+    assert.ok(Buffer.byteLength(diff, 'utf8') <= 8_192, 'three thousand CJK characters must not fit in an 8 KiB diff');
+    assert.ok(diff.startsWith('@@ edit 1 at line 1 @@'), 'the diff keeps its header');
+    assert.doesNotMatch(diff, /\uFFFD/u, 'truncation must not split a code point');
   });
 });
 
