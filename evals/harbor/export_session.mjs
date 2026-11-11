@@ -228,8 +228,14 @@ export async function exportSession({
     agentVersion,
     ...(modelName === undefined ? {} : { modelName }),
   }, { includeSensitiveContent });
-  await writeJson(join(resolve(logsDirectory), 'edit-argument-shapes.json'), editArgumentShapeSummary(events, user.seq));
-  await writeJson(join(resolve(logsDirectory), 'trajectory.json'), trajectory);
+  const shapeSummaryPath = join(resolve(logsDirectory), 'edit-argument-shapes.json');
+  await writeJson(shapeSummaryPath, editArgumentShapeSummary(events, user.seq));
+  try {
+    await writeJson(join(resolve(logsDirectory), 'trajectory.json'), trajectory);
+  } catch (error) {
+    await unlink(shapeSummaryPath);
+    throw error;
+  }
   return trajectory;
 }
 

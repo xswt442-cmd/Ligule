@@ -164,6 +164,29 @@ test('reads a real trial Session, restores a spill, and exports through the Core
   }
 });
 
+test('removes edit shape counts when the paired trajectory cannot be written', async () => {
+  const root = await mkdtemp(join(temporaryRoot, 'ligule-harbor-atif-shape-pair-'));
+  try {
+    const helper = await packagedHelper(root);
+    const homeDirectory = join(root, 'trial-home');
+    await mkdir(homeDirectory);
+    const source = await seedSession(homeDirectory, { includeEditArguments: true });
+    const logsDirectory = join(root, 'logs', 'agent');
+    await mkdir(logsDirectory, { recursive: true });
+    await writeFile(join(logsDirectory, 'trajectory.json'), '{}\n');
+
+    await assert.rejects(helper.exportSession({
+      homeDirectory,
+      ...source,
+      agentVersion: '0.1.1-dev',
+      logsDirectory,
+    }), /ligule_export_output_exists/u);
+    assert.equal(existsSync(join(logsDirectory, 'edit-argument-shapes.json')), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('rejects missing spill content and never emits a partial trajectory', async () => {
   const root = await mkdtemp(join(temporaryRoot, 'ligule-harbor-atif-missing-'));
   try {
