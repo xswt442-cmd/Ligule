@@ -561,7 +561,7 @@ export function createKernel(options: KernelOptions = {}): Kernel {
       };
       let success: ReturnType<typeof resultOf>;
       try {
-          const runTool = (runPermission: PermissionContext) => tool.run(args, { ...context, permission: runPermission, signal: options.signal, target: network, shell,
+          const runTool = (runPermission: PermissionContext, runArgs: unknown = args) => tool.run(runArgs, { ...context, permission: runPermission, signal: options.signal, target: network, shell,
             ...(preflightResult === undefined ? {} : { preflightResult }),
             ...(options.runId === undefined ? {} : { runId: options.runId }),
             ...(options.executionId === undefined ? {} : { executionId: options.executionId }),
@@ -586,7 +586,10 @@ export function createKernel(options: KernelOptions = {}): Kernel {
                 const reason = options.signal.reason;
                 throw reason instanceof KernelError ? reason : new KernelError('loop_cancelled', { cause: reason });
               }
-              return await runTool(latestPermission);
+              // 工具会再次解析路径；把槽位内核实的目标直接交给它，避免链接在这段窗口里改指使写入落到另一个文件。
+              // 删除工具需要按原路径判断链接本身，因此保持原参数。
+              const runArgs = name === 'delete' ? args : { ...(args as Record<string, unknown>), path: currentTarget };
+              return await runTool(latestPermission, runArgs);
             }, options.signal);
           } else {
             value = await runTool(callPermission);
