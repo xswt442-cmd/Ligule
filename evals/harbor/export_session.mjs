@@ -233,7 +233,11 @@ export async function exportSession({
   try {
     await writeJson(join(resolve(logsDirectory), 'trajectory.json'), trajectory);
   } catch (error) {
-    await unlink(shapeSummaryPath);
+    try {
+      await unlink(shapeSummaryPath);
+    } catch {
+      // Preserve the trajectory write error; cleanup is best-effort on this failure path.
+    }
     throw error;
   }
   return trajectory;

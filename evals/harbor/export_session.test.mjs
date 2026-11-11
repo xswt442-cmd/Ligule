@@ -40,7 +40,7 @@ async function copyDependency(name, targetRoot, fromDirectory = corePackage) {
   }
 }
 
-async function packagedHelper(root) {
+async function packagedHelper(root, { shapeCleanupFails = false } = {}) {
   const packageRoot = join(root, 'node_modules', 'ligule');
   await mkdir(packageRoot, { recursive: true });
   await writeFile(join(packageRoot, 'package.json'), JSON.stringify({
@@ -57,7 +57,13 @@ async function packagedHelper(root) {
     await copyDependency(dependency, join(packageRoot, 'node_modules'));
   }
   const helperPath = join(packageRoot, 'export_session.mjs');
-  await writeFile(helperPath, await readFile(helperSource));
+  let helperText = await readFile(helperSource, 'utf8');
+  if (shapeCleanupFails) {
+    const cleanup = 'await unlink(shapeSummaryPath);';
+    assert.ok(helperText.includes(cleanup), 'the test must inject failure at the sidecar cleanup point');
+    helperText = helperText.replace(cleanup, "await Promise.reject(new Error('injected_shape_cleanup_failure'));");
+  }
+  await writeFile(helperPath, helperText);
   // 导出器从同目录的 policy-mode.mjs 读取基准审批档位，容器里也要一起上传。
   await writeFile(join(packageRoot, 'policy-mode.mjs'), await readFile(fileURLToPath(new URL('./policy-mode.mjs', import.meta.url))));
   return import(pathToFileURL(helperPath).href);
@@ -182,6 +188,30 @@ test('removes edit shape counts when the paired trajectory cannot be written', a
       logsDirectory,
     }), /ligule_export_output_exists/u);
     assert.equal(existsSync(join(logsDirectory, 'edit-argument-shapes.json')), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('preserves the trajectory error when shape sidecar cleanup also fails', async () => {
+  const root = await mkdtemp(join(temporaryRoot, 'ligule-harbor-atif-shape-cleanup-failure-'));
+  try {
+    const helper = await packagedHelper(root, { shapeCleanupFails: true });
+    const homeDirectory = join(root, 'trial-home');
+    await mkdir(homeDirectory);
+    const source = await seedSession(homeDirectory, { includeEditArguments: true });
+    const logsDirectory = join(root, 'logs', 'agent');
+    await mkdir(logsDirectory, { recursive: true });
+    await writeFile(join(logsDirectory, 'trajectory.json'), '{}\n');
+
+    await assert.rejects(helper.exportSession({
+      homeDirectory,
+      ...source,
+      agentVersion: '0.1.1-dev',
+      logsDirectory,
+    }), /ligule_export_output_exists/u);
+    assert.equal(existsSync(join(logsDirectory, 'edit-argument-shapes.json')), true,
+      'the injected cleanup failure should leave the sidecar for test teardown');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
