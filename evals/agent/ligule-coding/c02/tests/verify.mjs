@@ -1,24 +1,76 @@
-import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { spawn, spawnSync } from 'node:child_process';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const MAX_PUBLIC_TEST_OUTPUT_BYTES = 8 * 1024;
+const MAX_CHILD_OUTPUT_BYTES = 1024 * 1024;
+const MAX_DIAGNOSTIC_BYTES = 8 * 1024;
 const MAX_VERIFIER_DIAGNOSTIC_BYTES = 16 * 1024;
 const TEST_ENVIRONMENT_KEYS = ['PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'USERPROFILE', 'SYSTEMROOT', 'WINDIR', 'PATHEXT'];
+const PUBLIC_TEST_NAMES = new Set([
+  'GET returns the existing item',
+  'PATCH trims and updates an existing item',
+  'PATCH rejects invalid names without changing the item',
+  'PATCH remains unsupported under the current route contract',
+]);
 
 function testEnvironment() {
   return Object.fromEntries(TEST_ENVIRONMENT_KEYS.flatMap((name) =>
     typeof process.env[name] === 'string' ? [[name, process.env[name]]] : []));
 }
 
-function publicTestOutput(result) {
-  const stdout = Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.alloc(0);
-  const stderr = Buffer.isBuffer(result.stderr) ? result.stderr : Buffer.alloc(0);
-  const output = Buffer.concat([stdout, Buffer.from('\n'), stderr]);
-  const truncated = result.error?.code === 'ENOBUFS' || output.length > MAX_PUBLIC_TEST_OUTPUT_BYTES;
-  const text = output.subarray(0, MAX_PUBLIC_TEST_OUTPUT_BYTES).toString('utf8').trim();
-  return `${text}${truncated ? `\n[public test output truncated at ${MAX_PUBLIC_TEST_OUTPUT_BYTES} bytes]` : ''}`;
+function publicTestResult(args, workspace) {
+  const result = spawnSync(process.execPath, args, {
+    cwd: workspace,
+    encoding: 'utf8',
+    windowsHide: true,
+    maxBuffer: MAX_CHILD_OUTPUT_BYTES,
+    env: testEnvironment(),
+  });
+  return {
+    ...result,
+    stdoutBytes: Buffer.byteLength(result.stdout ?? '', 'utf8'),
+    stderrBytes: Buffer.byteLength(result.stderr ?? '', 'utf8'),
+  };
+}
+
+function assertPublicTestsSucceeded(result) {
+  if (result.status === 0 && result.error === undefined) return;
+  const names = new Set();
+  for (const line of `${result.stdout ?? ''}\n${result.stderr ?? ''}`.split(/\r?\n/u)) {
+    const match = /^not ok \d+ - (.*)$/u.exec(line);
+    if (match !== null && PUBLIC_TEST_NAMES.has(match[1])) names.add(match[1]);
+  }
+  const spawnError = result.error === undefined ? '' : `, spawn_error=${String(result.error.code ?? 'unknown')}`;
+  const outputLimit = result.error?.code === 'ENOBUFS' ? `, output_limit=${MAX_CHILD_OUTPUT_BYTES}` : '';
+  const summary = names.size > 0
+    ? `; failed public tests=${[...names].join('; ')}`
+    : '; no known public test title captured';
+  throw new Error(`public tests failed (exit=${String(result.status)}${spawnError}${outputLimit}; stdout_bytes=${result.stdoutBytes}; stderr_bytes=${result.stderrBytes}; raw output omitted; diagnostic_limit=${MAX_DIAGNOSTIC_BYTES})${summary}`);
+}
+
+function runBehavior(workspace) {
+  const script = fileURLToPath(new URL('./behavior.mjs', import.meta.url));
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [script, workspace], {
+      cwd: workspace,
+      env: testEnvironment(),
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    let error;
+    child.once('error', (value) => { error = value; });
+    child.stdout.on('data', (chunk) => { stdoutBytes += chunk.length; });
+    child.stderr.on('data', (chunk) => { stderrBytes += chunk.length; });
+    child.once('close', (status, signal) => resolve({ status, signal, error, stdoutBytes, stderrBytes }));
+  });
+}
+
+function assertBehaviorSucceeded(result) {
+  if (result.status === 0 && result.error === undefined) return;
+  const spawnError = result.error === undefined ? '' : `, spawn_error=${String(result.error.code ?? 'unknown')}`;
+  const signal = result.signal === null ? '' : `, signal=${String(result.signal)}`;
+  throw new Error(`independent behavior checks failed (exit=${String(result.status)}${signal}${spawnError}; stdout_bytes=${result.stdoutBytes}; stderr_bytes=${result.stderrBytes}; raw output omitted; diagnostic_limit=${MAX_DIAGNOSTIC_BYTES})`);
 }
 
 function verifierFailureText(error, fallback) {
@@ -33,48 +85,9 @@ function verifierFailureText(error, fallback) {
 }
 
 export async function verify(workspace) {
-  const tests = spawnSync(process.execPath, ['--test', 'test/server.test.mjs'], {
-    cwd: workspace,
-    windowsHide: true,
-    maxBuffer: MAX_PUBLIC_TEST_OUTPUT_BYTES,
-    env: testEnvironment(),
-  });
-  const output = publicTestOutput(tests);
-  const spawnFailure = tests.error === undefined ? '' : `, spawn_error=${String(tests.error.code ?? 'unknown')}`;
-  const testMessage = tests.status === 0 && tests.error === undefined
-    ? 'the public tests pass'
-    : `public tests failed (exit=${String(tests.status)}${spawnFailure})${output === '' ? '' : `\n${output}`}`;
-  assert.equal(tests.status, 0, testMessage);
-
-  const serverModule = await import(`${pathToFileURL(join(workspace, 'src', 'server.mjs')).href}?verify=${Date.now()}`);
-  const server = serverModule.createItemServer();
-  await new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', resolve);
-  });
-  try {
-    const address = server.address();
-    const baseUrl = `http://127.0.0.1:${address.port}`;
-    const updated = await fetch(`${baseUrl}/api/items/item-1`, {
-      method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: '  Black Tea  ' }),
-    });
-    assert.equal(updated.status, 200);
-    assert.deepEqual(await updated.json(), { id: 'item-1', name: 'Black Tea' });
-
-    const invalid = await fetch(`${baseUrl}/api/items/item-1`, {
-      method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: ' '.repeat(2) }),
-    });
-    assert.equal(invalid.status, 400);
-    const unchanged = await fetch(`${baseUrl}/api/items/item-1`);
-    assert.deepEqual(await unchanged.json(), { id: 'item-1', name: 'Black Tea' });
-
-    const missing = await fetch(`${baseUrl}/api/items/missing`, {
-      method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'missing' }),
-    });
-    assert.equal(missing.status, 404);
-  } finally {
-    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
-  }
+  const tests = publicTestResult(['--test', '--test-reporter=tap', 'test/server.test.mjs'], workspace);
+  assertPublicTestsSucceeded(tests);
+  assertBehaviorSucceeded(await runBehavior(workspace));
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -97,8 +97,9 @@ test('coding verifiers cap public-test diagnostics and exclude unrelated environ
       const result = runVerifier(taskDirectory, workspace, { LIGULE_VERIFIER_TEST_SECRET: sentinel });
       assert.notEqual(result.status, 0, `${taskId} diagnostic fixture must fail`);
       assert.equal(result.stderr.includes(sentinel), false, `${taskId} must not inherit unrelated environment variables`);
-      assert.equal(/public test output truncated at 8192 bytes/u.test(result.stderr), true,
-        `${taskId} must report the output limit (bytes=${Buffer.byteLength(result.stderr)}, exit=${String(result.status)})`);
+      assert.equal(result.stderr.includes('x'.repeat(100)), false, `${taskId} must not echo raw public-test output`);
+      assert.equal(/diagnostic_limit=8192/u.test(result.stderr), true,
+        `${taskId} must report its diagnostic limit (bytes=${Buffer.byteLength(result.stderr)}, exit=${String(result.status)})`);
       assert.ok(Buffer.byteLength(result.stderr) <= 16_384, `${taskId} diagnostic must remain bounded`);
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true });
@@ -106,7 +107,7 @@ test('coding verifiers cap public-test diagnostics and exclude unrelated environ
   }
 });
 
-test('coding verifier error details have a byte limit and explicit truncation marker', async () => {
+test('coding verifier error details omit behavior output and stay byte-bounded', async () => {
   const taskDirectory = join(codingTasks, 'c02');
   const temporaryDirectory = await mkdtemp(join(temporaryRoot, 'ligule-p1-c02-verifier-error-'));
   const workspace = join(temporaryDirectory, 'workspace');
@@ -114,10 +115,14 @@ test('coding verifier error details have a byte limit and explicit truncation ma
     await mkdir(join(workspace, 'test'), { recursive: true });
     await mkdir(join(workspace, 'src'), { recursive: true });
     await writeFile(join(workspace, 'test', 'server.test.mjs'), 'export {};\n');
-    await writeFile(join(workspace, 'src', 'server.mjs'), "throw new Error('x'.repeat(32768));\n");
+    await writeFile(join(workspace, 'src', 'server.mjs'), "process.stdout.write('o'.repeat(131072)); process.stderr.write('e'.repeat(131072)); throw new Error('fixture_failure');\n");
     const result = runVerifier(taskDirectory, workspace);
     assert.notEqual(result.status, 0, 'the verifier must keep the task failure');
-    assert.equal(/verifier diagnostic truncated at 16384 bytes/u.test(result.stderr), true);
+    assert.equal(result.stderr.includes('fixture_failure'), false, 'behavior error text must not cross the process boundary');
+    assert.equal(result.stderr.includes('o'.repeat(100)), false, 'behavior output must not cross the process boundary');
+    assert.equal(result.stderr.includes('e'.repeat(100)), false, 'behavior stderr must not cross the process boundary');
+    assert.equal(result.stderr.includes('raw output omitted'), true,
+      `stderr_bytes=${Buffer.byteLength(result.stderr)}, behavior_label=${result.stderr.includes('independent behavior checks')}, output_limit_label=${result.stderr.includes('diagnostic_limit=8192')}`);
     assert.ok(Buffer.byteLength(result.stderr) <= 16_384, 'the verifier stderr must respect its byte limit');
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
@@ -136,8 +141,152 @@ test('the C04 verifier caps task-command output and names truncation', async () 
     await writeFile(join(workspace, 'bin', 'summary.mjs'), "process.stdout.write('x'.repeat(131072));\n");
     const result = runVerifier(taskDirectory, workspace);
     assert.notEqual(result.status, 0, 'the verifier must keep the command output failure');
-    assert.equal(/verifier command output truncated at 8192 bytes/u.test(result.stderr), true);
+    assert.equal(result.stderr.includes('x'.repeat(100)), false, 'task command output must not be copied into verifier errors');
+    const diagnostic = {
+      invalidJson: result.stderr.includes('returned invalid JSON'),
+      byteCount: /stdout_bytes=(\d+)/u.exec(result.stderr)?.[1] ?? 'missing',
+      limit: result.stderr.includes('diagnostic_limit=8192'),
+      omitted: result.stderr.includes('output omitted'),
+    };
+    assert.equal(diagnostic.invalidJson, true, JSON.stringify(diagnostic));
+    assert.equal(diagnostic.byteCount, '131072', JSON.stringify(diagnostic));
+    assert.equal(diagnostic.limit, true, JSON.stringify(diagnostic));
+    assert.equal(diagnostic.omitted, true, JSON.stringify(diagnostic));
     assert.ok(Buffer.byteLength(result.stderr) <= 16_384, 'the task command diagnostic must respect its byte limit');
+  } finally {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test('coding behavior checks do not inherit verifier environment variables', async () => {
+  const sentinel = 'behavior-verifier-environment-sentinel';
+  const sourceFiles = { c01: 'contact.mjs', c02: 'server.mjs', c03: 'slug.mjs' };
+  for (const [taskId, sourceFile] of Object.entries(sourceFiles)) {
+    const taskDirectory = join(codingTasks, taskId);
+    const temporaryDirectory = await mkdtemp(join(temporaryRoot, `ligule-p1-${taskId}-behavior-env-`));
+    const workspace = join(temporaryDirectory, 'workspace');
+    try {
+      await cp(join(taskDirectory, 'environment', 'app'), workspace, { recursive: true });
+      const sourcePath = join(workspace, 'src', sourceFile);
+      await copyFile(join(taskDirectory, 'solution', 'app', 'src', sourceFile), sourcePath);
+      if (taskId === 'c02') {
+        await copyFile(join(taskDirectory, 'solution', 'app', 'test', 'server.test.mjs'), join(workspace, 'test', 'server.test.mjs'));
+      }
+      const source = await readFile(sourcePath, 'utf8');
+      await writeFile(sourcePath, `if (process.env.LIGULE_VERIFIER_TEST_SECRET) process.stderr.write(process.env.LIGULE_VERIFIER_TEST_SECRET);\n${source}`);
+      const result = runVerifier(taskDirectory, workspace, { LIGULE_VERIFIER_TEST_SECRET: sentinel });
+      assert.equal(result.status, 0, `${taskId} reference behavior must keep passing`);
+      assert.equal(`${result.stdout}${result.stderr}`.includes(sentinel), false, `${taskId} behavior code must not see verifier environment variables`);
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
+  }
+});
+
+test('coding behavior output is drained, bounded, and marked without a reward bypass', async () => {
+  const sourceFiles = { c01: 'contact.mjs', c02: 'server.mjs', c03: 'slug.mjs' };
+  for (const [taskId, sourceFile] of Object.entries(sourceFiles)) {
+    const taskDirectory = join(codingTasks, taskId);
+    const testFile = { c01: 'contact.test.mjs', c02: 'server.test.mjs', c03: 'slug.test.mjs' }[taskId];
+    const temporaryDirectory = await mkdtemp(join(temporaryRoot, `ligule-p1-${taskId}-behavior-output-`));
+    const workspace = join(temporaryDirectory, 'workspace');
+    try {
+      await mkdir(join(workspace, 'test'), { recursive: true });
+      await mkdir(join(workspace, 'src'), { recursive: true });
+      await writeFile(join(workspace, 'test', testFile), 'export {};\n');
+      await writeFile(join(workspace, 'src', sourceFile), "process.stdout.write('x'.repeat(131072)); throw new Error('behavior_output_fixture_failure');\n");
+      const result = runVerifier(taskDirectory, workspace);
+      const output = `${result.stdout}${result.stderr}`;
+      assert.notEqual(result.status, 0, `${taskId} behavior failure must remain a verifier failure`);
+      assert.equal(output.includes('x'.repeat(100)), false, `${taskId} behavior output must not be copied into verifier errors`);
+      const diagnostic = {
+        behaviorLabel: output.includes('independent behavior checks'),
+        stdoutBytes: /stdout_bytes=(\d+)/u.exec(output)?.[1] ?? 'missing',
+        childOutputOmitted: output.includes('child output omitted'),
+        limit: output.includes('diagnostic_limit=8192'),
+      };
+      assert.equal(diagnostic.behaviorLabel, true, `${taskId}: ${JSON.stringify(diagnostic)}`);
+      assert.equal(diagnostic.stdoutBytes, '131072', `${taskId}: ${JSON.stringify(diagnostic)}`);
+      assert.equal(output.includes('raw output omitted'), true, `${taskId}: ${JSON.stringify(diagnostic)}`);
+      assert.equal(diagnostic.limit, true, `${taskId}: ${JSON.stringify(diagnostic)}`);
+      assert.ok(Buffer.byteLength(output) <= 16_384, `${taskId} final verifier output must remain bounded`);
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
+  }
+});
+
+test('the C04 verifier preserves passing CLI results with verbose stderr', async () => {
+  const taskDirectory = join(codingTasks, 'c04');
+  const temporaryDirectory = await mkdtemp(join(temporaryRoot, 'ligule-p1-c04-verbose-stderr-'));
+  const workspace = join(temporaryDirectory, 'workspace');
+  try {
+    await mkdir(join(workspace, 'test'), { recursive: true });
+    await mkdir(join(workspace, 'bin'), { recursive: true });
+    await writeFile(join(workspace, 'test', 'summary.test.mjs'), 'export {};\n');
+    await writeFile(join(workspace, 'events.json'), '{}\n');
+    await writeFile(join(workspace, 'bin', 'summary.mjs'), [
+      "const json = process.argv.includes('--json');",
+      "const invalid = process.argv.includes('--unknown');",
+      "if (invalid) { process.stderr.write('x'.repeat(131072)); process.exitCode = 2; }",
+      "else if (json) { process.stderr.write('x'.repeat(131072)); process.stdout.write('{\"errors\":1,\"warnings\":2}\\n'); }",
+      "else process.stdout.write('Errors: 1, Warnings: 2\\n');",
+      '',
+    ].join('\n'));
+    const result = runVerifier(taskDirectory, workspace);
+    assert.equal(result.status, 0, 'large task stderr alone must not turn a valid CLI result into a failure');
+    assert.equal(`${result.stdout}${result.stderr}`.includes('x'.repeat(100)), false, 'verbose task stderr must not be forwarded');
+    assert.equal(Buffer.byteLength(`${result.stdout}${result.stderr}`) <= 16_384, true);
+  } finally {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+});
+
+test('coding verifiers keep passing public tests successful when output is verbose', async () => {
+  const testFiles = {
+    c01: 'contact.test.mjs',
+    c02: 'server.test.mjs',
+    c03: 'slug.test.mjs',
+    c04: 'summary.test.mjs',
+  };
+  for (const [taskId, testFile] of Object.entries(testFiles)) {
+    const taskDirectory = join(codingTasks, taskId);
+    const temporaryDirectory = await mkdtemp(join(temporaryRoot, `ligule-p1-${taskId}-verbose-pass-`));
+    const workspace = join(temporaryDirectory, 'workspace');
+    try {
+      await cp(join(taskDirectory, 'solution', 'app'), workspace, { recursive: true });
+      await mkdir(join(workspace, 'test'), { recursive: true });
+      if (taskId === 'c04') await copyFile(join(taskDirectory, 'environment', 'app', 'events.json'), join(workspace, 'events.json'));
+      await writeFile(join(workspace, 'test', testFile), [
+        "import test from 'node:test';",
+        "test('verbose public test still passes', () => { process.stdout.write('x'.repeat(131072)); });",
+        '',
+      ].join('\n'));
+      const result = runVerifier(taskDirectory, workspace);
+      assert.equal(result.status, 0, `${taskId} must preserve the public test result`);
+      assert.equal(`${result.stdout}${result.stderr}`.includes('x'.repeat(100)), false, `${taskId} passing test output must not be forwarded`);
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
+  }
+});
+
+test('verifiers preserve the historical one-MiB child output failure limit', async () => {
+  const taskDirectory = join(codingTasks, 'c01');
+  const temporaryDirectory = await mkdtemp(join(temporaryRoot, 'ligule-p1-c01-child-output-limit-'));
+  const workspace = join(temporaryDirectory, 'workspace');
+  try {
+    await cp(join(taskDirectory, 'solution', 'app'), workspace, { recursive: true });
+    await mkdir(join(workspace, 'test'), { recursive: true });
+    await writeFile(join(workspace, 'test', 'contact.test.mjs'), [
+      "import test from 'node:test';",
+      "test('over-limit public test output', () => { process.stdout.write('x'.repeat(2097152)); });",
+      '',
+    ].join('\n'));
+    const result = runVerifier(taskDirectory, workspace);
+    assert.notEqual(result.status, 0, 'output above the existing child-process limit must remain a failure');
+    assert.equal(/output_limit=1048576/u.test(result.stderr), true);
+    assert.ok(Buffer.byteLength(result.stderr) <= 16_384);
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
   }

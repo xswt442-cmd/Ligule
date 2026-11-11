@@ -1,24 +1,124 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-const MAX_PUBLIC_TEST_OUTPUT_BYTES = 8 * 1024;
+const MAX_CAPTURED_STREAM_BYTES = 1024 * 1024;
+const MAX_DIAGNOSTIC_STREAM_BYTES = 8 * 1024;
 const MAX_VERIFIER_DIAGNOSTIC_BYTES = 16 * 1024;
 const TEST_ENVIRONMENT_KEYS = ['PATH', 'HOME', 'TMPDIR', 'TMP', 'TEMP', 'USERPROFILE', 'SYSTEMROOT', 'WINDIR', 'PATHEXT'];
+const PUBLIC_TEST_NAMES = new Set([
+  'the default summary stays human-readable',
+  'the JSON flag works before and after the input path',
+]);
 
 function testEnvironment() {
   return Object.fromEntries(TEST_ENVIRONMENT_KEYS.flatMap((name) =>
     typeof process.env[name] === 'string' ? [[name, process.env[name]]] : []));
 }
 
-function publicTestOutput(result) {
-  const stdout = Buffer.isBuffer(result.stdout) ? result.stdout : Buffer.alloc(0);
-  const stderr = Buffer.isBuffer(result.stderr) ? result.stderr : Buffer.alloc(0);
-  const output = Buffer.concat([stdout, Buffer.from('\n'), stderr]);
-  const truncated = result.error?.code === 'ENOBUFS' || output.length > MAX_PUBLIC_TEST_OUTPUT_BYTES;
-  const text = output.subarray(0, MAX_PUBLIC_TEST_OUTPUT_BYTES).toString('utf8').trim();
-  return `${text}${truncated ? `\n[public test output truncated at ${MAX_PUBLIC_TEST_OUTPUT_BYTES} bytes]` : ''}`;
+function outputCapture() {
+  const halfLimit = MAX_DIAGNOSTIC_STREAM_BYTES / 2;
+  let totalBytes = 0;
+  let first = Buffer.alloc(0);
+  let last = Buffer.alloc(0);
+  let outputTooLarge = false;
+  const chunks = [];
+  return {
+    append(chunk) {
+      totalBytes += chunk.length;
+      if (!outputTooLarge) {
+        if (totalBytes <= MAX_CAPTURED_STREAM_BYTES) chunks.push(chunk);
+        else {
+          outputTooLarge = true;
+          chunks.length = 0;
+        }
+      }
+      let offset = 0;
+      if (first.length < halfLimit) {
+        const length = Math.min(halfLimit - first.length, chunk.length);
+        first = Buffer.concat([first, chunk.subarray(0, length)]);
+        offset = length;
+      }
+      if (offset < chunk.length) {
+        last = Buffer.concat([last, chunk.subarray(offset)]);
+        if (last.length > halfLimit) last = last.subarray(last.length - halfLimit);
+      }
+    },
+    text() {
+      return outputTooLarge ? '' : Buffer.concat(chunks).toString('utf8');
+    },
+    diagnostic(name) {
+      const visible = Buffer.concat([first, last]).toString('utf8');
+      return totalBytes <= MAX_DIAGNOSTIC_STREAM_BYTES
+        ? visible
+        : `${visible}\n[${name} output truncated at ${MAX_DIAGNOSTIC_STREAM_BYTES} bytes; total=${totalBytes} bytes]`;
+    },
+    get bytes() { return totalBytes; },
+    get outputTooLarge() { return outputTooLarge; },
+  };
+}
+
+function runChild(args, cwd) {
+  const stdout = outputCapture();
+  const stderr = outputCapture();
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, args, {
+      cwd,
+      env: testEnvironment(),
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let error;
+    child.once('error', (value) => { error = value; });
+    child.stdout.on('data', (chunk) => stdout.append(chunk));
+    child.stderr.on('data', (chunk) => stderr.append(chunk));
+    child.once('close', (status, signal) => resolve({
+      status, signal, error,
+      outputTooLarge: stdout.outputTooLarge || stderr.outputTooLarge,
+      stdout: stdout.text(), stderr: stderr.text(),
+      stdoutBytes: stdout.bytes, stderrBytes: stderr.bytes,
+      stdoutDiagnostic: stdout.diagnostic('stdout'), stderrDiagnostic: stderr.diagnostic('stderr'),
+    }));
+  });
+}
+
+function childFailure(result, label, expectedStatus = 0) {
+  const spawnError = result.error === undefined ? '' : `, spawn_error=${String(result.error.code ?? 'unknown')}`;
+  const signal = result.signal === null ? '' : `, signal=${String(result.signal)}`;
+  const outputLimit = result.outputTooLarge ? `, output_limit=${MAX_CAPTURED_STREAM_BYTES}` : '';
+  return `${label} failed (exit=${String(result.status)}, expected=${expectedStatus}${signal}${spawnError}${outputLimit}; stdout_bytes=${result.stdoutBytes}; stderr_bytes=${result.stderrBytes}; child output omitted; diagnostic_limit=${MAX_DIAGNOSTIC_STREAM_BYTES})`;
+}
+
+function assertProcessSucceeded(result, label, expectedStatus = 0) {
+  if (result.status === expectedStatus && result.error === undefined && !result.outputTooLarge) return;
+  throw new Error(childFailure(result, label, expectedStatus));
+}
+
+function assertPublicTestsSucceeded(result) {
+  if (result.status === 0 && result.error === undefined && !result.outputTooLarge) return;
+  const names = new Set();
+  for (const line of `${result.stdoutDiagnostic}\n${result.stderrDiagnostic}`.split(/\r?\n/u)) {
+    const match = /^not ok \d+ - (.*)$/u.exec(line);
+    if (match !== null && PUBLIC_TEST_NAMES.has(match[1])) names.add(match[1]);
+  }
+  const summary = names.size > 0
+    ? `; failed public tests=${[...names].join('; ')}`
+    : '; failed public test suite=test/summary.test.mjs; no known title captured';
+  throw new Error(`${childFailure(result, 'project tests')}${summary}`);
+}
+
+function parseJsonOutput(result, label) {
+  try {
+    return JSON.parse(result.stdout);
+  } catch {
+    throw new Error(`${label} returned invalid JSON (stdout_bytes=${result.stdoutBytes}; diagnostic_limit=${MAX_DIAGNOSTIC_STREAM_BYTES}; output omitted)`);
+  }
+}
+
+function expectedSummary(value) {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    && Object.keys(value).length === 2 && value.errors === 1 && value.warnings === 2;
 }
 
 function verifierFailureText(error, fallback) {
@@ -32,48 +132,27 @@ function verifierFailureText(error, fallback) {
   return Buffer.concat([Buffer.from(prefix, 'utf8'), marker]);
 }
 
-function runProgram(args) {
-  return spawnSync(process.execPath, args, {
-    encoding: 'utf8', windowsHide: true, maxBuffer: MAX_PUBLIC_TEST_OUTPUT_BYTES, env: testEnvironment(),
-  });
-}
-
-function assertProgramSuccess(result, label, expectedStatus = 0) {
-  if (result.error?.code === 'ENOBUFS') {
-    throw new Error(`${label} output exceeded ${MAX_PUBLIC_TEST_OUTPUT_BYTES} bytes [verifier command output truncated at ${MAX_PUBLIC_TEST_OUTPUT_BYTES} bytes]`);
-  }
-  if (result.error !== undefined) throw new Error(`${label} could not start (spawn_error=${String(result.error.code ?? 'unknown')})`);
-  assert.equal(result.status, expectedStatus, `${label} failed (exit=${String(result.status)})`);
-}
-
 export async function verify(workspace) {
-  const tests = spawnSync(process.execPath, ['--test', 'test/summary.test.mjs'], {
-    cwd: workspace,
-    windowsHide: true,
-    maxBuffer: MAX_PUBLIC_TEST_OUTPUT_BYTES,
-    env: testEnvironment(),
-  });
-  const output = publicTestOutput(tests);
-  const spawnFailure = tests.error === undefined ? '' : `, spawn_error=${String(tests.error.code ?? 'unknown')}`;
-  const testMessage = tests.status === 0 && tests.error === undefined
-    ? 'the project tests pass'
-    : `project tests failed (exit=${String(tests.status)}${spawnFailure})${output === '' ? '' : `\n${output}`}`;
-  assert.equal(tests.status, 0, testMessage);
+  const tests = await runChild(['--test', '--test-reporter=tap', 'test/summary.test.mjs'], workspace);
+  assertPublicTestsSucceeded(tests);
 
   const cli = join(workspace, 'bin', 'summary.mjs');
   const data = join(workspace, 'events.json');
-  const jsonFirst = runProgram([cli, '--json', data]);
-  const jsonLast = runProgram([cli, data, '--json']);
-  for (const result of [jsonFirst, jsonLast]) {
-    assertProgramSuccess(result, 'JSON summary');
-    assert.deepEqual(JSON.parse(result.stdout), { errors: 1, warnings: 2 });
-  }
-  const human = runProgram([cli, data]);
-  assertProgramSuccess(human, 'human summary');
-  assert.equal(human.stdout, 'Errors: 1, Warnings: 2\n');
-  const invalid = runProgram([cli, '--unknown', data]);
-  assertProgramSuccess(invalid, 'unknown option', 2);
-  assert.notEqual(invalid.stderr.trim(), '');
+  const jsonFirst = await runChild([cli, '--json', data], workspace);
+  assertProcessSucceeded(jsonFirst, 'JSON summary');
+  assert.equal(expectedSummary(parseJsonOutput(jsonFirst, 'JSON summary')), true, 'JSON summary did not match expected fields');
+
+  const jsonLast = await runChild([cli, data, '--json'], workspace);
+  assertProcessSucceeded(jsonLast, 'JSON summary');
+  assert.equal(expectedSummary(parseJsonOutput(jsonLast, 'JSON summary')), true, 'JSON summary did not match expected fields');
+
+  const human = await runChild([cli, data], workspace);
+  assertProcessSucceeded(human, 'human summary');
+  assert.equal(human.stdout === 'Errors: 1, Warnings: 2\n', true, 'human summary did not match expected text');
+
+  const invalid = await runChild([cli, '--unknown', data], workspace);
+  assertProcessSucceeded(invalid, 'unknown option', 2);
+  assert.equal(invalid.stderr.trim() !== '', true, 'unknown option did not write stderr');
 }
 
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
