@@ -524,7 +524,8 @@ test('release workflows split CI, tagging, and product publication and keep proc
   assert.match(registryCommand, /"\$GITHUB_WORKSPACE\/dist-tarball\/ligule-\$\{version\}\.tgz"/);
   assert.doesNotMatch(registryCommand, /registry-version --/);
   assert.ok(registrySteps.some((step) => step.run === 'pnpm install --frozen-lockfile'));
-  const pnpmSetup = registrySteps.findIndex((step) => step.uses === 'pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413');
+  // 只要求动作被钉在某个完整提交上，版本升级由 dependabot 改动作引用即可，不必同步改测试。
+  const pnpmSetup = registrySteps.findIndex((step) => /^pnpm\/action-setup@[0-9a-f]{40}$/u.test(step.uses ?? ''));
   assert.ok(pnpmSetup >= 0 && pnpmSetup < registrySteps.findIndex((step) => step.uses === 'actions/setup-node@v7'),
   'pnpm must exist before setup-node configures pnpm caching');
 
