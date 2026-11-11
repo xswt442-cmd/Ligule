@@ -27,6 +27,41 @@ function isObject(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function editArgumentShape(value) {
+  if (!isObject(value)) return 'other';
+  const anchor = Object.hasOwn(value, 'anchor');
+  const replacement = Object.hasOwn(value, 'replacement');
+  const changes = Object.hasOwn(value, 'changes');
+  if (changes && (anchor || replacement)) return 'mixed';
+  if (changes) return 'changes';
+  if (anchor && replacement) return 'legacy_anchor';
+  return 'other';
+}
+
+function editArgumentShapeSummary(events, userSeq) {
+  const userIndex = events.findIndex((event) => event.kind === 'user' && event.seq === userSeq);
+  if (userIndex < 0) throw new Error('atif_user_event_not_found');
+  const nextUserIndex = events.findIndex((event, index) => index > userIndex && event.kind === 'user');
+  const end = nextUserIndex < 0 ? events.length : nextUserIndex;
+  const counts = () => ({ total: 0, legacy_anchor: 0, changes: 0, mixed: 0, other: 0 });
+  const requested = counts();
+  const recorded = counts();
+  const add = (target, args) => {
+    const shape = editArgumentShape(args);
+    target.total += 1;
+    target[shape] += 1;
+  };
+  for (const event of events.slice(userIndex + 1, end)) {
+    if (event.kind === 'assistant' && Array.isArray(event.toolCalls)) {
+      for (const call of event.toolCalls) {
+        if (isObject(call) && call.name === 'edit') add(requested, call.args);
+      }
+    }
+    if (event.kind === 'tool' && event.tool === 'edit') add(recorded, event.args);
+  }
+  return { version: 1, tool: 'edit', requested, recorded };
+}
+
 function safeCode(error) {
   const candidate = typeof error?.message === 'string' ? error.message : '';
   return /^[A-Za-z0-9_:-]{1,128}$/u.test(candidate) ? candidate : 'atif_export_failed';
@@ -193,6 +228,7 @@ export async function exportSession({
     agentVersion,
     ...(modelName === undefined ? {} : { modelName }),
   }, { includeSensitiveContent });
+  await writeJson(join(resolve(logsDirectory), 'edit-argument-shapes.json'), editArgumentShapeSummary(events, user.seq));
   await writeJson(join(resolve(logsDirectory), 'trajectory.json'), trajectory);
   return trajectory;
 }

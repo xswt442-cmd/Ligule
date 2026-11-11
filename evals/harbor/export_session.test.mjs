@@ -63,7 +63,7 @@ async function packagedHelper(root) {
   return import(pathToFileURL(helperPath).href);
 }
 
-async function seedSession(homeDirectory) {
+async function seedSession(homeDirectory, { includeEditArguments = false } = {}) {
   const sessionDirectory = join(homeDirectory, 'sessions');
   await mkdir(sessionDirectory, { recursive: true });
   const sessionId = 'harbor-session';
@@ -79,10 +79,24 @@ async function seedSession(homeDirectory) {
   const truncated = await spillContent(fullOutput, { limit: 300, directory: sessionDirectory, name: spillName });
   await session.append({ kind: 'tool', tool: 'read', callId: 'call-spill', args: { path: '/private/task/secret.txt' },
     result: { kind: 'result', failed: false, content: truncated, spilled: spillName, spillFormat: 'text' } });
+  const editArgumentSecret = 'edit-argument-secret-marker';
+  if (includeEditArguments) {
+    const editCalls = [
+      { id: 'call-edit-legacy', name: 'edit', args: { path: '/private/task/secret.txt', anchor: editArgumentSecret, replacement: 'replacement-secret-marker' } },
+      { id: 'call-edit-changes', name: 'edit', args: { path: '/private/task/secret.txt', changes: [{ oldText: editArgumentSecret, newText: 'replacement-secret-marker' }] } },
+      { id: 'call-edit-mixed', name: 'edit', args: { path: '/private/task/secret.txt', anchor: editArgumentSecret, replacement: 'replacement-secret-marker', changes: [] } },
+      { id: 'call-edit-other', name: 'edit', args: { path: '/private/task/secret.txt', anchor: editArgumentSecret } },
+    ];
+    await session.append({ kind: 'assistant', text: 'Apply exact changes', toolCalls: editCalls });
+    for (const call of editCalls) {
+      await session.append({ kind: 'tool', tool: 'edit', callId: call.id, args: call.args,
+        result: { kind: 'result', failed: false, content: 'edited' } });
+    }
+  }
   await session.append({ kind: 'assistant', text: 'Done.', toolCalls: [] });
   await session.append({ kind: 'turn', ignorable: true, status: 'failed', userSeq: user.seq, runId: run.runId, code: 'task_failed' });
   await session.close();
-  return { sessionDirectory, sessionId, runId: run.runId, fullOutput };
+  return { sessionDirectory, sessionId, runId: run.runId, fullOutput, editArgumentSecret };
 }
 
 test('reads a real trial Session, restores a spill, and exports through the Core package subpath', async () => {
@@ -91,7 +105,7 @@ test('reads a real trial Session, restores a spill, and exports through the Core
     const helper = await packagedHelper(root);
     const homeDirectory = join(root, 'trial-home');
     await mkdir(homeDirectory);
-    const source = await seedSession(homeDirectory);
+    const source = await seedSession(homeDirectory, { includeEditArguments: true });
     const logsDirectory = join(root, 'logs', 'agent');
     const redacted = await helper.exportSession({
       homeDirectory,
@@ -107,8 +121,29 @@ test('reads a real trial Session, restores a spill, and exports through the Core
     assert.equal(agent.observation.results[0].extra.ligule.outcome, 'completed');
     assert.equal(JSON.stringify(redacted).includes('sensitive tool output'), false);
     assert.equal(JSON.stringify(redacted).includes('/private/task/secret.txt'), false);
+    const shapePath = join(logsDirectory, 'edit-argument-shapes.json');
+    const shapeText = await readFile(shapePath, 'utf8');
+    assert.deepEqual(JSON.parse(shapeText), {
+      version: 1,
+      tool: 'edit',
+      requested: { total: 4, legacy_anchor: 1, changes: 1, mixed: 1, other: 1 },
+      recorded: { total: 4, legacy_anchor: 1, changes: 1, mixed: 1, other: 1 },
+    });
+    assert.equal(shapeText.includes(source.editArgumentSecret), false);
+    assert.equal(shapeText.includes('replacement-secret-marker'), false);
     if (process.env.LIGULE_ATIF_OUTPUT_PATH) {
-      await copyFile(join(logsDirectory, 'trajectory.json'), process.env.LIGULE_ATIF_OUTPUT_PATH);
+      const reportHome = join(root, 'report-home');
+      await mkdir(reportHome);
+      const reportSource = await seedSession(reportHome);
+      const reportLogs = join(root, 'report-logs', 'agent');
+      await helper.exportSession({
+        homeDirectory: reportHome,
+        ...reportSource,
+        agentVersion: '0.1.1-dev',
+        modelName: 'test-model',
+        logsDirectory: reportLogs,
+      });
+      await copyFile(join(reportLogs, 'trajectory.json'), process.env.LIGULE_ATIF_OUTPUT_PATH);
     }
 
     const sensitiveLogs = join(root, 'sensitive-logs', 'agent');
