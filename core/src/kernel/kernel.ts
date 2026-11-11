@@ -586,10 +586,9 @@ export function createKernel(options: KernelOptions = {}): Kernel {
                 const reason = options.signal.reason;
                 throw reason instanceof KernelError ? reason : new KernelError('loop_cancelled', { cause: reason });
               }
-              // 工具会再次解析路径；把槽位内核实的目标直接交给它，避免链接在这段窗口里改指使写入落到另一个文件。
-              // 删除工具需要按原路径判断链接本身，因此保持原参数。
-              const runArgs = name === 'delete' ? args : { ...(args as Record<string, unknown>), path: currentTarget };
-              return await runTool(latestPermission, runArgs);
+              // 工具会再次解析路径，但上面的比较已经确保它落在同一个文件上；
+              // 参数保持原样，审批记住的是调用者看到的那条路径。
+              return await runTool(latestPermission);
             }, options.signal);
           } else {
             value = await runTool(callPermission);
