@@ -27,6 +27,20 @@ try {
   const unchanged = await fetch(`${baseUrl}/api/items/item-1`);
   assert.deepEqual(await unchanged.json(), { id: 'item-1', name: 'Black Tea' });
 
+  const malformed = await fetch(`${baseUrl}/api/items/item-1`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json' }, body: '{',
+  });
+  assert.equal(malformed.status, 400);
+  const unchangedAfterMalformed = await fetch(`${baseUrl}/api/items/item-1`);
+  assert.deepEqual(await unchangedAfterMalformed.json(), { id: 'item-1', name: 'Black Tea' });
+
+  const overlong = await fetch(`${baseUrl}/api/items/item-1`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'x'.repeat(81) }),
+  });
+  assert.equal(overlong.status, 400);
+  const unchangedAfterOverlong = await fetch(`${baseUrl}/api/items/item-1`);
+  assert.deepEqual(await unchangedAfterOverlong.json(), { id: 'item-1', name: 'Black Tea' });
+
   const missing = await fetch(`${baseUrl}/api/items/missing`, {
     method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'missing' }),
   });

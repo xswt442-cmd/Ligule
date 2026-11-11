@@ -38,6 +38,16 @@ async function verifyFixture(taskId) {
     assert.match(initial.stderr, failureNames[taskId], `the ${taskId.toUpperCase()} verifier must retain a failed public test name`);
 
     if (taskId === 'c02') {
+      const c02EnvironmentTests = await readFile(join(taskDirectory, 'environment', 'app', 'test', 'server.test.mjs'), 'utf8');
+      const c02SolutionTests = await readFile(join(taskDirectory, 'solution', 'app', 'test', 'server.test.mjs'), 'utf8');
+      const c02Behavior = await readFile(join(taskDirectory, 'tests', 'behavior.mjs'), 'utf8');
+      const patchBody = "JSON.stringify({ name: '  Black Tea  ' })";
+      assert.equal(c02EnvironmentTests.split(patchBody).length - 1, 2,
+        'C02 stale 405 and target PATCH tests must use the same request body');
+      assert.equal(c02SolutionTests.includes(patchBody), true, 'C02 reference test must use the target PATCH request body');
+      assert.equal(c02Behavior.includes(patchBody), true, 'C02 independent behavior check must use the target PATCH request body');
+      assert.match(initial.stderr, /PATCH rejects invalid JSON without changing the item/u);
+      assert.match(initial.stderr, /PATCH rejects names over 80 characters without changing the item/u);
       await copyFile(join(taskDirectory, 'solution', 'app', 'src', 'server.mjs'), join(workspace, 'src', 'server.mjs'));
       const routeOnly = runVerifier(taskDirectory, workspace);
       assert.notEqual(routeOnly.status, 0, 'the C02 route implementation must also update the stale public test');
@@ -296,6 +306,8 @@ test('coding and canary plans use auto while repeated runs stay limited to C01',
   const once = JSON.parse(await readFile(join(codingTasks, '..', 'coding-plan.json'), 'utf8'));
   const repeated = JSON.parse(await readFile(join(codingTasks, '..', 'coding-c01-repeat-plan.json'), 'utf8'));
   const canary = JSON.parse(await readFile(join(codingTasks, '..', 'canary-plan.json'), 'utf8'));
+  assert.equal(once.dataset.version, '0.1.3-p1.2');
+  assert.equal(repeated.dataset.version, '0.1.3-p1.2');
   assert.equal(once.policy_mode, 'auto');
   assert.equal(once.attempts_per_task, 1);
   assert.deepEqual(once.tasks.map((task) => task.id), ['c01', 'c02', 'c03', 'c04']);

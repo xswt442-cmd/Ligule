@@ -9,6 +9,8 @@ const PUBLIC_TEST_NAMES = new Set([
   'GET returns the existing item',
   'PATCH trims and updates an existing item',
   'PATCH rejects invalid names without changing the item',
+  'PATCH rejects invalid JSON without changing the item',
+  'PATCH rejects names over 80 characters without changing the item',
   'PATCH remains unsupported under the current route contract',
 ]);
 

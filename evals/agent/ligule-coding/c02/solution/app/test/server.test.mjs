@@ -44,3 +44,25 @@ test('PATCH rejects invalid names without changing the item', async () => {
     assert.deepEqual(await unchanged.json(), { id: 'item-1', name: 'Tea' });
   });
 });
+
+test('PATCH rejects invalid JSON without changing the item', async () => {
+  await withServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/items/item-1`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' }, body: '{',
+    });
+    assert.equal(response.status, 400);
+    const unchanged = await fetch(`${baseUrl}/api/items/item-1`);
+    assert.deepEqual(await unchanged.json(), { id: 'item-1', name: 'Tea' });
+  });
+});
+
+test('PATCH rejects names over 80 characters without changing the item', async () => {
+  await withServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/items/item-1`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'x'.repeat(81) }),
+    });
+    assert.equal(response.status, 400);
+    const unchanged = await fetch(`${baseUrl}/api/items/item-1`);
+    assert.deepEqual(await unchanged.json(), { id: 'item-1', name: 'Tea' });
+  });
+});
