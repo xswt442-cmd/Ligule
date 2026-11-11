@@ -10,7 +10,11 @@ export async function verify(workspace) {
     windowsHide: true,
   });
   assert.equal(tests.error, undefined, 'the public test process starts');
-  assert.equal(tests.status, 0, 'the public tests pass');
+  const output = [tests.stdout, tests.stderr].filter(Boolean).join('\n').trim();
+  const testMessage = tests.status === 0
+    ? 'the public tests pass'
+    : `public tests failed (exit=${String(tests.status)})${output === '' ? '' : `\n${output}`}`;
+  assert.equal(tests.status, 0, testMessage);
 
   const serverModule = await import(`${pathToFileURL(join(workspace, 'src', 'server.mjs')).href}?verify=${Date.now()}`);
   const server = serverModule.createItemServer();

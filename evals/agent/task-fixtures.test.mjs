@@ -10,10 +10,13 @@ const codingTasks = join(repository, 'evals', 'agent', 'ligule-coding');
 const temporaryRoot = join(repository, 'testplace', 'tmp');
 
 function runVerifier(taskDirectory, workspace) {
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
   return spawnSync(process.execPath, [join(taskDirectory, 'tests', 'verify.mjs'), workspace], {
     cwd: workspace,
     encoding: 'utf8',
     windowsHide: true,
+    env,
   });
 }
 
@@ -24,7 +27,11 @@ async function verifyFixture(taskId) {
   const workspace = join(temporaryDirectory, 'workspace');
   try {
     await cp(join(taskDirectory, 'environment', 'app'), workspace, { recursive: true });
-    assert.notEqual(runVerifier(taskDirectory, workspace).status, 0, 'the initial task must fail its verifier');
+    const initial = runVerifier(taskDirectory, workspace);
+    assert.notEqual(initial.status, 0, 'the initial task must fail its verifier');
+    if (taskId === 'c01') {
+      assert.match(initial.stderr, /displayName prefers a trimmed nickname/u, 'the C01 verifier must retain its failed public test name');
+    }
 
     await cp(join(taskDirectory, 'solution', 'app'), workspace, { recursive: true, force: true });
     assert.equal(runVerifier(taskDirectory, workspace).status, 0, 'the reference behavior must pass independently');

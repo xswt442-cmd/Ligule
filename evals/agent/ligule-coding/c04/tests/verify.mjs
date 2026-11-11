@@ -10,7 +10,11 @@ export async function verify(workspace) {
     windowsHide: true,
   });
   assert.equal(tests.error, undefined, 'the project test process starts');
-  assert.equal(tests.status, 0, 'the project tests pass');
+  const output = [tests.stdout, tests.stderr].filter(Boolean).join('\n').trim();
+  const testMessage = tests.status === 0
+    ? 'the project tests pass'
+    : `project tests failed (exit=${String(tests.status)})${output === '' ? '' : `\n${output}`}`;
+  assert.equal(tests.status, 0, testMessage);
 
   const cli = join(workspace, 'bin', 'summary.mjs');
   const data = join(workspace, 'events.json');
