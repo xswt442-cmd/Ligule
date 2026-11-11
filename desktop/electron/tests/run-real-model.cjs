@@ -384,13 +384,16 @@ async function selectNewSessionPermission(profile) {
 }
 
 async function verifyExternalControlEventGap({ observerSessionId, draftAwaySessionId, mcpClient, takeoverAfter = false }) {
+  // 缺口场景里临时切走的会话也可能是外控会话（由 MCP 创建），那时输入框本来就该在；
+  // 只有切到本机普通会话时才应该看不到外控输入框。
+  const awayIsExternal = draftAwaySessionId !== sessionId;
   await evaluate(`(() => {
     const item = [...document.querySelectorAll('.session-item')].find(button => button.title.endsWith(${JSON.stringify(` · ${draftAwaySessionId}`)}));
     item?.click();
     return item !== undefined;
   })()`);
   await waitFor(`document.querySelector('.session-item.active')?.title.endsWith(${JSON.stringify(` · ${draftAwaySessionId}`)}) === true
-    && document.querySelector('.external-session-composer') === null`, 10_000, 'external_gap_switch_away_failed');
+    && (document.querySelector('.external-session-composer') === null) === ${awayIsExternal ? 'false' : 'true'}`, 10_000, 'external_gap_switch_away_failed');
   const gapStart = await mcpClient.callTool({ name: 'ligule_run_start', arguments: {
     sessionId: observerSessionId,
     input: 'desktop-external-control-gap',
