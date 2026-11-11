@@ -46,3 +46,14 @@ test('PATCH rejects invalid names without changing the item', async () => {
     assert.deepEqual(await unchanged.json(), { id: 'item-1', name: 'Tea' });
   });
 });
+
+test('PATCH remains unsupported under the current route contract', async () => {
+  await withServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/items/item-1`, {
+      method: 'PATCH',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Black Tea' }),
+    });
+    assert.equal(response.status, 405);
+  });
+});

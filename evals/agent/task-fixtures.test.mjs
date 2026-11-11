@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,6 +36,13 @@ async function verifyFixture(taskId) {
       c04: /the JSON flag works before and after the input path/u,
     };
     assert.match(initial.stderr, failureNames[taskId], `the ${taskId.toUpperCase()} verifier must retain a failed public test name`);
+
+    if (taskId === 'c02') {
+      await copyFile(join(taskDirectory, 'solution', 'app', 'src', 'server.mjs'), join(workspace, 'src', 'server.mjs'));
+      const routeOnly = runVerifier(taskDirectory, workspace);
+      assert.notEqual(routeOnly.status, 0, 'the C02 route implementation must also update the stale public test');
+      assert.match(routeOnly.stderr, /PATCH remains unsupported under the current route contract/u);
+    }
 
     await cp(join(taskDirectory, 'solution', 'app'), workspace, { recursive: true, force: true });
     assert.equal(runVerifier(taskDirectory, workspace).status, 0, 'the reference behavior must pass independently');
