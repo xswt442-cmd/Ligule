@@ -22,6 +22,7 @@ import {
 import { listMcpTrust, mcpServerTrust, mcpTrustPathOf, setMcpServerTrust, type McpTrustScope } from './mcp-trust.js';
 import { createPermissionContext, DEFAULT_PERMISSION_CONTEXT, permissionDenial, type PermissionContext, type PermissionContextOptions, type PermissionNetwork, type PermissionProfile } from '../kernel/permission.js';
 import { createKernel, type Kernel } from '../kernel/kernel.js';
+import { createFileWriteQueue } from '../kernel/file-write-queue.js';
 import { loadAssembly, type Assembly, type Plugin } from '../kernel/assembly.js';
 import { loadExtensions, type ExtensionDiagnostic } from '../kernel/extensions.js';
 import { readExtensionState, writeExtensionState } from '../kernel/extension-state.js';
@@ -726,6 +727,8 @@ export function createHost({
   agentControl, screenCaptureConsent = false, telemetry: telemetryOptions,
 }: HostOptions): Host {
   if (typeof screenCaptureConsent !== 'boolean') throw new KernelError('screen_capture_consent_invalid');
+  // Share file mutation ordering across this Host's Session Kernels only.
+  const fileWriteQueue = createFileWriteQueue();
   const telemetry = createTelemetry(telemetryOptions ?? telemetryOptionsOfUserLayer(configLayers?.user), code => {
     try { logger?.log?.('telemetry storage unavailable', { code, severity: 'error' }); }
     catch { /* Storage diagnostics must not affect Host or Agent work. */ }
@@ -2128,6 +2131,7 @@ export function createHost({
       chain.restore({ ...recoveredPolicyState, override: recoveredPolicyState.override ?? (grant?.defaultPolicy ?? null) });
     }
     const kernel = createKernel({ config, policy: chain, session, logger,
+      fileWriteQueue,
       permissionForCall: () => state.permission,
       policyOverrideForSession: () => state.policyOverride,
     });
@@ -2267,6 +2271,7 @@ export function createHost({
       ...(customToolPlugin === undefined ? [] : [customToolPlugin]),
       createSubagentPlugin({
       config,
+      fileWriteQueue,
       provider: live,
       chain,
       prompt,

@@ -434,9 +434,11 @@ test('Linux sandbox cancellation stops descendants before they can change the wo
     shell: withNativeExitCode(shell, command),
   });
   try {
-    const deadline = Date.now() + 2_000;
+    const startedAt = Date.now();
+    const deadline = startedAt + 5_000;
     while (Date.now() < deadline && !existsSync(join(workspace, 'started'))) await delay(10);
     assert.equal(existsSync(join(workspace, 'started')), true, 'the child process must have started inside the sandbox');
+    t.diagnostic(`Linux sandbox cancellation child startup: ${Date.now() - startedAt}ms`);
     controller.abort();
     await assert.rejects(() => execution, (error) => (error as CodedFailure).code === 'exec_cancelled');
     await delay(1_100);
@@ -475,7 +477,7 @@ test('timeout terminates a detached descendant without leaving it alive', async 
   await assertStopped(pid);
 });
 
-test('cancellation terminates a detached descendant without leaving it alive', async () => {
+test('cancellation terminates a detached descendant without leaving it alive', async (t) => {
   const childPidFile = join(directory, `cancel-child-${(counter += 1)}.pid`).replace(/\\/g, '/');
   const script = [
     'const { spawn } = require("node:child_process");',
@@ -487,9 +489,11 @@ test('cancellation terminates a detached descendant without leaving it alive', a
   const controller = new AbortController();
   const execution = run(nodeCommand(script), undefined, controller.signal);
   try {
-    const deadline = Date.now() + 2_000;
+    const startedAt = Date.now();
+    const deadline = startedAt + 5_000;
     while (Date.now() < deadline && !existsSync(childPidFile)) await delay(10);
     assert.ok(existsSync(childPidFile), 'the command should record its owned child PID before cancellation');
+    t.diagnostic(`detached cancellation child PID startup: ${Date.now() - startedAt}ms`);
     const pid = Number(readFileSync(childPidFile, 'utf8'));
     controller.abort();
     await assert.rejects(() => execution, (error) => (error as CodedFailure).code === 'exec_cancelled');

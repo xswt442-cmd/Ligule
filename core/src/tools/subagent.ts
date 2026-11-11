@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
 import { createKernel, type Kernel } from '../kernel/kernel.js';
+import type { FileWriteQueue } from '../kernel/file-write-queue.js';
 import { createLoop, DEFAULT_LOOP_LIMITS, type LoopLimits } from '../kernel/loop.js';
 import { createPromptAssembly } from '../kernel/prompt.js';
 import { createSessionLog } from '../session/session.js';
@@ -53,6 +54,7 @@ function stableErrorCode(error: unknown): string {
 }
 
 export interface SubagentDeps {
+  readonly fileWriteQueue?: FileWriteQueue;
   readonly taskBudget?: () => TaskBudget | undefined;
   readonly createMcp?: (id: string, media: MediaStore) => Promise<{ plugin: Parameters<typeof loadAssembly>[1][number]; close(): Promise<void> }>;
   readonly authorizeScreenCapture?: () => Promise<AbortSignal>;
@@ -221,6 +223,7 @@ export function createSubagentPlugin(deps: SubagentDeps) {
             try {
               const child = createKernel({
                 config: deps.config,
+                fileWriteQueue: deps.fileWriteQueue,
                 // 派生执行复用父会话的权限判定实例，包括拒绝次数与强制审批状态。
                 policy: deps.chain,
                 session,

@@ -8,7 +8,7 @@ import { SPILL_NAME } from '@ligule/core/kernel/result.js';
 import { sessionTurnToAtif } from '@ligule/core/session/atif.js';
 import { setTrusted } from '@ligule/core/kernel/workspace-trust.js';
 
-import { BENCHMARK_POLICY_MODE } from './policy-mode.mjs';
+import { BENCHMARK_POLICY_MODE, policyModeForCli } from './policy-mode.mjs';
 
 export { BENCHMARK_POLICY_MODE };
 
@@ -25,6 +25,41 @@ const CLI_ENV_ALLOWLIST = [
 
 function isObject(value) {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function editArgumentShape(value) {
+  if (!isObject(value)) return 'other';
+  const anchor = Object.hasOwn(value, 'anchor');
+  const replacement = Object.hasOwn(value, 'replacement');
+  const changes = Object.hasOwn(value, 'changes');
+  if (changes && (anchor || replacement)) return 'mixed';
+  if (changes) return 'changes';
+  if (anchor && replacement) return 'legacy_anchor';
+  return 'other';
+}
+
+function editArgumentShapeSummary(events, userSeq) {
+  const userIndex = events.findIndex((event) => event.kind === 'user' && event.seq === userSeq);
+  if (userIndex < 0) throw new Error('atif_user_event_not_found');
+  const nextUserIndex = events.findIndex((event, index) => index > userIndex && event.kind === 'user');
+  const end = nextUserIndex < 0 ? events.length : nextUserIndex;
+  const counts = () => ({ total: 0, legacy_anchor: 0, changes: 0, mixed: 0, other: 0 });
+  const requested = counts();
+  const recorded = counts();
+  const add = (target, args) => {
+    const shape = editArgumentShape(args);
+    target.total += 1;
+    target[shape] += 1;
+  };
+  for (const event of events.slice(userIndex + 1, end)) {
+    if (event.kind === 'assistant' && Array.isArray(event.toolCalls)) {
+      for (const call of event.toolCalls) {
+        if (isObject(call) && call.name === 'edit') add(requested, call.args);
+      }
+    }
+    if (event.kind === 'tool' && event.tool === 'edit') add(recorded, event.args);
+  }
+  return { version: 1, tool: 'edit', requested, recorded };
 }
 
 function safeCode(error) {
@@ -193,7 +228,18 @@ export async function exportSession({
     agentVersion,
     ...(modelName === undefined ? {} : { modelName }),
   }, { includeSensitiveContent });
-  await writeJson(join(resolve(logsDirectory), 'trajectory.json'), trajectory);
+  const shapeSummaryPath = join(resolve(logsDirectory), 'edit-argument-shapes.json');
+  await writeJson(shapeSummaryPath, editArgumentShapeSummary(events, user.seq));
+  try {
+    await writeJson(join(resolve(logsDirectory), 'trajectory.json'), trajectory);
+  } catch (error) {
+    try {
+      await unlink(shapeSummaryPath);
+    } catch {
+      // Preserve the trajectory write error; cleanup is best-effort on this failure path.
+    }
+    throw error;
+  }
   return trajectory;
 }
 
@@ -286,8 +332,9 @@ export function runCli(cli, args, { cwd, env, timeoutMs }) {
   });
 }
 
-export function buildCliArgs({ instruction, sessionDirectory, api, baseUrl, model, apiKeyEnv, modelCalls, timeoutMs, requestTimeoutMs, outputTokens }) {
+export function buildCliArgs({ instruction, sessionDirectory, api, baseUrl, model, apiKeyEnv, modelCalls, timeoutMs, requestTimeoutMs, outputTokens, policyMode }) {
   if (api !== 'messages' && api !== 'chat-completions') throw new Error('ligule_api_unsupported');
+  const actualPolicyMode = policyModeForCli(policyMode);
   if (!isAbsolute(sessionDirectory) || typeof model !== 'string' || model.trim() === '' || model.length > 256
     || typeof instruction !== 'string' || instruction.trim() === '') throw new Error('ligule_run_input_invalid');
   const url = new URL(baseUrl);
@@ -304,7 +351,7 @@ export function buildCliArgs({ instruction, sessionDirectory, api, baseUrl, mode
     ['host.sessionDirectory', sessionDirectory], ['model.api', api], ['model.baseURL', baseUrl],
     ['model.model', model], ['model.apiKeyEnv', apiKeyEnv], ['loop.modelCalls', modelCalls],
     ['loop.totalModelCalls', modelCalls], ['loop.taskTimeoutMs', timeoutMs], ['loop.requestTimeoutMs', requestTimeoutMs],
-    ['policy.mode', BENCHMARK_POLICY_MODE],
+    ['policy.mode', actualPolicyMode],
   ];
   if (outputTokens !== undefined) values.push(['model.outputTokens', outputTokens]);
   return [
@@ -331,7 +378,7 @@ async function writeResult(logsDirectory, result) {
 }
 
 // 基准容器里没有交互式信任确认，任务目录必须由评测器显式信任；
-// 不受信任时 `git`、解释器与项目脚本在 `never` 下仍会被拒（exec_workspace_untrusted）。
+// 工作区信任与计划选择的 Policy 模式是独立状态。
 export async function ensureWorkspaceTrust(directory) {
   await setTrusted(directory, true);
 }
@@ -350,6 +397,7 @@ async function runMode(args) {
   const modelCalls = Number(takeOption(args, '--model-calls'));
   const timeoutMs = Number(takeOption(args, '--timeout-ms'));
   const requestTimeoutMs = Number(takeOption(args, '--request-timeout-ms'));
+  const policyMode = takeOption(args, '--policy-mode', false);
   const outputTokensValue = takeOption(args, '--output-tokens', false);
   const outputTokens = outputTokensValue === undefined ? undefined : Number(outputTokensValue);
   if (args.length > 0) throw new Error('ligule_export_unexpected_arguments');
@@ -364,7 +412,7 @@ async function runMode(args) {
   await ensureWorkspaceTrust(process.cwd());
 
   const child = await runCli(cli, buildCliArgs({
-    instruction, sessionDirectory, api, baseUrl, model, apiKeyEnv, modelCalls, timeoutMs, requestTimeoutMs, outputTokens,
+    instruction, sessionDirectory, api, baseUrl, model, apiKeyEnv, modelCalls, timeoutMs, requestTimeoutMs, outputTokens, policyMode,
   }), {
     cwd: process.cwd(),
     env: buildCliEnvironment(process.env, homeDirectory, apiKeyEnv),

@@ -276,6 +276,18 @@ export function providerUrlProblem(value: string | undefined): string | undefine
   return undefined;
 }
 
+export function setupProxyUrlProblem(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  let url: URL;
+  try { url = new URL(value); } catch { return 'LIGULE_BENCH_SETUP_PROXY_URL is invalid'; }
+  if ((url.protocol !== 'http:' && url.protocol !== 'https:')
+    || url.hostname === '' || url.username !== '' || url.password !== ''
+    || (url.pathname !== '' && url.pathname !== '/') || url.search !== '' || url.hash !== '') {
+    return 'LIGULE_BENCH_SETUP_PROXY_URL must be an unauthenticated HTTP(S) origin';
+  }
+  return undefined;
+}
+
 export function positiveInteger(value: string | undefined, name: string): number | undefined {
   if (value === undefined) return undefined;
   const parsed = Number(value);

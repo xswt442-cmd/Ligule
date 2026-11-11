@@ -29,3 +29,20 @@ test('approval summaries bind every argument and do not expose sensitive values'
   assert.equal(containsSensitiveMaterial({ content: 'ordinary readable text' }), false);
   assert.equal(containsSensitiveMaterial({ authorization: 'Bearer secret' }), true);
 });
+
+test('multi-edit approval previews the requested changes and binds the complete original arguments', () => {
+  const args = {
+    path: 'src/example.ts',
+    changes: [
+      { oldText: 'const before = 1;', newText: 'const before = 2;' },
+      { oldText: 'return false;', newText: 'return true;' },
+    ],
+  };
+  const summary = summarizeApproval({ requestId: 'r4', sessionId: 's1', tool: 'edit', args });
+
+  assert.equal(summary.argumentSha256, approvalArgsDigest(args));
+  assert.equal(summary.args.path, args.path);
+  assert.match(summary.preview, /- const before = 1;/u);
+  assert.match(summary.preview, /\+ return true;/u);
+  assert.deepEqual(summary.rememberTargetOptions, ['file', 'workspace']);
+});

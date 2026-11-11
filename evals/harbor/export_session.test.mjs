@@ -40,7 +40,7 @@ async function copyDependency(name, targetRoot, fromDirectory = corePackage) {
   }
 }
 
-async function packagedHelper(root) {
+async function packagedHelper(root, { shapeCleanupFails = false } = {}) {
   const packageRoot = join(root, 'node_modules', 'ligule');
   await mkdir(packageRoot, { recursive: true });
   await writeFile(join(packageRoot, 'package.json'), JSON.stringify({
@@ -57,13 +57,19 @@ async function packagedHelper(root) {
     await copyDependency(dependency, join(packageRoot, 'node_modules'));
   }
   const helperPath = join(packageRoot, 'export_session.mjs');
-  await writeFile(helperPath, await readFile(helperSource));
+  let helperText = await readFile(helperSource, 'utf8');
+  if (shapeCleanupFails) {
+    const cleanup = 'await unlink(shapeSummaryPath);';
+    assert.ok(helperText.includes(cleanup), 'the test must inject failure at the sidecar cleanup point');
+    helperText = helperText.replace(cleanup, "await Promise.reject(new Error('injected_shape_cleanup_failure'));");
+  }
+  await writeFile(helperPath, helperText);
   // 导出器从同目录的 policy-mode.mjs 读取基准审批档位，容器里也要一起上传。
   await writeFile(join(packageRoot, 'policy-mode.mjs'), await readFile(fileURLToPath(new URL('./policy-mode.mjs', import.meta.url))));
   return import(pathToFileURL(helperPath).href);
 }
 
-async function seedSession(homeDirectory) {
+async function seedSession(homeDirectory, { includeEditArguments = false } = {}) {
   const sessionDirectory = join(homeDirectory, 'sessions');
   await mkdir(sessionDirectory, { recursive: true });
   const sessionId = 'harbor-session';
@@ -79,10 +85,24 @@ async function seedSession(homeDirectory) {
   const truncated = await spillContent(fullOutput, { limit: 300, directory: sessionDirectory, name: spillName });
   await session.append({ kind: 'tool', tool: 'read', callId: 'call-spill', args: { path: '/private/task/secret.txt' },
     result: { kind: 'result', failed: false, content: truncated, spilled: spillName, spillFormat: 'text' } });
+  const editArgumentSecret = 'edit-argument-secret-marker';
+  if (includeEditArguments) {
+    const editCalls = [
+      { id: 'call-edit-legacy', name: 'edit', args: { path: '/private/task/secret.txt', anchor: editArgumentSecret, replacement: 'replacement-secret-marker' } },
+      { id: 'call-edit-changes', name: 'edit', args: { path: '/private/task/secret.txt', changes: [{ oldText: editArgumentSecret, newText: 'replacement-secret-marker' }] } },
+      { id: 'call-edit-mixed', name: 'edit', args: { path: '/private/task/secret.txt', anchor: editArgumentSecret, replacement: 'replacement-secret-marker', changes: [] } },
+      { id: 'call-edit-other', name: 'edit', args: { path: '/private/task/secret.txt', anchor: editArgumentSecret } },
+    ];
+    await session.append({ kind: 'assistant', text: 'Apply exact changes', toolCalls: editCalls });
+    for (const call of editCalls) {
+      await session.append({ kind: 'tool', tool: 'edit', callId: call.id, args: call.args,
+        result: { kind: 'result', failed: false, content: 'edited' } });
+    }
+  }
   await session.append({ kind: 'assistant', text: 'Done.', toolCalls: [] });
   await session.append({ kind: 'turn', ignorable: true, status: 'failed', userSeq: user.seq, runId: run.runId, code: 'task_failed' });
   await session.close();
-  return { sessionDirectory, sessionId, runId: run.runId, fullOutput };
+  return { sessionDirectory, sessionId, runId: run.runId, fullOutput, editArgumentSecret };
 }
 
 test('reads a real trial Session, restores a spill, and exports through the Core package subpath', async () => {
@@ -91,7 +111,7 @@ test('reads a real trial Session, restores a spill, and exports through the Core
     const helper = await packagedHelper(root);
     const homeDirectory = join(root, 'trial-home');
     await mkdir(homeDirectory);
-    const source = await seedSession(homeDirectory);
+    const source = await seedSession(homeDirectory, { includeEditArguments: true });
     const logsDirectory = join(root, 'logs', 'agent');
     const redacted = await helper.exportSession({
       homeDirectory,
@@ -107,8 +127,29 @@ test('reads a real trial Session, restores a spill, and exports through the Core
     assert.equal(agent.observation.results[0].extra.ligule.outcome, 'completed');
     assert.equal(JSON.stringify(redacted).includes('sensitive tool output'), false);
     assert.equal(JSON.stringify(redacted).includes('/private/task/secret.txt'), false);
+    const shapePath = join(logsDirectory, 'edit-argument-shapes.json');
+    const shapeText = await readFile(shapePath, 'utf8');
+    assert.deepEqual(JSON.parse(shapeText), {
+      version: 1,
+      tool: 'edit',
+      requested: { total: 4, legacy_anchor: 1, changes: 1, mixed: 1, other: 1 },
+      recorded: { total: 4, legacy_anchor: 1, changes: 1, mixed: 1, other: 1 },
+    });
+    assert.equal(shapeText.includes(source.editArgumentSecret), false);
+    assert.equal(shapeText.includes('replacement-secret-marker'), false);
     if (process.env.LIGULE_ATIF_OUTPUT_PATH) {
-      await copyFile(join(logsDirectory, 'trajectory.json'), process.env.LIGULE_ATIF_OUTPUT_PATH);
+      const reportHome = join(root, 'report-home');
+      await mkdir(reportHome);
+      const reportSource = await seedSession(reportHome);
+      const reportLogs = join(root, 'report-logs', 'agent');
+      await helper.exportSession({
+        homeDirectory: reportHome,
+        ...reportSource,
+        agentVersion: '0.1.1-dev',
+        modelName: 'test-model',
+        logsDirectory: reportLogs,
+      });
+      await copyFile(join(reportLogs, 'trajectory.json'), process.env.LIGULE_ATIF_OUTPUT_PATH);
     }
 
     const sensitiveLogs = join(root, 'sensitive-logs', 'agent');
@@ -124,6 +165,53 @@ test('reads a real trial Session, restores a spill, and exports through the Core
     assert.equal(sensitiveAgent.observation.results[0].content, source.fullOutput);
     assert.equal(sensitiveAgent.tool_calls[0].arguments.path, '/private/task/secret.txt');
     assert.equal(JSON.parse(await readFile(join(logsDirectory, 'trajectory.json'), 'utf8')).schema_version, 'ATIF-v1.8');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('removes edit shape counts when the paired trajectory cannot be written', async () => {
+  const root = await mkdtemp(join(temporaryRoot, 'ligule-harbor-atif-shape-pair-'));
+  try {
+    const helper = await packagedHelper(root);
+    const homeDirectory = join(root, 'trial-home');
+    await mkdir(homeDirectory);
+    const source = await seedSession(homeDirectory, { includeEditArguments: true });
+    const logsDirectory = join(root, 'logs', 'agent');
+    await mkdir(logsDirectory, { recursive: true });
+    await writeFile(join(logsDirectory, 'trajectory.json'), '{}\n');
+
+    await assert.rejects(helper.exportSession({
+      homeDirectory,
+      ...source,
+      agentVersion: '0.1.1-dev',
+      logsDirectory,
+    }), /ligule_export_output_exists/u);
+    assert.equal(existsSync(join(logsDirectory, 'edit-argument-shapes.json')), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('preserves the trajectory error when shape sidecar cleanup also fails', async () => {
+  const root = await mkdtemp(join(temporaryRoot, 'ligule-harbor-atif-shape-cleanup-failure-'));
+  try {
+    const helper = await packagedHelper(root, { shapeCleanupFails: true });
+    const homeDirectory = join(root, 'trial-home');
+    await mkdir(homeDirectory);
+    const source = await seedSession(homeDirectory, { includeEditArguments: true });
+    const logsDirectory = join(root, 'logs', 'agent');
+    await mkdir(logsDirectory, { recursive: true });
+    await writeFile(join(logsDirectory, 'trajectory.json'), '{}\n');
+
+    await assert.rejects(helper.exportSession({
+      homeDirectory,
+      ...source,
+      agentVersion: '0.1.1-dev',
+      logsDirectory,
+    }), /ligule_export_output_exists/u);
+    assert.equal(existsSync(join(logsDirectory, 'edit-argument-shapes.json')), true,
+      'the injected cleanup failure should leave the sidecar for test teardown');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -188,6 +276,9 @@ test('forwards a per-request output-token budget to the CLI', async () => {
     const args = helper.buildCliArgs(options);
     assert.ok(args.includes('model.outputTokens=16384'));
     assert.throws(() => helper.buildCliArgs({ ...options, outputTokens: 0 }), /ligule_run_output_tokens_invalid/u);
+    const autoArgs = helper.buildCliArgs({ ...options, policyMode: 'auto' });
+    assert.ok(autoArgs.includes('policy.mode="auto"'));
+    assert.throws(() => helper.buildCliArgs({ ...options, policyMode: 'ask' }), /policy_mode_invalid/u);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

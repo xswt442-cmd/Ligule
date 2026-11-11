@@ -179,6 +179,30 @@ export function changeOf(tool: string, args: Record<string, unknown>, locale: 'z
       after: replacement,
     };
   }
+  if (tool === 'edit' && Array.isArray(args.changes)) {
+    const changes = args.changes;
+    if (changes.length === 0) return none;
+    if (!changes.every((change) => typeof change === 'object' && change !== null
+      && typeof (change as Record<string, unknown>).oldText === 'string'
+      && typeof (change as Record<string, unknown>).newText === 'string')) return none;
+    const pairs = changes as { oldText: string; newText: string }[];
+    const changedLines = (value: string) => {
+      if (value === '') return 0;
+      const count = value.split(/\r\n|\n|\r/u).length;
+      return /(?:\r\n|\n|\r)$/u.test(value) ? count - 1 : count;
+    };
+    const removed = pairs.reduce((total, change) => total + changedLines(change.oldText), 0);
+    const added = pairs.reduce((total, change) => total + changedLines(change.newText), 0);
+    const before = pairs.map((change, index) => `[${index + 1}]\n${change.oldText}`).join('\n\n');
+    const after = pairs.map((change, index) => `[${index + 1}]\n${change.newText === '' ? t('（空）', '(empty)') : change.newText}`).join('\n\n');
+    return {
+      summary: t(`${path}：精确替换 ${pairs.length} 处（删除 ${removed} 行，写入 ${added} 行）`, `${path}: replace ${pairs.length} exact matches (${removed} lines removed, ${added} added)`),
+      diff: { added, removed },
+      action: t(`${path}：逐处替换唯一匹配内容`, `${path}: replace each unique exact match`),
+      before,
+      after,
+    };
+  }
   if (tool === 'delete') {
     return { summary: t(`将 ${path} 移入系统回收站`, `Move ${path} to the system recycle bin`), action: t(`若系统回收站不可用或拒绝目标，操作会报错并保留原文件`, `If the system recycle bin is unavailable or refuses the target, the operation reports an error and leaves the source in place`), before: '', after: '' };
   }

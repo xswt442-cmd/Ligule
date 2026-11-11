@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { basename, dirname, join, relative, sep } from 'node:path';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
@@ -16,12 +16,17 @@ const testDirectory = dirname(fileURLToPath(import.meta.url));
 const electronDirectory = dirname(testDirectory);
 const desktopDirectory = dirname(electronDirectory);
 const repositoryRoot = dirname(desktopDirectory);
-const testRoot = join(desktopDirectory, 'testplace');
-const temporaryParent = join(testRoot, 'tmp');
-const evidenceParent = join(testRoot, 'readings');
-const executable = createRequire(join(desktopDirectory, 'package.json'))('electron');
+const testRoot = resolve(process.env.LIGULE_DESKTOP_TEST_ROOT ?? join(desktopDirectory, 'testplace'));
+const temporaryParent = resolve(process.env.LIGULE_DESKTOP_TEST_TEMP ?? join(testRoot, 'tmp'));
+const evidenceParent = resolve(process.env.LIGULE_DESKTOP_TEST_EVIDENCE ?? join(testRoot, 'readings'));
+const workspaceRegistrationTimeoutMs = Number(process.env.LIGULE_DESKTOP_TEST_STARTUP_TIMEOUT_MS ?? 60_000);
+if (!Number.isSafeInteger(workspaceRegistrationTimeoutMs) || workspaceRegistrationTimeoutMs < 1) {
+  throw new Error('stub_model_startup_timeout_invalid');
+}
+const executable = resolve(process.env.LIGULE_DESKTOP_TEST_ELECTRON ?? createRequire(join(desktopDirectory, 'package.json'))('electron'));
 const harness = join(testDirectory, 'run-real-model.cjs');
-const node = join(desktopDirectory, 'vendor', 'node', process.platform === 'win32' ? 'node.exe' : 'node');
+const node = resolve(process.env.LIGULE_DESKTOP_TEST_NODE
+  ?? join(desktopDirectory, 'vendor', 'node', process.platform === 'win32' ? 'node.exe' : 'node'));
 const cli = join(repositoryRoot, 'core', 'dist', 'host', 'desktop-entry.js');
 const mcpFixture = join(repositoryRoot, 'tests', 'fixtures', 'mcp-minimal.mjs');
 const hostEntry = join(electronDirectory, 'dist', 'host-entry.js');
@@ -37,7 +42,8 @@ const PROOF_FILES = [
   { name: 'model-allow-proof.txt', content: 'ALLOWED' },
 ];
 const providerLabel = '本地 stub 模型';
-const externalControlOnly = process.argv.includes('--external-control-only');
+const externalControlGapOnly = process.argv.includes('--external-control-gap-only');
+const externalControlOnly = externalControlGapOnly || process.argv.includes('--external-control-only');
 const providerRequests = [];
 let externalFetchCount = 0;
 // 启用后只记录新请求而不返回响应，用于验证界面在请求等待期间的行为。
@@ -45,6 +51,7 @@ let hangRequests = false;
 const skillMcpProof = { skillToolAvailable: false, skillActivated: false, mcpInspectAvailable: false, mcpCallAvailable: false, mcpInspectRequested: false };
 const mcpInspectWireName = wireToolName('mcp.inspect');
 const mcpCallWireName = wireToolName('mcp.call');
+let workspaceRegistrationMs = null;
 
 function wireToolName(name) {
   if (/^[A-Za-z0-9_-]{1,64}$/u.test(name)) return name;
@@ -78,6 +85,7 @@ const server = createServer(async (request, response) => {
         hang: hangRequests,
         skillMcpProof,
         externalFetchCount,
+        externalGapRequests: providerRequests.filter(item => item.gapStreamChunks === 180).length,
         sessionQuestionFollowups: sessionQuestionFollowups.length,
         lastSessionQuestionAnswer: sessionQuestionFollowups.at(-1)?.sessionQuestionAnswer ?? null,
       });
@@ -115,6 +123,7 @@ const server = createServer(async (request, response) => {
   const sessionQuestionAnswer = sessionQuestionTurn && followup ? String(messages.at(-1)?.content ?? '') : '';
   const externalQuestionTurn = messages.some(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes('desktop-external-control-question'));
   const externalApprovalTurn = messages.some(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes('desktop-external-control-approval'));
+  const externalGapTurn = prompt.includes('desktop-external-control-gap');
   const workflowMarker = 'desktop-skill-mcp-load-proof';
   const workflowStart = messages.findLastIndex(message => message.role === 'user' && typeof message.content === 'string' && message.content.includes(workflowMarker));
   const workflowStep = workflowStart < 0 ? -1 : messages.slice(workflowStart + 1).filter(message => message.role === 'tool').length;
@@ -131,6 +140,7 @@ const server = createServer(async (request, response) => {
       },
     }),
     toolCall: followup ? null : target?.name ?? null,
+    ...(externalGapTurn ? { gapStreamChunks: 180 } : {}),
     skillMcpStep: workflowStep < 0 ? null : workflowStep,
     ...(workflowStep < 0 ? {} : { skillMcpProof: { ...skillMcpProof } }),
     hung: hangRequests,
@@ -199,6 +209,13 @@ const server = createServer(async (request, response) => {
     respondWithTool(response, 'ask_user_question', {
       questions: JSON.stringify([{ question: 'Choose a route', options: [{ label: 'north' }, { label: 'south' }], multiSelect: false }]),
     }, 'stub-external-human-question');
+    return;
+  }
+  if (externalGapTurn) {
+    for (let index = 0; index < 180 && !closed; index += 1) {
+      streamChunk(response, { choices: [{ index: 0, delta: { content: `P6 desktop retained stream piece ${String(index).padStart(3, '0')}.` } }] });
+    }
+    finish('stop');
     return;
   }
   if (prompt.includes('desktop-session-question-draft')) {
@@ -315,8 +332,10 @@ environment.LIGULE_STUB_CONTROL = `http://127.0.0.1:${server.address().port}/stu
 environment.LIGULE_STUB_FETCH_TARGET = externalFetchTarget;
 environment.LIGULE_EXTERNAL_CONTROL_TEST = '1';
 if (externalControlOnly) environment.LIGULE_EXTERNAL_CONTROL_ONLY = '1';
+if (externalControlGapOnly) environment.LIGULE_EXTERNAL_CONTROL_GAP_ONLY = '1';
 
 async function registerIsolatedWorkspace() {
+  const startedAt = process.hrtime.bigint();
   const preflight = spawn(node, [hostEntry, cli], {
     cwd: repositoryRoot,
     env: environment,
@@ -333,7 +352,7 @@ async function registerIsolatedWorkspace() {
     responseTimer = setTimeout(() => {
       preflight.kill();
       reject(new Error(`stub_model_workspace_registration_timeout:stderr=${preflightStderr.slice(-2_000)};stdout=${output.slice(-2_000)}`));
-    }, 60_000);
+    }, workspaceRegistrationTimeoutMs);
     preflight.once('error', error => { clearTimeout(responseTimer); reject(error); });
     preflight.stdout.setEncoding('utf8');
     preflight.stdout.on('data', chunk => {
@@ -374,6 +393,8 @@ async function registerIsolatedWorkspace() {
     if (preflight.exitCode === null) preflight.kill();
     await exit.catch(() => {});
     throw error;
+  } finally {
+    workspaceRegistrationMs = Number(process.hrtime.bigint() - startedAt) / 1_000_000;
   }
 }
 
@@ -422,7 +443,8 @@ for (const line of standardOutput.split(/\r?\n/u)) {
 }
 
 const report = {
-  command: `${relative(repositoryRoot, node)} desktop/electron/tests/run-stub-model.mjs${externalControlOnly ? ' --external-control-only' : ''}`,
+  command: `${process.env.LIGULE_DESKTOP_TEST_NODE === undefined ? relative(repositoryRoot, node) : 'LIGULE_DESKTOP_TEST_NODE'} desktop/electron/tests/run-stub-model.mjs${externalControlGapOnly ? ' --external-control-gap-only' : externalControlOnly ? ' --external-control-only' : ''}`,
+  workspaceRegistrationMs,
   provider: 'local-stub',
   providerNote: '本地 stub 模型：只验证 Desktop 窗口、审批与取消联动，不构成真实模型验收。',
   platform: process.platform,

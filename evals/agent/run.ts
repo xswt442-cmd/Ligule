@@ -5,9 +5,10 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { arch, platform, release } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { activeBenchmarkOwner, benchmarkTimeoutMs, countsOf, createStateWriter, positiveInteger, prepareRunDirectory, providerUrlProblem, readTarballProvenance, runProcess, safeProviderUrl, timeoutBasis } from './lib.ts';
+import { activeBenchmarkOwner, benchmarkTimeoutMs, countsOf, createStateWriter, positiveInteger, prepareRunDirectory, providerUrlProblem, readTarballProvenance, runProcess, safeProviderUrl, setupProxyUrlProblem, timeoutBasis } from './lib.ts';
 import { outputDirectoryFor, writeManifest } from './manifest.ts';
 import type { ManifestPlan, RunIdentity } from './manifest.ts';
+import { policyModeFromPlan } from '../harbor/policy-mode.mjs';
 
 const repository = fileURLToPath(new URL('../..', import.meta.url));
 const HARBOR_VERSION = '0.25.0';
@@ -155,6 +156,7 @@ async function main(): Promise<void> {
   const planPath = resolve(option('plan') ?? join(repository, 'evals', 'agent', 'plan.json'));
 if (!existsSync(planPath)) throw new Error(`plan_missing:${planPath}`);
   const plan = JSON.parse(await readFile(planPath, 'utf8')) as Plan;
+  const policyMode = policyModeFromPlan(plan.policy_mode);
   const collectOnly = process.argv.includes('--collect-only');
   let validationTasks = plan.tasks;
   if (collectOnly) {
@@ -254,6 +256,8 @@ if (!existsSync(planPath)) throw new Error(`plan_missing:${planPath}`);
   }
   const nodeRuntime = process.env.LIGULE_BENCH_NODE_RUNTIME;
   const nodeRuntimeSha256 = process.env.LIGULE_BENCH_NODE_RUNTIME_SHA256;
+  const setupProxyUrl = process.env.LIGULE_BENCH_SETUP_PROXY_URL;
+  const setupProxyProblem = setupProxyUrlProblem(setupProxyUrl);
   const defaultRunDirectory = join(repository, 'testplace', 'benchmarks', `agent-${new Date().toISOString().replace(/[:.]/g, '-')}`);
   const runDirectory = await prepareRunDirectory(option('output'), force, defaultRunDirectory);
 
@@ -276,6 +280,12 @@ if (!existsSync(planPath)) throw new Error(`plan_missing:${planPath}`);
           ? 'LIGULE_BENCH_NODE_RUNTIME and LIGULE_BENCH_NODE_RUNTIME_SHA256 must be supplied together'
           : `${resolve(nodeRuntime)} sha256=${nodeRuntimeSha256}`,
     },
+    ...(setupProxyUrl === undefined ? {} : {
+      setupProxyUrl: {
+        ok: setupProxyProblem === undefined,
+        detail: setupProxyProblem ?? 'set (value not recorded)',
+      },
+    }),
   };
   if (nodeRuntime !== undefined && nodeRuntimeSha256 !== undefined && existsSync(nodeRuntime)) {
     const actual = await sha256(nodeRuntime);
@@ -354,12 +364,14 @@ if (!existsSync(planPath)) throw new Error(`plan_missing:${planPath}`);
         ligule_model_calls: plan.model.model_calls,
         ligule_timeout_ms: plan.model.timeout_ms,
         ligule_request_timeout_ms: plan.model.request_timeout_ms,
+        ligule_policy_mode: policyMode,
         ...(nodeRuntime === undefined ? {} : {
           ligule_node_runtime_tarball: resolve(nodeRuntime),
           ligule_node_runtime_sha256: nodeRuntimeSha256,
         }),
         ...(process.env.LIGULE_BENCH_BUILD_TOOLS === '1' ? { ligule_install_build_tools: true } : {}),
         ...(process.env.LIGULE_BENCH_APT_MIRROR === undefined ? {} : { ligule_setup_apt_mirror: process.env.LIGULE_BENCH_APT_MIRROR }),
+        ...(setupProxyUrl === undefined ? {} : { ligule_setup_proxy_url: setupProxyUrl }),
       },
       env: { LIGULE_API_KEY: '${LIGULE_API_KEY}' },
     }],

@@ -10,7 +10,8 @@ $runId = [DateTimeOffset]::UtcNow.ToString('yyyyMMddTHHmmssfffZ') + '-' + [Guid]
 $evidenceRoot = Join-Path $evidenceParent $runId
 $version = (Get-Content -LiteralPath (Join-Path $desktopRoot 'package.json') -Raw | ConvertFrom-Json).version
 $installer = Join-Path $desktopRoot "release\ligule Setup $version.exe"
-$installRoot = Join-Path $temporaryParent ('electron-installed-' + $runId)
+# The workspace path is deep; keep the leaf short so the installed resource tree stays under MAX_PATH.
+$installRoot = Join-Path $temporaryParent ('i-' + [Guid]::NewGuid().ToString('N'))
 $resolvedInstallRoot = [IO.Path]::GetFullPath($installRoot)
 $expectedPrefix = [IO.Path]::GetFullPath($temporaryParent).TrimEnd('\') + '\'
 if (-not $resolvedInstallRoot.StartsWith($expectedPrefix, [StringComparison]::OrdinalIgnoreCase)) {

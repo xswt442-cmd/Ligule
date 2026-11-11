@@ -1,4 +1,15 @@
-// 基准任务里没有人可以回答审批：`ask` 会在第一次需要放行时以 ask_unavailable 结束，
-// 于是被测的是审批通道而不是 Agent 能力。基准固定用 `never`，并在运行前显式信任任务目录
-// （见 export_session.mjs 的 ensureWorkspaceTrust）。这两项都是评测声明，不是给产品用的默认值。
+// 既有 Terminal-Bench 计划固定使用 `never`，因为其任务容器没有人能回答审批。
+// 新计划可以显式使用 `auto`，由正常 Policy 链判定，并仍在运行前显式信任任务目录。
 export const BENCHMARK_POLICY_MODE = 'never';
+
+export function policyModeFromPlan(value) {
+  if (value === undefined) return BENCHMARK_POLICY_MODE;
+  if (value === 'auto') return value;
+  throw new Error('benchmark_policy_mode_invalid');
+}
+
+export function policyModeForCli(value) {
+  if (value === undefined) return BENCHMARK_POLICY_MODE;
+  if (value === 'auto' || value === 'never') return value;
+  throw new Error('benchmark_policy_mode_invalid');
+}

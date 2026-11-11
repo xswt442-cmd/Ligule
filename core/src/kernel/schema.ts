@@ -93,7 +93,7 @@ function validateSchemaNode(
     if (!Array.isArray(schema.anyOf) || schema.anyOf.length === 0) {
       violations.push(`${path}.anyOf must be a non-empty array of schemas`);
     } else {
-      if (Object.keys(schema).some((key) => key !== 'anyOf' && key !== 'description')) {
+      if (Object.keys(schema).some((key) => key !== 'anyOf' && key !== 'description' && !(key === 'type' && type === 'object'))) {
         violations.push(`${path}.anyOf cannot be combined with other validation keywords`);
       }
       schema.anyOf.forEach((branch, index) => {
@@ -167,6 +167,27 @@ export function assertSupportedSchema(schema: Record<string, unknown>): void {
 }
 
 function validateValue(schema: Record<string, unknown>, value: unknown, path: string, violations: string[]): void {
+  const type = schemaType(schema);
+  if (type === 'string' && typeof value !== 'string') {
+    violations.push(`"${path}" must be a string`);
+    return;
+  } else if (type === 'integer' && !Number.isInteger(value)) {
+    violations.push(`"${path}" must be an integer`);
+    return;
+  } else if (type === 'number' && (typeof value !== 'number' || !Number.isFinite(value))) {
+    violations.push(`"${path}" must be a number`);
+    return;
+  } else if (type === 'boolean' && typeof value !== 'boolean') {
+    violations.push(`"${path}" must be a boolean`);
+    return;
+  } else if (type === 'object' && !isPlainObject(value)) {
+    violations.push(`"${path}" must be an object`);
+    return;
+  } else if (type === 'array' && !Array.isArray(value)) {
+    violations.push(`"${path}" must be an array`);
+    return;
+  }
+
   if (Array.isArray(schema.anyOf)) {
     const valid = schema.anyOf.some((branch) => {
       if (!isPlainObject(branch)) return false;
@@ -177,14 +198,6 @@ function validateValue(schema: Record<string, unknown>, value: unknown, path: st
     if (!valid) violations.push(`"${path}" must match one of the allowed schemas`);
     return;
   }
-
-  const type = schemaType(schema);
-  if (type === 'string' && typeof value !== 'string') violations.push(`"${path}" must be a string`);
-  else if (type === 'integer' && !Number.isInteger(value)) violations.push(`"${path}" must be an integer`);
-  else if (type === 'number' && (typeof value !== 'number' || !Number.isFinite(value))) violations.push(`"${path}" must be a number`);
-  else if (type === 'boolean' && typeof value !== 'boolean') violations.push(`"${path}" must be a boolean`);
-  else if (type === 'object' && !isPlainObject(value)) violations.push(`"${path}" must be an object`);
-  else if (type === 'array' && !Array.isArray(value)) violations.push(`"${path}" must be an array`);
 
   if (type === 'string' && typeof value === 'string') {
     const length = Array.from(value).length;

@@ -11,6 +11,7 @@ import { sessionDirectory } from '../../../core/dist/session/list.js';
 const scriptDirectory = dirname(fileURLToPath(import.meta.url));
 const desktopDirectory = dirname(dirname(scriptDirectory));
 const repositoryRoot = dirname(desktopDirectory);
+const workspaceRoot = resolve(repositoryRoot, '..');
 const optionValue = (name) => {
   const index = process.argv.indexOf(name);
   if (index < 0) return undefined;
@@ -60,9 +61,9 @@ const resourcesDirectory = process.platform === 'darwin'
 const hostNode = join(resourcesDirectory, 'node', process.platform === 'win32' ? 'node.exe' : 'node');
 const hostCli = join(resourcesDirectory, 'app', 'node_modules', '@ligule', 'core', 'dist', 'host', 'desktop-entry.js');
 const hostEntry = join(resourcesDirectory, 'host-entry.js');
-const testRoot = join(desktopDirectory, 'testplace');
-const temporaryParent = join(testRoot, 'tmp');
-const evidenceParent = join(testRoot, 'readings');
+const testRoot = join(workspaceRoot, 'testplace', 'v0.1.3', 'p8');
+const temporaryParent = join(workspaceRoot, 'testplace', 'tmp');
+const evidenceParent = join(testRoot, 'desktop-packaged-smoke');
 const requiredFiles = [applicationExecutable, hostNode, hostCli, hostEntry];
 const missing = requiredFiles.filter(path => !existsSync(path));
 if (missing.length > 0) throw new Error(`packaged_application_resources_missing:${missing.map(path => basename(path)).join(',')}`);
@@ -163,6 +164,7 @@ async function startProviderGate(mode, apiKey) {
     localActions: [],
     model: undefined,
     maxTokens: undefined,
+    stream: undefined,
     upstreamStatus: undefined,
     held: false,
     failure: undefined,
@@ -209,6 +211,7 @@ async function startProviderGate(mode, apiKey) {
       }
       state.model = body.model;
       state.maxTokens = body.max_tokens;
+      state.stream = body.stream === true;
       if (body.model !== 'deepseek-flash' || body.max_tokens !== 1024 || body.stream !== true) {
         state.failure = 'provider_request_metadata_invalid';
         return;
@@ -789,33 +792,103 @@ async function startUiSession(input) {
   throw new Error('ui_session_start_timeout');
 }
 
-async function setInitialPermission(profile, network) {
+async function setInitialPermission(profile, network, sessionId) {
+  if (network !== 'policy') throw new Error('initial_permission_network_not_supported_by_composer');
+  const trigger = await devTools.evaluate(`(() => {
+    const button = document.querySelector('button.permission-trigger');
+    return button instanceof HTMLButtonElement ? { title: button.title, disabled: button.disabled } : null;
+  })()`);
+  if (trigger === null || trigger.disabled) throw new Error('initial_permission_trigger_unavailable');
+
+  const confirmPermissionChange = async () => {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const lead = await devTools.evaluate(`document.querySelector('.confirm .confirm-lead')?.textContent ?? null`);
+      if (lead === null) break;
+      if (!/部分隔离|partial-isolation|信任此工作区|trust project code/iu.test(lead)) {
+        throw new Error('initial_permission_confirmation_unexpected');
+      }
+      await devTools.evaluate(`document.querySelector('.confirm-actions .primary-button')?.click(); true`);
+      await waitUntil(async () => await devTools.evaluate(`document.querySelector('.confirm .confirm-lead')?.textContent !== ${JSON.stringify(lead)}`), 10_000, 'initial_permission_confirmation_advance');
+    }
+    const remainingConfirmation = await devTools.evaluate(`document.querySelector('.confirm .confirm-lead')?.textContent ?? null`);
+    if (remainingConfirmation !== null) throw new Error('initial_permission_confirmation_limit_exceeded');
+  };
+
+  if (/当前会话的操作系统权限|Operating-system permissions for this conversation/u.test(trigger.title)) {
+    if (sessionId === undefined) throw new Error('initial_permission_current_session_missing');
+    const selectedSession = await devTools.evaluate(`document.querySelector('.session-item.active')?.title ?? ''`);
+    if (!selectedSession.endsWith(` · ${sessionId}`)) {
+      throw new Error('initial_permission_selected_session_mismatch');
+    }
+    const current = await hostCall('status.get', { sessionId });
+    if (current.result?.running === true) throw new Error('initial_permission_session_busy');
+
+    await devTools.evaluate(`document.querySelector('button.permission-trigger')?.click(); true`);
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.permission-panel .permission-details-link') !== null`), 10_000, 'initial_permission_picker_open');
+    await devTools.evaluate(`document.querySelector('.permission-panel .permission-details-link')?.click(); true`);
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.security-settings') !== null`), 10_000, 'initial_permission_security_settings_open');
+    const changed = await devTools.evaluate(`(() => {
+      const section = document.querySelector('.security-settings');
+      const profile = section?.querySelector('select[aria-label="文件与命令权限"], select[aria-label="File and command permission"]');
+      const network = section?.querySelector('select[aria-label="网络访问权限"], select[aria-label="Network access permission"]');
+      if (!(profile instanceof HTMLSelectElement) || !(network instanceof HTMLSelectElement)) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+      if (setter === undefined) return false;
+      setter.call(profile, ${JSON.stringify(profile)});
+      profile.dispatchEvent(new Event('change', { bubbles: true }));
+      setter.call(network, ${JSON.stringify(network)});
+      network.dispatchEvent(new Event('change', { bubbles: true }));
+      return profile.value === ${JSON.stringify(profile)} && network.value === ${JSON.stringify(network)};
+    })()`);
+    if (changed !== true) throw new Error('initial_permission_security_controls_missing');
+    if (current.result?.permission?.profile !== profile || current.result.permission.network !== network) {
+      await waitUntil(async () => await devTools.evaluate(`(() => {
+        const apply = document.querySelector('.security-settings .permission-actions .primary-button');
+        return apply instanceof HTMLButtonElement && !apply.disabled;
+      })()`), 10_000, 'initial_permission_change_ready');
+      await devTools.evaluate(`document.querySelector('.security-settings .permission-actions .primary-button')?.click(); true`);
+      await confirmPermissionChange();
+    }
+    await waitUntil(async () => {
+      const status = await hostCall('status.get', { sessionId });
+      return status.result?.permission?.profile === profile && status.result.permission.network === network;
+    }, 15_000, 'initial_permission_applied_value');
+    await devTools.evaluate(`document.querySelector('button[aria-label="关闭设置"], button[aria-label="Close settings"]')?.click(); true`);
+    await waitUntil(async () => await devTools.evaluate(`document.querySelector('.security-settings') === null`), 10_000, 'initial_permission_settings_closed');
+    return 'current_session';
+  }
+
+  if (!/新会话的操作系统权限|Operating-system permissions for the new conversation/u.test(trigger.title)) {
+    throw new Error('initial_permission_trigger_scope_unknown');
+  }
   await devTools.evaluate(`document.querySelector('button.permission-trigger')?.click(); true`);
   await waitUntil(async () => await devTools.evaluate(`document.querySelector('.permission-panel select') instanceof HTMLSelectElement`), 10_000, 'initial_permission_picker_open');
-  const changed = await devTools.evaluate(`(() => {
+  const change = await devTools.evaluate(`(() => {
     const selects = [...document.querySelectorAll('.permission-panel select')];
-    if (selects.length !== 2 || selects.some(select => !(select instanceof HTMLSelectElement))) return false;
+    if (selects.length !== 1 || !(selects[0] instanceof HTMLSelectElement)) return false;
     const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
     if (setter === undefined) return false;
+    const previous = selects[0].value;
     setter.call(selects[0], ${JSON.stringify(profile)});
     selects[0].dispatchEvent(new Event('change', { bubbles: true }));
-    setter.call(selects[1], ${JSON.stringify(network)});
-    selects[1].dispatchEvent(new Event('change', { bubbles: true }));
-    return true;
+    return { previous, selected: selects[0].value };
   })()`);
-  if (changed !== true) throw new Error('initial_permission_controls_missing');
+  if (change === false || change.selected !== profile) throw new Error('initial_permission_profile_control_missing');
+  if (change.previous !== profile) {
+    await waitUntil(async () => await devTools.evaluate(`(() => {
+      const apply = document.querySelector('.permission-panel .permission-actions .primary-button');
+      return apply instanceof HTMLButtonElement && !apply.disabled;
+    })()`), 10_000, 'initial_permission_change_ready');
+    await devTools.evaluate(`document.querySelector('.permission-panel .permission-actions .primary-button')?.click(); true`);
+    await confirmPermissionChange();
+  }
   await waitUntil(async () => await devTools.evaluate(`(() => {
-    const apply = document.querySelector('.permission-actions .primary-button');
-    return apply instanceof HTMLButtonElement && !apply.disabled;
-  })()`), 10_000, 'initial_permission_change_ready');
-  await devTools.evaluate(`document.querySelector('.permission-actions .primary-button')?.click(); true`);
-  await waitUntil(async () => await devTools.evaluate(`!document.querySelector('.permission-panel')`), 10_000, 'initial_permission_applied');
-  await devTools.evaluate(`document.querySelector('button.permission-trigger')?.click(); true`);
-  await waitUntil(async () => await devTools.evaluate(`(() => {
-    const selects = [...document.querySelectorAll('.permission-panel select')];
-    return selects.length === 2 && selects[0].value === ${JSON.stringify(profile)} && selects[1].value === ${JSON.stringify(network)};
+    const trigger = document.querySelector('button.permission-trigger');
+    return trigger instanceof HTMLButtonElement && /工作区可写|Workspace write/u.test(trigger.textContent ?? '');
   })()`), 10_000, 'initial_permission_applied_value');
   await devTools.evaluate(`document.querySelector('.permission-panel button[aria-label="收起权限"], .permission-panel button[aria-label="Close permissions"]')?.click(); true`);
+  await waitUntil(async () => await devTools.evaluate(`document.querySelector('.permission-panel') === null`), 10_000, 'initial_permission_panel_closed');
+  return 'new_session';
 }
 
 async function remainingSessionLocks() {
@@ -842,7 +915,10 @@ async function runInterruptedRequest(sessionId, alreadyStarted = false) {
   }, 95_000, 'provider_request_held');
   if (gate.failure !== undefined) throw Object.assign(new Error('provider_gate_failed'), { code: gate.failure });
   const expectedRequests = interruptionMode === 'local' ? 5 : 1;
-  if (gate.requests !== expectedRequests || gate.model !== 'deepseek-flash' || gate.maxTokens !== 1024) {
+  if (gate.requests !== expectedRequests) {
+    throw Object.assign(new Error('provider_gate_request_count_invalid'), { code: 'provider_gate_request_count_invalid' });
+  }
+  if (gate.model !== 'deepseek-flash' || gate.maxTokens !== 1024 || gate.stream !== true) {
     throw Object.assign(new Error('provider_gate_request_metadata_invalid'), { code: 'provider_gate_request_metadata_invalid' });
   }
   if (interruptionMode === 'real' && gate.upstreamStatus !== 200) {
@@ -1037,6 +1113,7 @@ async function recordReport() {
       requests: providerGate.state.requests,
       model: providerGate.state.model,
       maxTokens: providerGate.state.maxTokens,
+      stream: providerGate.state.stream,
       upstreamStatus: providerGate.state.upstreamStatus,
       held: providerGate.state.held,
       localActions: providerGate.state.localActions,
@@ -1570,11 +1647,16 @@ async function runChecks() {
     if (interruptionMode === 'local') {
       await check('local model tool approval denial and allowance', async () => {
         if (sessionId === undefined) throw new Error('session_not_created');
-        await setInitialPermission('workspace-write', 'policy');
+        const permissionScope = await setInitialPermission('workspace-write', 'policy', sessionId);
         sessionId = await startUiSession('[LOCAL_APPROVAL_DENY] 通过 create 工具写入审批验收文件。');
+        const initialPermission = await hostCall('status.get', { sessionId });
+        if (initialPermission.result?.permission?.profile !== 'workspace-write'
+          || initialPermission.result.permission.network !== 'policy') {
+          throw new Error('initial_permission_not_applied_to_session');
+        }
         const denied = await runLocalApproval(sessionId, 'deny', true);
         const allowed = await runLocalApproval(sessionId, 'allow');
-        return `以工作区可写、网络按 Policy 限制创建会话；${denied}；${allowed}`;
+        return `通过 ${permissionScope} 权限流程创建工作区可写、网络按 Policy 限制的会话；${denied}；${allowed}`;
       });
     } else if (interruptionMode === 'real') {
       await check('start the official model request from the selected UI session', async () => {
@@ -1686,15 +1768,19 @@ try {
   await providerGate?.close();
 }
 
-const relativeTemporary = relative(testRoot, temporaryRoot);
-if (relativeTemporary === '' || relativeTemporary === '..' || relativeTemporary.startsWith(`..${sep}`) || resolve(testRoot, relativeTemporary) !== temporaryRoot) {
+const relativeTemporary = relative(temporaryParent, temporaryRoot);
+if (relativeTemporary === '' || relativeTemporary === '..' || relativeTemporary.startsWith(`..${sep}`) || resolve(temporaryParent, relativeTemporary) !== temporaryRoot) {
   throw new Error('packaged_smoke_temp_path_escaped_testplace');
+}
+const relativeEvidence = relative(evidenceParent, evidenceRoot);
+if (relativeEvidence === '' || relativeEvidence === '..' || relativeEvidence.startsWith(`..${sep}`) || resolve(evidenceParent, relativeEvidence) !== evidenceRoot) {
+  throw new Error('packaged_smoke_evidence_path_escaped_testplace');
 }
 if (exitCode === 0 && applicationProcess?.exitCode === 0) {
   await rm(temporaryRoot, { recursive: true, force: true });
 } else {
-  console.error(`packaged smoke temporary data retained at ${relative(testRoot, temporaryRoot)}`);
+  console.error(`packaged smoke temporary data retained at ${relative(temporaryParent, temporaryRoot)}`);
 }
 
-console.log(`${exitCode === 0 ? 'packaged smoke completed' : 'packaged smoke failed'}; evidence: ${relative(repositoryRoot, evidenceRoot)}`);
+console.log(`${exitCode === 0 ? 'packaged smoke completed' : 'packaged smoke failed'}; evidence: ${relative(workspaceRoot, evidenceRoot)}`);
 process.exitCode = exitCode;

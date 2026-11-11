@@ -82,3 +82,17 @@ assert.ok(typeof content.english?.content === 'string' && content.english.conten
 assert.match(content.english?.content ?? '', /Content 5 bytes · SHA-256 deadbeef/u);
 assert.doesNotMatch(content.english?.content ?? '', /内容 5 字节/u);
 assert.ok(content.english?.change.includes('note.txt'));
+
+const multiEdit = toApprovalAsk('req-5', {
+  sessionId: 'abc',
+  tool: 'edit',
+  args: { path: 'src/example.ts', changes: [
+    { oldText: 'return false;', newText: 'return true;' },
+    { oldText: 'const old = 1;', newText: 'const current = 2;' },
+  ] },
+});
+assert.match(multiEdit.change, /替换 2 处/u);
+assert.match(multiEdit.content, /- return false;/u);
+assert.match(multiEdit.content, /\+ return true;/u);
+assert.match(multiEdit.content, /- const old = 1;/u);
+assert.match(multiEdit.english?.content ?? '', /\+ const current = 2;/u);

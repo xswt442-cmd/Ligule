@@ -6,8 +6,9 @@ import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { benchmarkTimeoutMs, countsOf, createStateWriter, positiveInteger, prepareRunDirectory, readTarballProvenance, timeoutBasis } from './lib.ts';
+import { benchmarkTimeoutMs, countsOf, createStateWriter, positiveInteger, prepareRunDirectory, readTarballProvenance, setupProxyUrlProblem, timeoutBasis } from './lib.ts';
 import { writeManifest } from './manifest.ts';
+import { policyModeFromPlan } from '../harbor/policy-mode.mjs';
 
 const repository = fileURLToPath(new URL('../..', import.meta.url));
 const runner = join(repository, 'evals', 'agent', 'run.ts');
@@ -28,6 +29,12 @@ const IDENTITY = {
   platform: 'test 1.0',
   arch: 'x64',
 };
+
+test('a custom plan can select auto without changing the existing plan default', () => {
+  assert.equal(policyModeFromPlan(undefined), 'never');
+  assert.equal(policyModeFromPlan('auto'), 'auto');
+  assert.throws(() => policyModeFromPlan('ask'), /benchmark_policy_mode_invalid/u);
+});
 
 test('agent runner rejects unknown tasks and invalid outer timeouts before starting Harbor', () => {
   const unknown = run(['--tasks', 'not-a-task']);
@@ -68,6 +75,50 @@ test('benchmark options reject zero repeats and invalid integers', () => {
   assert.throws(() => positiveInteger('1.5', 'total_timeout_ms'), /positive_integer/u);
   assert.equal(positiveInteger('7', 'total_timeout_ms'), 7);
   assert.equal(positiveInteger(undefined, 'total_timeout_ms'), undefined);
+});
+
+test('apt setup proxy accepts only unauthenticated HTTP(S) origins', () => {
+  assert.equal(setupProxyUrlProblem(undefined), undefined);
+  assert.equal(setupProxyUrlProblem('http://http.docker.internal:3128'), undefined);
+  assert.equal(setupProxyUrlProblem('https://proxy.example:8443/'), undefined);
+  assert.notEqual(setupProxyUrlProblem('socks5://proxy.example:1080'), undefined);
+  assert.notEqual(setupProxyUrlProblem('http://user:password@proxy.example:3128'), undefined);
+  assert.notEqual(setupProxyUrlProblem('http://proxy.example:3128/path'), undefined);
+  assert.notEqual(setupProxyUrlProblem('http://proxy.example:3128/?token=secret'), undefined);
+});
+
+test('runner blocks and redacts invalid apt setup proxies before writing a Harbor job', async () => {
+  const temporaryRoot = join(repository, 'testplace', 'tmp');
+  await mkdir(temporaryRoot, { recursive: true });
+  const root = await mkdtemp(join(temporaryRoot, 'ligule-proxy-blocked-'));
+  try {
+    const output = join(root, 'run');
+    const invalidProxy = 'http://proxy-user:private-value@proxy.example:3128';
+    const env: NodeJS.ProcessEnv = { ...process.env, LIGULE_BENCH_SETUP_PROXY_URL: invalidProxy };
+    delete env.LIGULE_API_KEY;
+    delete env.LIGULE_BENCH_BASE_URL;
+    delete env.LIGULE_BENCH_MODEL;
+    delete env.LIGULE_BENCH_TARBALL;
+    const result = run([
+      '--plan', 'evals/agent/canary-plan.json',
+      '--tasks', 'canary',
+      '--dataset-dir', join(repository, 'evals', 'agent', 'canary', 'ligule-canary'),
+      '--output', output,
+    ], { env });
+    assert.equal(result.status, 2, result.stdout + result.stderr);
+    const record = JSON.parse(await readFile(join(output, 'run.json'), 'utf8')) as {
+      executionStatus: string;
+      checks: { setupProxyUrl?: { ok: boolean; detail: string } };
+    };
+    assert.equal(record.executionStatus, 'blocked');
+    assert.equal(record.checks.setupProxyUrl?.ok, false);
+    assert.equal(record.checks.setupProxyUrl?.detail, 'LIGULE_BENCH_SETUP_PROXY_URL must be an unauthenticated HTTP(S) origin');
+    assert.equal(JSON.stringify(record).includes('private-value'), false);
+    assert.equal(`${result.stdout}${result.stderr}`.includes('private-value'), false);
+    await assert.rejects(readFile(join(output, 'job.json'), 'utf8'), { code: 'ENOENT' });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('the outer timeout scales with tasks and concurrency and accepts an explicit override', () => {
@@ -309,7 +360,7 @@ test('the manifest records attempts without inventing task outcomes', async () =
     };
     assert.equal(manifest.experiment.git_sha, IDENTITY.gitSha);
     // 评测固定用 never 跑：容器里没人能回答审批，manifest 必须记下真实档位。
-  assert.equal(manifest.experiment.policy_mode, 'never');
+    assert.equal(manifest.experiment.policy_mode, 'never');
     assert.equal(manifest.attempts.length, 4);
     const passAttempt = manifest.attempts.find((attempt) => attempt.task_id === 'pass-task');
     assert.equal(passAttempt?.result_file, 'harbor/job-1/pass-task__1/result.json');
@@ -320,6 +371,15 @@ test('the manifest records attempts without inventing task outcomes', async () =
     assert.equal(missing?.not_run_reason, 'harbor_not_completed');
     assert.equal('counts' in result, false);
     assert.equal(JSON.stringify(manifest).includes('\\'), false);
+
+    await writeManifest({
+      runDirectory, plan: { ...plan, policy_mode: 'auto' }, identity: IDENTITY, model: 'fixture-model', baseUrl: 'https://provider.invalid/v1',
+      jobPath: job, jobName: 'job-1', startedAt: '2026-01-01T00:00:00.000Z', finishedAt: '2026-01-01T01:00:00.000Z',
+    });
+    const autoManifest = JSON.parse(await readFile(join(runDirectory, 'manifest.json'), 'utf8')) as {
+      experiment: Record<string, unknown>;
+    };
+    assert.equal(autoManifest.experiment.policy_mode, 'auto');
   } finally {
     await rm(runDirectory, { recursive: true, force: true });
   }

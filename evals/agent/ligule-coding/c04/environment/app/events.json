@@ -1,0 +1,5 @@
+[
+  { "id": "e-1", "level": "error" },
+  { "id": "e-2", "level": "warning" },
+  { "id": "e-3", "level": "warning" }
+]

@@ -156,6 +156,7 @@ class LiguleAgent(BaseInstalledAgent):
         ligule_model_calls: int = 5,
         ligule_timeout_ms: int = 3_600_000,
         ligule_request_timeout_ms: int = 120_000,
+        ligule_policy_mode: str = "never",
         ligule_node_runtime_tarball: str | None = None,
         ligule_node_runtime_sha256: str | None = None,
         ligule_install_build_tools: bool = False,
@@ -200,6 +201,9 @@ class LiguleAgent(BaseInstalledAgent):
         self.ligule_model_calls = ligule_model_calls
         self.ligule_timeout_ms = ligule_timeout_ms
         self.ligule_request_timeout_ms = ligule_request_timeout_ms
+        if ligule_policy_mode not in {"never", "auto"}:
+            raise ValueError("ligule_policy_mode_invalid")
+        self.ligule_policy_mode = ligule_policy_mode
         self._last_trial: dict[str, str] | None = None
         checked_run_limits(ligule_model_calls, ligule_timeout_ms, ligule_request_timeout_ms)
         if ligule_api not in {"messages", "chat-completions"}:
@@ -432,6 +436,7 @@ class LiguleAgent(BaseInstalledAgent):
             "--model-calls", str(self.ligule_model_calls),
             "--timeout-ms", str(self.ligule_timeout_ms),
             "--request-timeout-ms", str(self.ligule_request_timeout_ms),
+            "--policy-mode", self.ligule_policy_mode,
         ]
         if self.ligule_output_tokens is not None:
             arguments.extend(("--output-tokens", str(self.ligule_output_tokens)))

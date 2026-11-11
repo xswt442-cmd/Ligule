@@ -10,7 +10,7 @@
     "test:core": "pnpm --filter @ligule/core run test",
     "test:tui": "pnpm --filter ligule run test",
     "test:integration": "node --experimental-strip-types --test --test-reporter=./scripts/test-summary-reporter.mjs --test-concurrency=1 --import ./tests/hooks/isolated-data-root.ts tests/*.test.js tests/*.test.ts",
-    "test:bench": "node --experimental-strip-types --test --test-reporter=./scripts/test-summary-reporter.mjs --test-concurrency=1 --import ./tests/hooks/isolated-data-root.ts evals/perf/*.test.ts evals/agent/*.test.ts",
+    "test:bench": "node --experimental-strip-types --test --test-reporter=./scripts/test-summary-reporter.mjs --test-concurrency=1 --import ./tests/hooks/isolated-data-root.ts evals/perf/*.test.ts evals/agent/*.test.ts evals/agent/*.test.mjs",
     "test:engineering": "node scripts/test-summary-reporter-check.mjs && node --experimental-strip-types --test --test-reporter=./scripts/test-summary-reporter.mjs .github/engineering/tests/*.test.mjs .github/engineering/tests/*.test.ts",
     "test": "pnpm run build && pnpm run test:core && pnpm run test:tui && pnpm run test:integration && pnpm run test:bench && pnpm run test:engineering",
     "bench:perf": "pnpm run build && node --experimental-strip-types evals/perf/run.ts",

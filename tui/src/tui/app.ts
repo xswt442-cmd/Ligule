@@ -13,6 +13,7 @@ import { copyToClipboard, lastAnswer } from './clipboard.js';
 import { titleEscape, titleText } from './output.js';
 import { providerDiagnosticText, runtimeFailureText } from './errors.js';
 import { capabilityOf, projectRecord, resultParts, type TranscriptItem, type TuiRecord } from './transcript.js';
+import { collectTranscriptPages } from './transcript-pages.js';
 import { VERSION } from '../version.js';
 import { ChoicePanel, HelpPanel, PanelFrame, type PanelChoice } from './panels.js';
 import { SessionPicker } from './session-picker.js';
@@ -511,6 +512,18 @@ const processHistory: TuiInputHistory = {
   },
 };
 
+function maxTranscriptSequence(events: readonly TuiRecord[]): number {
+  return events.reduce((maximum, event) => Math.max(maximum, event.seq), -1);
+}
+
+function transcriptRows(events: readonly TuiRecord[], locale: Locale): TranscriptItem[] {
+  return events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq })));
+}
+
+function appendUnseenTranscript(events: readonly TuiRecord[], after: number, locale: Locale): TranscriptItem[] {
+  return transcriptRows(events.filter((event) => event.seq > after), locale);
+}
+
 export function App({ client, sessionId: firstSessionId, info = {}, interactive = true, stdout, history = processHistory, inputs, keys, trust, modes, locale = 'zh' }: AppProps) {
   const t = useCallback((zh: string, en: string) => chooseText(locale, zh, en), [locale]);
   const app = useApp();
@@ -521,6 +534,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   activeSession.current = sessionId;
   const [geometry, setGeometry] = useState({ columns: stdout?.columns ?? 80, rows: stdout?.rows ?? 24 });
   const [rows, setRows] = useState<TranscriptItem[]>([]);
+  const lastTranscriptSequence = useRef(-1);
   const [live, setLive] = useState({ text: '', reasoning: '' });
   const [ask, setAsk] = useState<AskState | null>(null);
   // 一个提问请求包含一至四道题；逐题填写，最后一题提交后统一发送答复。
@@ -644,6 +658,9 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
   }, []);
   const push = useCallback((...added: TranscriptItem[]) => {
     if (!alive.current) return;
+    for (const row of added) {
+      if (Number.isSafeInteger(row.seq)) lastTranscriptSequence.current = Math.max(lastTranscriptSequence.current, row.seq!);
+    }
     setRows((current) => [...current, ...added]);
   }, []);
   const reportMcpTrustOutcome = useCallback((owner: string, outcome: TranscriptItem) => {
@@ -898,6 +915,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     let timer: ReturnType<typeof setTimeout> | undefined;
     let cursor = 0;
     let operationId: string | null = null;
+    let gapNotifiedOperationId: string | null = null;
     let inFlight = false;
     let lastFailure = '';
     const projectRoot = info.boundary ?? '';
@@ -905,11 +923,41 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
       if (timer !== undefined) clearTimeout(timer);
       timer = setTimeout(() => { timer = undefined; void poll(); }, delayMs);
     };
+    // 缺口可能跨越多页：从最新一页开始按 `before` 向更早翻，直到覆盖上次的序号再按时间顺序追加。
+    // 翻到页数上限仍未覆盖时如实提示，不能把没读到的旧记录当作已经补齐。
+    const TRANSCRIPT_PAGE_LIMIT = 50;
     const refreshTranscript = async () => {
-      const read = await client.request('session.observe', { projectRoot, sessionId, limit: 400, fullResults: true });
+      const prior = lastTranscriptSequence.current;
+      const collected = await collectTranscriptPages(async (before) => {
+        const observed = await client.request('session.observe', {
+          projectRoot,
+          sessionId,
+          limit: 400,
+          fullResults: true,
+          ...(before === undefined ? {} : { before }),
+        });
+        return observed.events;
+      }, prior, TRANSCRIPT_PAGE_LIMIT, () => disposed || activeSession.current !== sessionId);
       if (disposed || activeSession.current !== sessionId) return;
-      setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
-      setExternalModel(externalModelFrom(read.events));
+      const events = [...collected.pages].reverse().flat();
+      const unseen = appendUnseenTranscript(events, prior, locale);
+      lastTranscriptSequence.current = Math.max(prior, maxTranscriptSequence(events));
+      push(...unseen);
+      // 持久记录补齐后，之前流式收到的同一段回答不再是最新状态：留着会让界面显示一份不完整的重复预览。
+      const durableKinds = new Set(unseen.map((item) => item.kind));
+      if (durableKinds.has('assistant') || durableKinds.has('reasoning')) {
+        setLive((current) => ({
+          text: durableKinds.has('assistant') ? '' : current.text,
+          reasoning: durableKinds.has('reasoning') ? '' : current.reasoning,
+        }));
+      }
+      setExternalModel(externalModelFrom(collected.pages[0] ?? []));
+      if (!collected.complete) {
+        push({ kind: 'error', text: t(
+          `外控会话的记录超过 ${TRANSCRIPT_PAGE_LIMIT} 页仍未覆盖上次序号；更早的未读记录可能无法补齐`,
+          `The external transcript gap spans more than ${TRANSCRIPT_PAGE_LIMIT} pages; earlier unseen records may stay incomplete`,
+        ) });
+      }
     };
     const poll = async () => {
       if (disposed || inFlight) return;
@@ -926,6 +974,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         if (currentOperationId !== operationId) {
           operationId = currentOperationId;
           cursor = 0;
+          gapNotifiedOperationId = null;
           setExternalSnapshot(snapshot);
           nextDelay = 0;
           return;
@@ -944,6 +993,13 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
         }
         if (snapshot.eventGap) {
           cursor = Math.max(0, (snapshot.firstAvailableCursor ?? cursor + 1) - 1);
+          if (gapNotifiedOperationId !== operationId) {
+            gapNotifiedOperationId = operationId;
+            push({ kind: 'error', text: t(
+              '外控实时事件出现缺口；正在刷新可用的持久会话记录，未写入记录的流式片段可能缺失。',
+              'External live events have a gap. Persisted Session records are being refreshed; stream chunks not yet written to the Session may be missing.',
+            ) });
+          }
           void refreshTranscript().catch((error: unknown) => push({ kind: 'error', text: t(`外控会话转录读取失败：${errorCode(error) ?? 'session_observe_failed'}`, `Could not refresh external transcript: ${errorCode(error) ?? 'session_observe_failed'}`) }));
         }
         cursor = Math.max(cursor, snapshot.nextCursor);
@@ -1788,6 +1844,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           setStatus(null);
           setDetail(null);
           setSessionPicker(null);
+          lastTranscriptSequence.current = -1;
           setRows([]);
           setLive({ text: '', reasoning: '' });
           push({ kind: 'meta', text: t(`新会话 ${created.sessionId.slice(0, 8)}`, `New session ${created.sessionId.slice(0, 8)}`) });
@@ -1987,7 +2044,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           setAsk(null);
           setQuery(null);
           setSessionPicker(null);
-          setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
+          lastTranscriptSequence.current = maxTranscriptSequence(read.events);
+          setRows(transcriptRows(read.events, locale));
           setLive({ text: '', reasoning: '' });
           setDetail(null);
           const row = listed.sessions.find((item) => item.id === picked.id);
@@ -2075,7 +2133,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
             return;
           }
           adopted = true;
-          setRows(read.events.flatMap((event) => projectRecord(event, locale).map((row) => ({ ...row, seq: event.seq }))));
+          lastTranscriptSequence.current = maxTranscriptSequence(read.events);
+          setRows(transcriptRows(read.events, locale));
           setLive({ text: '', reasoning: '' });
           push({ kind: 'meta', text: t('已接管外控会话，后续输入由 TUI 直接提交。', 'External session taken over; new input now runs through this TUI.') });
         } catch (error) {

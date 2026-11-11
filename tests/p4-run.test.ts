@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { link, mkdtemp, mkdir, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createConnection } from '../core/dist/host/connection.js';
 import { readRunResult, runResultPage, publishRunResult } from '../core/dist/session/run.js';
@@ -16,6 +16,7 @@ import { listenFetchable } from './helpers/port.ts';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 const cli = join(repository, 'tui', 'dist', 'cli.js');
+const testTempRoot = resolve(process.env.LIGULE_TEST_TEMP_ROOT ?? join(repository, 'testplace', 'tmp'));
 
 function sampleResult(runId: string, sessionId: string, text = 'verified result'): RunResult {
   return {
@@ -37,7 +38,7 @@ async function findSessionRecord(directory: string, sessionId: string): Promise<
 }
 
 test('run result sidecars enforce identity, integrity, bounds, links, and valid paging', async () => {
-  const output = join(repository, 'testplace', 'p4-runs');
+  const output = join(testTempRoot, 'p4-runs');
   await mkdir(output, { recursive: true });
   const directory = await mkdtemp(join(output, 'p4-run-result-'));
   const sessionId = 'p4-result-session';
@@ -89,6 +90,7 @@ test('run result sidecars enforce identity, integrity, bounds, links, and valid 
     await assert.rejects(publishRunResult(directory, 'workspace-one', sessionId, oversizedRunId, oversized), { code: 'run_result_too_large' });
     assert.deepEqual(await readdir(directory), []);
   } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });
 
@@ -99,28 +101,36 @@ function deadline<T>(pending: Promise<T>, label: string): Promise<T> {
   })]).finally(() => clearTimeout(timer));
 }
 
-// A host finishes sandbox and permission probing before it answers the first request. On Windows
-// that costs seconds to tens of seconds depending on the workspace size (measured here: about
-// 6.4s for a small workspace, about 25s for this repository), and it has nothing to do with the
-// request handling under test. The readiness phase gets its own allowance while every protocol
-// request after it keeps the 10s deadline, so the product timeout is not enlarged and a failure
-// still points at the phase that was actually slow.
-const STARTUP_READY_MS = 60_000;
+// A host finishes module loading, sandbox and permission probing before it answers the first
+// request. Windows startup measured about 6.4s for a small workspace and about 25s for this
+// repository; WSL importing the shared E: workspace's Core barrel measured 76.9s with the process
+// blocked in p9_client_rpc. Startup gets a separate allowance; every protocol request after it
+// keeps the 10s deadline, so the product timeout is unchanged and failures still identify the
+// phase that was slow.
+const STARTUP_READY_MS = 180_000;
 
 async function ready(client: Connection, label = 'Host') {
   const limit = Date.now() + STARTUP_READY_MS;
   for (;;) {
-    const answered = await Promise.race([
-      client.request('prefs.read', {}).then(() => true, () => false),
-      new Promise(resolve => setTimeout(() => resolve(false), 1_000)),
+    // A closed connection never answers again, so waiting out the startup budget would only
+    // hide the real failure. Only errors that leave the connection usable are retried.
+    const outcome = await Promise.race([
+      client.request('prefs.read', {}).then(() => 'answered' as const, (error: unknown) => {
+        const code = typeof error === 'object' && error !== null && 'code' in error
+          ? String((error as { code?: unknown }).code)
+          : '';
+        if (code === 'connection_closed') throw error;
+        return 'retry' as const;
+      }),
+      new Promise<'retry'>(resolve => setTimeout(() => resolve('retry'), 1_000)),
     ]);
-    if (answered) return;
+    if (outcome === 'answered') return;
     if (Date.now() > limit) throw new Error(`${label} did not answer within ${STARTUP_READY_MS}ms`);
   }
 }
 
 test('durable run submission deduplicates a live retry and rejects a payload conflict', async () => {
-  const output = join(repository, 'testplace', 'p4-runs');
+  const output = join(testTempRoot, 'p4-runs');
   await mkdir(output, { recursive: true });
   const root = await mkdtemp(join(output, 'p4-run-live-'));
   const data = join(root, 'data');
@@ -235,7 +245,7 @@ test('durable run submission deduplicates a live retry and rejects a payload con
 });
 
 test('run.wait reads the run owned by the caller scope and ignores a claimed origin', async () => {
-  const output = join(repository, 'testplace', 'p4-runs');
+  const output = join(testTempRoot, 'p4-runs');
   await mkdir(output, { recursive: true });
   const root = await mkdtemp(join(output, 'p4-run-wait-default-'));
   const data = join(root, 'data');

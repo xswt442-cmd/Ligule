@@ -9,6 +9,7 @@ import { createAgentControlRuntime } from '../../core/dist/host/agent-control-ru
 import type { AgentControlRuntime } from '../../core/dist/host/agent-control-runtime.js';
 import { createSessionLog } from '../../core/dist/session/session.js';
 import { App } from '../dist/tui/app.js';
+import { projectRecord, type TuiRecord } from '../dist/tui/transcript.js';
 import type { TuiClient } from '../dist/tui/app.js';
 import { completeFrame } from './helpers/frames.ts';
 import { waitFor, withTuiHost } from './helpers/tui-host.ts';
@@ -28,8 +29,8 @@ type AppHandle = {
 type RecordedAction = { readonly action: string; readonly [key: string]: unknown };
 type ControlEvent = { readonly cursor: number; readonly kind: string; readonly at: number; readonly sessionId: string; readonly operationId: string; readonly [key: string]: unknown };
 
-async function withApp<T>(context: TuiHostContext, run: (handle: AppHandle) => Promise<T>) {
-  const stdout: FakeOutput = Object.assign(new PassThrough(), { columns: 80, rows: 24, isTTY: true });
+async function withApp<T>(context: TuiHostContext, run: (handle: AppHandle) => Promise<T>, rows = 24) {
+  const stdout: FakeOutput = Object.assign(new PassThrough(), { columns: 80, rows, isTTY: true });
   const stdin: FakeInput = Object.assign(new PassThrough(), { isTTY: true, setRawMode: () => stdin, ref() {}, unref() {} });
   let painted = '';
   stdout.on('data', (chunk: Buffer | string) => { painted += chunk.toString(); });
@@ -183,4 +184,123 @@ test('TUI observes an externally locked session, answers a question, sends guida
       await session.close();
     }
   }));
+});
+
+test('TUI restores persisted records and reports the missing live event window', async () => {
+  await withTuiHost(async (context) => {
+    const sessionId = 'tui-external-control-gap-session';
+    const session = createSessionLog({
+      directory: context.sessionDirectory,
+      id: sessionId,
+      meta: { projectRoot: context.projectDirectory },
+    });
+    await session.append({ kind: 'user', text: 'The external task is already running.', origin: 'controller' });
+    await session.append({ kind: 'assistant', text: 'Earlier persisted assistant record.', toolCalls: [] });
+    await session.acquire();
+
+    let gapReady = false;
+    let gapDelivered = false;
+    let statusCalls = 0;
+    let transcriptReads = 0;
+    let resolveFirstRead: () => void = () => {};
+    let releaseOlderResponse: () => void = () => {};
+    let resolveFirstResponse: () => void = () => {};
+    let olderReadIncludedMarker = false;
+    let latestReadIncludedMarker = false;
+    let latestEventIncludedMarker = false;
+    let latestProjectedRowCount = 0;
+    const firstReadReady = new Promise<void>((resolve) => { resolveFirstRead = resolve; });
+    const olderResponseReleased = new Promise<void>((resolve) => { releaseOlderResponse = resolve; });
+    const firstResponseReturned = new Promise<void>((resolve) => { resolveFirstResponse = resolve; });
+    const actions: RecordedAction[] = [];
+    const runtime: AgentControlRuntime = createAgentControlRuntime(context.projectDirectory, async (requestedSession, request) => {
+      assert.equal(requestedSession, sessionId);
+      actions.push(request);
+      if (request.action === 'status') {
+        statusCalls += 1;
+        const eventGap = gapReady && !gapDelivered;
+        if (eventGap) gapDelivered = true;
+        return {
+          operationId: 'external-gap-operation',
+          sessionId,
+          state: 'done',
+          ownership: 'external',
+          phase: null,
+          progress: null,
+          pendingInteractions: [],
+          events: eventGap ? [{ cursor: 130, kind: 'session.event', at: Date.now(), sessionId,
+            operationId: 'external-gap-operation', eventKind: 'assistant', eventSeq: 2 }] : [],
+          nextCursor: eventGap ? 130 : 1,
+          hasMoreEvents: false,
+          eventGap,
+          firstAvailableCursor: eventGap ? 130 : 1,
+          queue: [],
+          queuePaused: false,
+          currentOperationId: 'external-gap-operation',
+        };
+      }
+      if (request.action === 'takeover') {
+        await session.close();
+        await runtime.unregister(sessionId);
+        return { sessionId, ownership: 'human', released: true, operationId: 'external-gap-operation' };
+      }
+      throw Object.assign(new Error('test_action_unknown'), { code: 'test_action_unknown' });
+    });
+    const originalRequest = context.client.request.bind(context.client);
+    context.client.request = async (method, params) => {
+      if (method !== 'session.observe' || !gapReady) return await originalRequest(method, params);
+      transcriptReads += 1;
+      const readNumber = transcriptReads;
+      if (readNumber === 1) {
+        const older = await originalRequest(method, params);
+        await session.append({ kind: 'assistant', text: 'P6 newest persisted assistant record.', toolCalls: [] });
+        olderReadIncludedMarker = JSON.stringify(older).includes('P6 newest persisted assistant record');
+        resolveFirstRead();
+        await olderResponseReleased;
+        resolveFirstResponse();
+        return older;
+      }
+      if (readNumber === 2) {
+        await firstReadReady;
+        const latest = await originalRequest(method, params);
+        latestReadIncludedMarker = JSON.stringify(latest).includes('P6 newest persisted assistant record');
+        const latestEvents = (latest as { events: { kind: string; text?: string }[] }).events;
+        latestEventIncludedMarker = latestEvents.some((event) => event.kind === 'assistant' && event.text === 'P6 newest persisted assistant record.');
+        latestProjectedRowCount = latestEvents.flatMap((event) => projectRecord(event as unknown as TuiRecord)).length;
+        return latest;
+      }
+      return await originalRequest(method, params);
+    };
+
+    try {
+      await runtime.register(sessionId);
+      await withApp(context, async ({ frame, output, type, wait }) => {
+        await type(`/resume ${sessionId}`);
+        await wait(() => output().includes('External session connected') || output().includes('外控会话已连接'));
+        assert.ok(context.requests.some((request) => request.method === 'session.open'
+          && (request.params as { sessionId?: string }).sessionId === sessionId), 'TUI opened the intended persisted Session');
+        await wait(() => statusCalls >= 2);
+        gapReady = true;
+        await wait(() => transcriptReads === 2);
+        await wait(() => frame().includes('P6 newest persisted assistant record'));
+        assert.equal(olderReadIncludedMarker, false, 'the first transcript snapshot was captured before the new record was appended');
+        assert.equal(latestReadIncludedMarker, true, 'the later transcript snapshot contains the new record');
+        assert.equal(latestEventIncludedMarker, true, 'the later Host read contains the persisted assistant event');
+        assert.ok(latestProjectedRowCount > 0, 'the persisted event has a transcript projection');
+        assert.ok(output().includes('外控实时事件出现缺口'), 'the TUI clearly marks that some live events are missing');
+        releaseOlderResponse();
+        await firstResponseReturned;
+        await new Promise((resolve) => setTimeout(resolve, 75));
+        assert.match(frame(), /P6 newest persisted assistant record/u,
+          `a delayed old session.observe result must not overwrite the latest record; older=${olderReadIncludedMarker}, latest=${latestReadIncludedMarker}, event=${latestEventIncludedMarker}, projected=${latestProjectedRowCount}, reads=${transcriptReads}\n${frame()}\n${output().slice(-1_200)}`);
+        assert.equal(frame().split('P6 newest persisted assistant record').length - 1, 1,
+          'the persisted record must appear once after transcript recovery');
+        assert.ok(actions.some((action) => action.action === 'status'));
+      }, 60);
+    } finally {
+      releaseOlderResponse();
+      await runtime.close();
+      await session.close();
+    }
+  });
 });
