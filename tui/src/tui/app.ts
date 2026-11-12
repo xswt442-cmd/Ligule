@@ -927,7 +927,7 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
     // 翻到页数上限仍未覆盖时如实提示，不能把没读到的旧记录当作已经补齐。
     const TRANSCRIPT_PAGE_LIMIT = 50;
     const refreshTranscript = async () => {
-      const prior = lastTranscriptSequence.current;
+      const requestedAfter = lastTranscriptSequence.current;
       const collected = await collectTranscriptPages(async (before) => {
         const observed = await client.request('session.observe', {
           projectRoot,
@@ -937,11 +937,14 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           ...(before === undefined ? {} : { before }),
         });
         return observed.events;
-      }, prior, TRANSCRIPT_PAGE_LIMIT, () => disposed || activeSession.current !== sessionId);
+      }, requestedAfter, TRANSCRIPT_PAGE_LIMIT, () => disposed || activeSession.current !== sessionId);
       if (disposed || activeSession.current !== sessionId) return;
       const events = [...collected.pages].reverse().flat();
-      const unseen = appendUnseenTranscript(events, prior, locale);
-      lastTranscriptSequence.current = Math.max(prior, maxTranscriptSequence(events));
+      const committedThrough = lastTranscriptSequence.current;
+      const newestObserved = maxTranscriptSequence(events);
+      const responseWasStale = newestObserved < committedThrough;
+      const unseen = appendUnseenTranscript(events, committedThrough, locale);
+      lastTranscriptSequence.current = Math.max(committedThrough, newestObserved);
       push(...unseen);
       // 持久记录补齐后，之前流式收到的同一段回答不再是最新状态：留着会让界面显示一份不完整的重复预览。
       const durableKinds = new Set(unseen.map((item) => item.kind));
@@ -951,8 +954,8 @@ export function App({ client, sessionId: firstSessionId, info = {}, interactive 
           reasoning: durableKinds.has('reasoning') ? '' : current.reasoning,
         }));
       }
-      setExternalModel(externalModelFrom(collected.pages[0] ?? []));
-      if (!collected.complete) {
+      if (!responseWasStale) setExternalModel(externalModelFrom(collected.pages[0] ?? []));
+      if (!responseWasStale && !collected.complete) {
         push({ kind: 'error', text: t(
           `外控会话的记录超过 ${TRANSCRIPT_PAGE_LIMIT} 页仍未覆盖上次序号；更早的未读记录可能无法补齐`,
           `The external transcript gap spans more than ${TRANSCRIPT_PAGE_LIMIT} pages; earlier unseen records may stay incomplete`,

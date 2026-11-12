@@ -186,7 +186,7 @@ test('TUI observes an externally locked session, answers a question, sends guida
   }));
 });
 
-test('TUI restores persisted records and reports the missing live event window', async () => {
+test('TUI restores persisted records once when overlapping gap refreshes return out of order', async () => {
   await withTuiHost(async (context) => {
     const sessionId = 'tui-external-control-gap-session';
     const session = createSessionLog({
@@ -200,6 +200,8 @@ test('TUI restores persisted records and reports the missing live event window',
 
     let gapReady = false;
     let gapDelivered = false;
+    let followUpReady = false;
+    let followUpDelivered = false;
     let statusCalls = 0;
     let transcriptReads = 0;
     let resolveFirstRead: () => void = () => {};
@@ -219,7 +221,9 @@ test('TUI restores persisted records and reports the missing live event window',
       if (request.action === 'status') {
         statusCalls += 1;
         const eventGap = gapReady && !gapDelivered;
+        const followUp = followUpReady && !followUpDelivered;
         if (eventGap) gapDelivered = true;
+        if (followUp) followUpDelivered = true;
         return {
           operationId: 'external-gap-operation',
           sessionId,
@@ -229,8 +233,10 @@ test('TUI restores persisted records and reports the missing live event window',
           progress: null,
           pendingInteractions: [],
           events: eventGap ? [{ cursor: 130, kind: 'session.event', at: Date.now(), sessionId,
-            operationId: 'external-gap-operation', eventKind: 'assistant', eventSeq: 2 }] : [],
-          nextCursor: eventGap ? 130 : 1,
+            operationId: 'external-gap-operation', eventKind: 'assistant', eventSeq: 3 }]
+            : followUp ? [{ cursor: 131, kind: 'session.event', at: Date.now(), sessionId,
+              operationId: 'external-gap-operation', eventKind: 'assistant', eventSeq: 5 }] : [],
+          nextCursor: eventGap ? 130 : followUp ? 131 : 1,
           hasMoreEvents: false,
           eventGap,
           firstAvailableCursor: eventGap ? 130 : 1,
@@ -280,21 +286,43 @@ test('TUI restores persisted records and reports the missing live event window',
         assert.ok(context.requests.some((request) => request.method === 'session.open'
           && (request.params as { sessionId?: string }).sessionId === sessionId), 'TUI opened the intended persisted Session');
         await wait(() => statusCalls >= 2);
+        await session.append({ kind: 'assistant', text: 'P6 first overlapping persisted assistant record.', toolCalls: [] });
         gapReady = true;
         await wait(() => transcriptReads === 2);
-        await wait(() => frame().includes('P6 newest persisted assistant record'));
+        await wait(() => output().includes('P6 newest persisted assistant record'));
         assert.equal(olderReadIncludedMarker, false, 'the first transcript snapshot was captured before the new record was appended');
         assert.equal(latestReadIncludedMarker, true, 'the later transcript snapshot contains the new record');
         assert.equal(latestEventIncludedMarker, true, 'the later Host read contains the persisted assistant event');
         assert.ok(latestProjectedRowCount > 0, 'the persisted event has a transcript projection');
         assert.ok(output().includes('外控实时事件出现缺口'), 'the TUI clearly marks that some live events are missing');
+        const outputCount = (marker: string) => output().split(marker).length - 1;
+        assert.equal(outputCount('P6 first overlapping persisted assistant record'), 1,
+          'the newer snapshot emits the first persisted record once');
+        assert.equal(outputCount('P6 newest persisted assistant record'), 1,
+          'the newer snapshot emits the second persisted record once');
         releaseOlderResponse();
         await firstResponseReturned;
         await new Promise((resolve) => setTimeout(resolve, 75));
-        assert.match(frame(), /P6 newest persisted assistant record/u,
+        assert.ok(output().includes('P6 newest persisted assistant record'),
           `a delayed old session.observe result must not overwrite the latest record; older=${olderReadIncludedMarker}, latest=${latestReadIncludedMarker}, event=${latestEventIncludedMarker}, projected=${latestProjectedRowCount}, reads=${transcriptReads}\n${frame()}\n${output().slice(-1_200)}`);
-        assert.equal(frame().split('P6 newest persisted assistant record').length - 1, 1,
+        assert.equal(outputCount('P6 newest persisted assistant record'), 1,
           'the persisted record must appear once after transcript recovery');
+        assert.equal(outputCount('P6 first overlapping persisted assistant record'), 1,
+          'the delayed older snapshot must not emit the first record again');
+        await session.append({ kind: 'assistant', text: 'P6 follow-up persisted assistant record.', toolCalls: [] });
+        followUpReady = true;
+        await wait(() => transcriptReads >= 3 && frame().includes('P6 follow-up persisted assistant record'));
+        assert.equal(outputCount('P6 first overlapping persisted assistant record'), 1,
+          'the next refresh must not repeat records below the committed cursor');
+        assert.equal(outputCount('P6 newest persisted assistant record'), 1,
+          'the next refresh must not repeat records from the newer snapshot');
+        assert.equal(outputCount('P6 follow-up persisted assistant record'), 1,
+          'the next refresh appends only the newly persisted record');
+        assert.ok(output().indexOf('P6 first overlapping persisted assistant record')
+          < output().indexOf('P6 newest persisted assistant record')
+          && output().indexOf('P6 newest persisted assistant record')
+            < output().indexOf('P6 follow-up persisted assistant record'),
+        'persisted assistant records remain in sequence order');
         assert.ok(actions.some((action) => action.action === 'status'));
       }, 60);
     } finally {
