@@ -138,9 +138,11 @@ Kernel 从空工具注册表开始。Host 通过[装配器](../../core/src/kerne
 
 内置 `delete` 工具只调用操作系统回收站，Linux 使用 GIO 系统回收操作。后端报错后，Ligule 会比较原路径上的目标对象身份和顶层元数据与操作前快照。仍匹配时返回后端错误；无法匹配时返回 `delete_outcome_unknown`，要求用户检查工作区和系统回收站再重试。这项检查不比较文件正文，也不递归核对目录内容。Ligule 不维护自建回收列表或恢复存储。Shell 删除仍沿 Shell 的 Permission、Policy 和 Approval 链执行。
 
-`write` 会在替换内容前将文件与本轮最后一次完整读取的版本进行比较。比较和写入是两个独立的文件系统操作，因此外部并发写入仍可能在检查后发生；该工具不提供原子比较并交换保证。
+`write` 会在替换内容前将文件与本轮最后一次完整读取的版本进行比较。比较和写入是两个独立的文件系统操作，因此外部并发写入仍可能在检查后发生；该工具不提供原子比较并交换保证。Host 的同路径队列会先后执行同一 Host 内的已注册文件修改操作，但不能锁住其他 Host、进程或外部编辑器。
 
-`edit` 会读取当前文件、定位唯一锚点，再通过另一次文件操作写入替换内容。外部进程仍可能在这两步之间修改文件，因此锚点检查不能防止并发修改被覆盖。
+`edit` 保留旧的 `anchor` / `replacement` 形式，也支持 `changes[]` 一次精确修改多处。两种形式都会在调用时读取文件，不额外要求先执行完整 `read`。旧形式要求锚点唯一；多处形式要求每个 `oldText` 非空、在原文中恰好出现一次且所选范围互不重叠，每次最多 32 项，合并后的 `oldText` / `newText` 不超过 64 KiB。多处修改根据原文位置应用，返回的展示用 Diff 最多 8 KiB，并明确标出截断。外部进程仍可能在读取、匹配和写入之间修改文件，因此这些检查不能提供跨进程原子比较并交换。
+
+同一 Host 在路径边界解析后，按最终目标路径排队 `create`、`write`、`edit` 和 `delete`；同 Host 的不同会话及其子 Agent 共用该队列。等待期间会重新检查 Permission 和目标路径；`create`、`write`、`edit` 目标解析到不同文件时返回 `write_target_changed`，`delete` 使用自己的目标快照并返回 `delete_target_changed`。队列不协调其他 Host 或进程，不保证 exactly-once，也不防止未加入队列的外部写入。`create`、`write` 和 `edit` 在文件操作报错后，会比较目标的当前内容与操作前后状态：能确认已写入时作为成功返回；确认未变化时返回 `<operation>_failed_unchanged`；无法确认时返回 `<operation>_outcome_unknown`，调用方应先重新读取再决定是否重试。`delete` 的后端错误按前文的回收站状态检查处理。
 
 Host 为每个会话持有独立的 Permission 与 Policy 状态。Permission 在 Kernel 判定之前按工具的资源访问类别检查读、写、命令、网络和外部进程；Policy 随后决定是否审批或拒绝。交互式 TUI 与 Desktop 可更改会话 Permission，启用 `full-access` 和 `unrestricted` 网络分别需要确认。命令执行通过 [`permission-capabilities.ts`](../../core/src/capability/permission-capabilities.ts) 探测所选 Shell 和平台能力。Linux 使用 bubblewrap，并按实测报告文件系统隔离能力；受限命令使用的 Node 若位于隐藏目录中，沙箱只读映射该可执行文件及发行包自带的 npm/Corepack 文件到固定路径，用户主目录和包管理器缓存仍保持隐藏。Windows `workspace-write` 使用每次运行独立的 `WRITE_RESTRICTED` Token 和临时 ACL，标为 `partial`；需要明确授权项目、确认风险并使用不受限网络，且无法限制读取和网络。硬链接、可写祖先目录的 `FILE_DELETE_CHILD` 权限及并发 ACL 修改仍可能越界。Windows `read-only` 仅当所选 Shell 能进入实际工作区时才使用 AppContainer，否则 Kernel 预检会拒绝；可用时它会阻止工作区写入和 Shell 联网，但系统公开可读文件仍可能被读取。项目脚本与 Git 命令都需要工作区信任；每条 Git 命令还需逐次审批，因为仓库配置可能运行 Hook、辅助程序或别名。`full-access` Shell 使用当前操作系统用户权限，并要求不受限网络与进程管理能力可用。MCP `--operator` 不管理 Permission，硬拒绝也不能通过审批覆盖。
 
