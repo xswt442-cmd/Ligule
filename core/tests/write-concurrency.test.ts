@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHost } from '../dist/host/host.js';
@@ -14,21 +14,28 @@ const workspaceWrite = createPermissionContext('workspace-write', 'disabled', {
   filesystemRead: 'unavailable', filesystemWrite: 'unavailable', network: 'unavailable', process: 'unavailable',
 });
 
-test('two Sessions in one Host preserve simultaneous exact edits to different parts of one file', async () => {
+test('two Sessions in one Host preserve simultaneous exact edits through normalized and directory-alias paths', async () => {
   const temporaryRoot = process.env.LIGULE_TEST_TEMP_ROOT ?? join(repository, 'testplace', 'tmp');
   await mkdir(temporaryRoot, { recursive: true });
   const root = await mkdtemp(join(temporaryRoot, 'write-concurrency-'));
   const home = join(root, 'home');
   const workspace = join(root, 'workspace');
+  const realDirectory = join(workspace, 'real');
+  const aliasDirectory = join(workspace, 'alias');
   const sessions = join(workspace, '.ligule', 'sessions');
-  const target = join(workspace, 'target.txt');
+  const target = join(realDirectory, 'target.txt');
   const previousHome = process.env.LIGULE_HOME;
   const padding = 'x'.repeat(2 * 1024 * 1024);
   let host: Host | undefined;
-  await Promise.all([mkdir(home, { recursive: true }), mkdir(workspace, { recursive: true })]);
+  await Promise.all([
+    mkdir(home, { recursive: true }),
+    mkdir(realDirectory, { recursive: true }),
+  ]);
+  await symlink(realDirectory, aliasDirectory, process.platform === 'win32' ? 'junction' : 'dir');
   process.env.LIGULE_HOME = home;
 
   let arrivals = 0;
+  let useDirectoryAlias = false;
   let releasePair = (): void => {};
   let pairReady = new Promise<void>((resolve) => { releasePair = resolve; });
   const resetPair = () => {
@@ -55,7 +62,7 @@ test('two Sessions in one Host preserve simultaneous exact edits to different pa
         id: writerA ? 'write-a' : 'write-b',
         name: 'edit',
         args: {
-          path: writerA ? 'target.txt' : './target.txt',
+          path: writerA ? 'real/target.txt' : useDirectoryAlias ? 'alias/target.txt' : './real/target.txt',
           changes: [{ oldText: writerA ? 'A_ANCHOR' : 'B_ANCHOR', newText: writerA ? 'A_CHANGED' : 'B_CHANGED' }],
         },
       };
@@ -74,6 +81,7 @@ test('two Sessions in one Host preserve simultaneous exact edits to different pa
     const sessionB = await host.handle({ method: 'session.create', params: { projectRoot: workspace } }, client) as { sessionId: string };
 
     for (let attempt = 0; attempt < 25; attempt += 1) {
+      useDirectoryAlias = attempt % 2 === 1;
       await writeFile(target, `A_ANCHOR\n${padding}\nB_ANCHOR\n`, 'utf8');
       resetPair();
       await Promise.all([
@@ -81,8 +89,8 @@ test('two Sessions in one Host preserve simultaneous exact edits to different pa
         host.handle({ method: 'run.start', params: { sessionId: sessionB.sessionId, input: 'writer B' } }, client),
       ]);
       const result = await readFile(target, 'utf8');
-      assert.ok(result.includes('A_CHANGED'), `attempt ${attempt + 1} lost writer A's edit`);
-      assert.ok(result.includes('B_CHANGED'), `attempt ${attempt + 1} lost writer B's edit`);
+      assert.ok(result.includes('A_CHANGED'), `attempt ${attempt + 1} lost writer A's edit (directoryAlias=${useDirectoryAlias})`);
+      assert.ok(result.includes('B_CHANGED'), `attempt ${attempt + 1} lost writer B's edit (directoryAlias=${useDirectoryAlias})`);
     }
   } finally {
     await host?.release();
