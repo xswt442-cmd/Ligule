@@ -6,4 +6,4 @@ Add `PATCH /api/items/:id` to `src/server.mjs` and update `test/server.test.mjs`
 - Return `404` for an unknown item ID.
 - Keep the existing GET route behavior.
 
-Run `npm test` before finishing. Keep the route implementation and its regression test changes in separate files.
+Keep the route implementation and its regression test changes in separate files. Do not run project tests or build commands. The separate verifier will run the test suite after your turn.

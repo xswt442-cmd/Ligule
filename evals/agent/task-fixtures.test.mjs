@@ -315,8 +315,8 @@ test('coding and canary plans use auto while repeated runs stay limited to C01',
   const once = JSON.parse(await readFile(join(codingTasks, '..', 'coding-plan.json'), 'utf8'));
   const repeated = JSON.parse(await readFile(join(codingTasks, '..', 'coding-c01-repeat-plan.json'), 'utf8'));
   const canary = JSON.parse(await readFile(join(codingTasks, '..', 'canary-plan.json'), 'utf8'));
-  assert.equal(once.dataset.version, '0.1.3-p1.2');
-  assert.equal(repeated.dataset.version, '0.1.3-p1.2');
+  assert.equal(once.dataset.version, '0.1.3-p1.3');
+  assert.equal(repeated.dataset.version, '0.1.3-p1.3');
   assert.equal(once.policy_mode, 'auto');
   assert.equal(once.attempts_per_task, 1);
   assert.deepEqual(once.tasks.map((task) => task.id), ['c01', 'c02', 'c03', 'c04']);
@@ -325,6 +325,20 @@ test('coding and canary plans use auto while repeated runs stay limited to C01',
   assert.deepEqual(repeated.tasks.map((task) => task.id), ['c01']);
   assert.equal(canary.policy_mode, 'auto');
   assert.deepEqual(canary.tasks.map((task) => task.id), ['canary']);
+});
+
+test('headless coding instructions leave test execution to the separate verifier in p1.3', async () => {
+  const once = JSON.parse(await readFile(join(codingTasks, '..', 'coding-plan.json'), 'utf8'));
+  const repeated = JSON.parse(await readFile(join(codingTasks, '..', 'coding-c01-repeat-plan.json'), 'utf8'));
+  assert.equal(once.dataset.version, '0.1.3-p1.3');
+  assert.equal(repeated.dataset.version, '0.1.3-p1.3');
+  for (const taskId of ['c01', 'c02', 'c03', 'c04']) {
+    const instruction = await readFile(join(codingTasks, taskId, 'instruction.md'), 'utf8');
+    const verifier = await readFile(join(codingTasks, taskId, 'tests', 'test.sh'), 'utf8');
+    assert.match(instruction, /separate verifier will run the test suite/u, `${taskId} must tell the Agent who runs tests`);
+    assert.doesNotMatch(instruction, /run `npm test`/iu, `${taskId} must not require an approval-dependent command`);
+    assert.match(verifier, /node \/tests\/verify\.mjs \/app/u, `${taskId} must keep the independent verifier entry point`);
+  }
 });
 
 test('all coding verifier images pin Node 24 for separate execution', async () => {
