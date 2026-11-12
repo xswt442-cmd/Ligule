@@ -202,11 +202,16 @@ test('TUI restores persisted records once when overlapping gap refreshes return 
     let gapDelivered = false;
     let followUpReady = false;
     let followUpDelivered = false;
+    let lateReadReady = false;
+    let lateReadDelivered = false;
     let statusCalls = 0;
     let transcriptReads = 0;
     let resolveFirstRead: () => void = () => {};
     let releaseOlderResponse: () => void = () => {};
     let resolveFirstResponse: () => void = () => {};
+    let releaseLateResponse: () => void = () => {};
+    let lateSnapshotCaptured = false;
+    let resolveLateResponseReturned: () => void = () => {};
     let olderReadIncludedMarker = false;
     let latestReadIncludedMarker = false;
     let latestEventIncludedMarker = false;
@@ -214,6 +219,8 @@ test('TUI restores persisted records once when overlapping gap refreshes return 
     const firstReadReady = new Promise<void>((resolve) => { resolveFirstRead = resolve; });
     const olderResponseReleased = new Promise<void>((resolve) => { releaseOlderResponse = resolve; });
     const firstResponseReturned = new Promise<void>((resolve) => { resolveFirstResponse = resolve; });
+    const lateResponseReleased = new Promise<void>((resolve) => { releaseLateResponse = resolve; });
+    const lateResponseReturned = new Promise<void>((resolve) => { resolveLateResponseReturned = resolve; });
     const actions: RecordedAction[] = [];
     const runtime: AgentControlRuntime = createAgentControlRuntime(context.projectDirectory, async (requestedSession, request) => {
       assert.equal(requestedSession, sessionId);
@@ -222,8 +229,10 @@ test('TUI restores persisted records once when overlapping gap refreshes return 
         statusCalls += 1;
         const eventGap = gapReady && !gapDelivered;
         const followUp = followUpReady && !followUpDelivered;
+        const lateRead = lateReadReady && !lateReadDelivered;
         if (eventGap) gapDelivered = true;
         if (followUp) followUpDelivered = true;
+        if (lateRead) lateReadDelivered = true;
         return {
           operationId: 'external-gap-operation',
           sessionId,
@@ -235,8 +244,10 @@ test('TUI restores persisted records once when overlapping gap refreshes return 
           events: eventGap ? [{ cursor: 130, kind: 'session.event', at: Date.now(), sessionId,
             operationId: 'external-gap-operation', eventKind: 'assistant', eventSeq: 3 }]
             : followUp ? [{ cursor: 131, kind: 'session.event', at: Date.now(), sessionId,
-              operationId: 'external-gap-operation', eventKind: 'assistant', eventSeq: 5 }] : [],
-          nextCursor: eventGap ? 130 : followUp ? 131 : 1,
+              operationId: 'external-gap-operation', eventKind: 'assistant', eventSeq: 5 }]
+              : lateRead ? [{ cursor: 132, kind: 'session.event', at: Date.now(), sessionId,
+                operationId: 'external-gap-operation', eventKind: 'assistant', eventSeq: 6 }] : [],
+          nextCursor: eventGap ? 130 : followUp ? 131 : lateRead ? 132 : 1,
           hasMoreEvents: false,
           eventGap,
           firstAvailableCursor: eventGap ? 130 : 1,
@@ -274,6 +285,13 @@ test('TUI restores persisted records once when overlapping gap refreshes return 
         latestEventIncludedMarker = latestEvents.some((event) => event.kind === 'assistant' && event.text === 'P6 newest persisted assistant record.');
         latestProjectedRowCount = latestEvents.flatMap((event) => projectRecord(event as unknown as TuiRecord)).length;
         return latest;
+      }
+      if (readNumber === 4) {
+        const late = await originalRequest(method, params);
+        lateSnapshotCaptured = true;
+        await lateResponseReleased;
+        resolveLateResponseReturned();
+        return late;
       }
       return await originalRequest(method, params);
     };
@@ -323,10 +341,23 @@ test('TUI restores persisted records once when overlapping gap refreshes return 
           && output().indexOf('P6 newest persisted assistant record')
             < output().indexOf('P6 follow-up persisted assistant record'),
         'persisted assistant records remain in sequence order');
+        await session.append({ kind: 'assistant', text: 'P6 stale-session response record.', toolCalls: [] });
+        lateReadReady = true;
+        await wait(() => transcriptReads >= 4 && lateSnapshotCaptured);
+        await type(`/resume ${context.sessionId.slice(0, 8)}`);
+        await wait(() => frame().includes(`会话 ${context.sessionId.slice(0, 8)}`));
+        assert.equal(outputCount('P6 stale-session response record'), 0,
+          'a pending snapshot from the previous Session has not been applied');
+        releaseLateResponse();
+        await lateResponseReturned;
+        await new Promise((resolve) => setTimeout(resolve, 75));
+        assert.equal(outputCount('P6 stale-session response record'), 0,
+          'a delayed snapshot from the previous Session must not enter the selected Session view');
         assert.ok(actions.some((action) => action.action === 'status'));
       }, 60);
     } finally {
       releaseOlderResponse();
+      releaseLateResponse();
       await runtime.close();
       await session.close();
     }
