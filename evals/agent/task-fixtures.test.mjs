@@ -55,6 +55,12 @@ async function verifyFixture(taskId) {
       assert.equal(c02Behavior.includes(patchBody), true, 'C02 independent behavior check must use the target PATCH request body');
       assert.match(initial.stderr, /PATCH rejects invalid JSON without changing the item/u);
       assert.match(initial.stderr, /PATCH rejects names over 80 characters without changing the item/u);
+      assert.match(initial.stderr, /PATCH rejects missing or non-string names without changing the item/u,
+        'the C02 verifier must identify missing and non-string names');
+      assert.match(c02EnvironmentTests, /PATCH rejects missing or non-string names without changing the item/u);
+      assert.match(c02SolutionTests, /PATCH rejects missing or non-string names without changing the item/u);
+      assert.match(c02Behavior, /const invalidNameBodies = \[\{\}, \{ name: 123 \}, \{ name: null \}\]/u,
+        'C02 behavior checks must reject missing and non-string names');
       await copyFile(join(taskDirectory, 'solution', 'app', 'src', 'server.mjs'), join(workspace, 'src', 'server.mjs'));
       const routeOnly = runVerifier(taskDirectory, workspace);
       assert.notEqual(routeOnly.status, 0, 'the C02 route implementation must also update the stale public test');
@@ -322,8 +328,8 @@ test('coding and canary plans use auto while repeated runs stay limited to C01',
   const once = JSON.parse(await readFile(join(codingTasks, '..', 'coding-plan.json'), 'utf8'));
   const repeated = JSON.parse(await readFile(join(codingTasks, '..', 'coding-c01-repeat-plan.json'), 'utf8'));
   const canary = JSON.parse(await readFile(join(codingTasks, '..', 'canary-plan.json'), 'utf8'));
-  assert.equal(once.dataset.version, '0.1.3-p1.5');
-  assert.equal(repeated.dataset.version, '0.1.3-p1.5');
+  assert.equal(once.dataset.version, '0.1.3-p1.6');
+  assert.equal(repeated.dataset.version, '0.1.3-p1.6');
   assert.equal(once.policy_mode, 'auto');
   assert.equal(once.attempts_per_task, 1);
   assert.deepEqual(once.tasks.map((task) => task.id), ['c01', 'c02', 'c03', 'c04']);
@@ -334,11 +340,11 @@ test('coding and canary plans use auto while repeated runs stay limited to C01',
   assert.deepEqual(canary.tasks.map((task) => task.id), ['canary']);
 });
 
-test('headless coding instructions leave test execution to the separate verifier in p1.5', async () => {
+test('headless coding instructions leave test execution to the separate verifier in p1.6', async () => {
   const once = JSON.parse(await readFile(join(codingTasks, '..', 'coding-plan.json'), 'utf8'));
   const repeated = JSON.parse(await readFile(join(codingTasks, '..', 'coding-c01-repeat-plan.json'), 'utf8'));
-  assert.equal(once.dataset.version, '0.1.3-p1.5');
-  assert.equal(repeated.dataset.version, '0.1.3-p1.5');
+  assert.equal(once.dataset.version, '0.1.3-p1.6');
+  assert.equal(repeated.dataset.version, '0.1.3-p1.6');
   for (const taskId of ['c01', 'c02', 'c03', 'c04']) {
     const instruction = await readFile(join(codingTasks, taskId, 'instruction.md'), 'utf8');
     const verifier = await readFile(join(codingTasks, taskId, 'tests', 'test.sh'), 'utf8');
@@ -358,7 +364,7 @@ test('all coding verifier images pin Node 24 for separate execution', async () =
   }
 });
 
-test('p1.5 coding tasks transfer only agent output files to their separate verifier', async () => {
+test('p1.6 coding tasks transfer only agent output files to their separate verifier', async () => {
   const expectedArtifacts = {
     c01: ['/app/src/contact.mjs'],
     c02: ['/app/src/server.mjs', '/app/test/server.test.mjs'],
@@ -378,7 +384,7 @@ test('p1.5 coding tasks transfer only agent output files to their separate verif
   }
 });
 
-test('p1.5 C01 text and public test expose invalid phone characters', async () => {
+test('p1.6 C01 text and public test expose invalid phone characters', async () => {
   const taskDirectory = join(codingTasks, 'c01');
   const instruction = await readFile(join(taskDirectory, 'instruction.md'), 'utf8');
   const publicTests = await readFile(join(taskDirectory, 'environment', 'app', 'test', 'contact.test.mjs'), 'utf8');

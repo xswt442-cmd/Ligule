@@ -45,6 +45,22 @@ test('PATCH rejects invalid names without changing the item', async () => {
   });
 });
 
+test('PATCH rejects missing or non-string names without changing the item', async () => {
+  await withServer(async (baseUrl) => {
+    const invalidNameBodies = [{}, { name: 123 }, { name: null }];
+    for (const body of invalidNameBodies) {
+      const response = await fetch(`${baseUrl}/api/items/item-1`, {
+        method: 'PATCH',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      assert.equal(response.status, 400);
+      const unchanged = await fetch(`${baseUrl}/api/items/item-1`);
+      assert.deepEqual(await unchanged.json(), { id: 'item-1', name: 'Tea' });
+    }
+  });
+});
+
 test('PATCH rejects invalid JSON without changing the item', async () => {
   await withServer(async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/items/item-1`, {

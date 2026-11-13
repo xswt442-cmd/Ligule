@@ -27,6 +27,16 @@ try {
   const unchanged = await fetch(`${baseUrl}/api/items/item-1`);
   assert.deepEqual(await unchanged.json(), { id: 'item-1', name: 'Black Tea' });
 
+  const invalidNameBodies = [{}, { name: 123 }, { name: null }];
+  for (const body of invalidNameBodies) {
+    const invalidName = await fetch(`${baseUrl}/api/items/item-1`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    });
+    assert.equal(invalidName.status, 400);
+    const unchangedAfterInvalidName = await fetch(`${baseUrl}/api/items/item-1`);
+    assert.deepEqual(await unchangedAfterInvalidName.json(), { id: 'item-1', name: 'Black Tea' });
+  }
+
   const malformed = await fetch(`${baseUrl}/api/items/item-1`, {
     method: 'PATCH', headers: { 'content-type': 'application/json' }, body: '{',
   });
