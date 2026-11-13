@@ -1,3 +1,5 @@
+artifacts = ["/app/src/slug.mjs"]
+
 version = "1.0"
 
 [metadata]

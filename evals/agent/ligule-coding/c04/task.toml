@@ -1,3 +1,5 @@
+artifacts = ["/app/bin/summary.mjs", "/app/test/summary.test.mjs"]
+
 version = "1.0"
 
 [metadata]

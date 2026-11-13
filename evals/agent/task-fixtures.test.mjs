@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { access, copyFile, cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -8,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 const repository = fileURLToPath(new URL('../..', import.meta.url));
 const codingTasks = join(repository, 'evals', 'agent', 'ligule-coding');
 const temporaryRoot = join(repository, 'testplace', 'tmp');
+const { parse: parseToml } = createRequire(join(repository, 'core', 'package.json'))('smol-toml');
 
 function runVerifier(taskDirectory, workspace, extraEnv = {}) {
   const env = { ...process.env, ...extraEnv };
@@ -315,8 +317,8 @@ test('coding and canary plans use auto while repeated runs stay limited to C01',
   const once = JSON.parse(await readFile(join(codingTasks, '..', 'coding-plan.json'), 'utf8'));
   const repeated = JSON.parse(await readFile(join(codingTasks, '..', 'coding-c01-repeat-plan.json'), 'utf8'));
   const canary = JSON.parse(await readFile(join(codingTasks, '..', 'canary-plan.json'), 'utf8'));
-  assert.equal(once.dataset.version, '0.1.3-p1.3');
-  assert.equal(repeated.dataset.version, '0.1.3-p1.3');
+  assert.equal(once.dataset.version, '0.1.3-p1.4');
+  assert.equal(repeated.dataset.version, '0.1.3-p1.4');
   assert.equal(once.policy_mode, 'auto');
   assert.equal(once.attempts_per_task, 1);
   assert.deepEqual(once.tasks.map((task) => task.id), ['c01', 'c02', 'c03', 'c04']);
@@ -327,11 +329,11 @@ test('coding and canary plans use auto while repeated runs stay limited to C01',
   assert.deepEqual(canary.tasks.map((task) => task.id), ['canary']);
 });
 
-test('headless coding instructions leave test execution to the separate verifier in p1.3', async () => {
+test('headless coding instructions leave test execution to the separate verifier in p1.4', async () => {
   const once = JSON.parse(await readFile(join(codingTasks, '..', 'coding-plan.json'), 'utf8'));
   const repeated = JSON.parse(await readFile(join(codingTasks, '..', 'coding-c01-repeat-plan.json'), 'utf8'));
-  assert.equal(once.dataset.version, '0.1.3-p1.3');
-  assert.equal(repeated.dataset.version, '0.1.3-p1.3');
+  assert.equal(once.dataset.version, '0.1.3-p1.4');
+  assert.equal(repeated.dataset.version, '0.1.3-p1.4');
   for (const taskId of ['c01', 'c02', 'c03', 'c04']) {
     const instruction = await readFile(join(codingTasks, taskId, 'instruction.md'), 'utf8');
     const verifier = await readFile(join(codingTasks, taskId, 'tests', 'test.sh'), 'utf8');
@@ -348,5 +350,25 @@ test('all coding verifier images pin Node 24 for separate execution', async () =
     const dockerfile = await readFile(join(codingTasks, taskId, 'environment', 'Dockerfile'), 'utf8');
     assert.ok(dockerfile.includes(archive), `${taskId} must pin the official Node archive digest`);
     assert.ok(dockerfile.includes('ENV PATH="/opt/node-v24.22.2/bin:${PATH}"'), `${taskId} must expose Node to its separate verifier`);
+  }
+});
+
+test('p1.4 coding tasks transfer only agent output files to their separate verifier', async () => {
+  const expectedArtifacts = {
+    c01: ['/app/src/contact.mjs'],
+    c02: ['/app/src/server.mjs', '/app/test/server.test.mjs'],
+    c03: ['/app/src/slug.mjs'],
+    c04: ['/app/bin/summary.mjs', '/app/test/summary.test.mjs'],
+  };
+  for (const [taskId, artifacts] of Object.entries(expectedArtifacts)) {
+    const taskDirectory = join(codingTasks, taskId);
+    const task = parseToml(await readFile(join(taskDirectory, 'task.toml'), 'utf8'));
+    assert.equal(task.verifier.environment_mode, 'separate', `${taskId} must retain a separate verifier`);
+    assert.deepEqual(task.artifacts, artifacts, `${taskId} must transfer only its declared task outputs`);
+    for (const artifact of artifacts) {
+      const relativePath = artifact.slice('/app/'.length);
+      await access(join(taskDirectory, 'environment', 'app', relativePath));
+      await access(join(taskDirectory, 'solution', 'app', relativePath));
+    }
   }
 });
