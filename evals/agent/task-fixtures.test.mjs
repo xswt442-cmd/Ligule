@@ -336,6 +336,7 @@ test('coding and canary plans use auto while repeated runs stay limited to C01',
   assert.equal(repeated.policy_mode, 'auto');
   assert.equal(repeated.attempts_per_task, 3);
   assert.deepEqual(repeated.tasks.map((task) => task.id), ['c01']);
+  assert.equal(canary.dataset.version, '1.1');
   assert.equal(canary.policy_mode, 'auto');
   assert.deepEqual(canary.tasks.map((task) => task.id), ['canary']);
 });
@@ -381,6 +382,50 @@ test('p1.6 coding tasks transfer only agent output files to their separate verif
       await access(join(taskDirectory, 'environment', 'app', relativePath));
       await access(join(taskDirectory, 'solution', 'app', relativePath));
     }
+  }
+});
+
+test('Harbor handoff canary uses a separate verifier and rejects missing, empty, wrong-path, and mismatched artifacts', async () => {
+  const taskDirectory = join(repository, 'evals', 'agent', 'canary', 'ligule-canary', 'canary');
+  const task = parseToml(await readFile(join(taskDirectory, 'task.toml'), 'utf8'));
+  const solution = await readFile(join(taskDirectory, 'solution', 'solve.sh'), 'utf8');
+  const dockerfile = await readFile(join(taskDirectory, 'environment', 'Dockerfile'), 'utf8');
+  const testScript = await readFile(join(taskDirectory, 'tests', 'test.sh'), 'utf8');
+  assert.deepEqual(task.artifacts, ['/app/answer.txt']);
+  assert.equal(task.verifier.environment_mode, 'separate');
+  assert.match(solution, /LIGULE-CANARY-OK/u);
+  assert.match(solution, /\/app\/answer\.txt/u);
+  assert.match(dockerfile, /node-v24\.22\.2-linux-x64\.tar\.gz/u);
+  assert.match(dockerfile, /\/opt\/node-v24\.22\.2\/bin/u);
+  assert.match(testScript, /node \/tests\/verify\.mjs \/app/u);
+
+  const temporaryDirectory = await mkdtemp(join(temporaryRoot, 'ligule-harbor-handoff-'));
+  const workspace = join(temporaryDirectory, 'workspace');
+  try {
+    await mkdir(workspace, { recursive: true });
+    const missing = runVerifier(taskDirectory, workspace);
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stderr, /handoff_output_missing/u);
+
+    await writeFile(join(workspace, 'wrong-path.txt'), 'LIGULE-CANARY-OK\n');
+    const wrongPath = runVerifier(taskDirectory, workspace);
+    assert.notEqual(wrongPath.status, 0);
+    assert.match(wrongPath.stderr, /handoff_output_missing/u);
+
+    await writeFile(join(workspace, 'answer.txt'), '');
+    const empty = runVerifier(taskDirectory, workspace);
+    assert.notEqual(empty.status, 0);
+    assert.match(empty.stderr, /handoff_output_empty/u);
+
+    await writeFile(join(workspace, 'answer.txt'), 'wrong output\n');
+    const mismatched = runVerifier(taskDirectory, workspace);
+    assert.notEqual(mismatched.status, 0);
+    assert.match(mismatched.stderr, /handoff_output_mismatch/u);
+
+    await writeFile(join(workspace, 'answer.txt'), 'LIGULE-CANARY-OK\n');
+    assert.equal(runVerifier(taskDirectory, workspace).status, 0);
+  } finally {
+    await rm(temporaryDirectory, { recursive: true, force: true });
   }
 });
 

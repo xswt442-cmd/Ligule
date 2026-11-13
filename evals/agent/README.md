@@ -46,6 +46,18 @@ pnpm run bench:agent -- --plan evals/agent/canary-plan.json \
 
 The canary image uses a locally available base image so the check does not depend on a Docker Hub pull. It validates the provider, Ligule Session/tool path, Harbor adapter, report manifest, and verifier without mixing the result into the eight-task benchmark. `--collect-only` loads the task set from the saved `run.json`, so a canary run can be recovered without repeating its custom `--plan`.
 
+Canary revision 1.1 explicitly declares `/app/answer.txt` as its task output artifact and runs its verifier in `separate` mode. Harbor also collects its conventional `/logs/artifacts` directory; the verifier reads only `answer.txt`. The offline fixture checks that missing, empty, wrong-path, and mismatched outputs fail. To validate Harbor's actual artifact handoff without a model provider, use its built-in `oracle` agent to produce the expected file and its `nop` agent as the no-output control:
+
+```powershell
+$env:UV_CACHE_DIR = Join-Path (Get-Location).Path 'testplace\tmp\harbor-cache'
+$env:PYTHONUTF8 = '1'
+$env:PYTHONIOENCODING = 'utf-8'
+uv run --no-project --with harbor==0.25.0 harbor run --agent oracle --path evals/agent/canary/ligule-canary/canary --job-name handoff-oracle --n-attempts 1 --n-concurrent 1 --max-retries 0 --jobs-dir testplace/tmp/harbor-handoff
+uv run --no-project --with harbor==0.25.0 harbor run --agent nop --path evals/agent/canary/ligule-canary/canary --job-name handoff-nop --n-attempts 1 --n-concurrent 1 --max-retries 0 --jobs-dir testplace/tmp/harbor-handoff
+```
+
+The expected results are Oracle `Reward=1` with `/app/answer.txt` transferred and Nop `Reward=0` with that artifact missing. These built-in agents do not make Provider calls; this check validates Harbor's separate-environment transfer and does not replace a real Ligule model trial.
+
 ## Plan and scoring
 
 The plan fixes the dataset version, task IDs, attempts, concurrency, model-call/timeout budget, and verifier authority. Optional `policy_mode: "auto"` selects the normal Policy chain for a plan; when omitted, the existing Terminal-Bench plan retains its `never` mode. Harbor's task verifier runs in its own environment and decides pass/fail. The runner uses the existing `evals.harbor.ligule_agent:LiguleAgent` adapter and `--allow-full-access` behavior inside the task container; it does not create approvals or read verifier files.

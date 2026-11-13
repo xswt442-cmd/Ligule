@@ -1,3 +1,5 @@
+artifacts = ["/app/answer.txt"]
+
 version = "1.0"
 
 [metadata]
@@ -11,12 +13,14 @@ junior_time_estimate_min = 2.0
 
 [verifier]
 timeout_sec = 300.0
+environment_mode = "separate"
 
 [agent]
 timeout_sec = 600.0
 
 [environment]
 build_timeout_sec = 600.0
+workdir = "/app"
 cpus = 1
 memory = "2G"
 storage = "10G"
