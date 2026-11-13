@@ -9,6 +9,7 @@ const PUBLIC_TEST_NAMES = new Set([
   'displayName prefers a trimmed nickname',
   'displayName falls back to trimmed first and last names',
   'normalizePhone removes punctuation and normalizes supported numbers',
+  'normalizePhone rejects letters and unsupported punctuation',
   'priorityLabel keeps its existing formatting',
 ]);
 

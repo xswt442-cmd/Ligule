@@ -2,7 +2,7 @@
   "schema_version": "ligule.agent-benchmark-plan.v1",
   "dataset": {
     "name": "ligule-coding",
-    "version": "0.1.3-p1.4",
+    "version": "0.1.3-p1.5",
     "source": "local fixture"
   },
   "tasks": [

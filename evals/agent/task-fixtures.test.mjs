@@ -39,6 +39,11 @@ async function verifyFixture(taskId) {
     };
     assert.match(initial.stderr, failureNames[taskId], `the ${taskId.toUpperCase()} verifier must retain a failed public test name`);
 
+    if (taskId === 'c01') {
+      assert.match(initial.stderr, /normalizePhone rejects letters and unsupported punctuation/u,
+        'the C01 verifier must identify rejected non-formatting phone input');
+    }
+
     if (taskId === 'c02') {
       const c02EnvironmentTests = await readFile(join(taskDirectory, 'environment', 'app', 'test', 'server.test.mjs'), 'utf8');
       const c02SolutionTests = await readFile(join(taskDirectory, 'solution', 'app', 'test', 'server.test.mjs'), 'utf8');
@@ -317,8 +322,8 @@ test('coding and canary plans use auto while repeated runs stay limited to C01',
   const once = JSON.parse(await readFile(join(codingTasks, '..', 'coding-plan.json'), 'utf8'));
   const repeated = JSON.parse(await readFile(join(codingTasks, '..', 'coding-c01-repeat-plan.json'), 'utf8'));
   const canary = JSON.parse(await readFile(join(codingTasks, '..', 'canary-plan.json'), 'utf8'));
-  assert.equal(once.dataset.version, '0.1.3-p1.4');
-  assert.equal(repeated.dataset.version, '0.1.3-p1.4');
+  assert.equal(once.dataset.version, '0.1.3-p1.5');
+  assert.equal(repeated.dataset.version, '0.1.3-p1.5');
   assert.equal(once.policy_mode, 'auto');
   assert.equal(once.attempts_per_task, 1);
   assert.deepEqual(once.tasks.map((task) => task.id), ['c01', 'c02', 'c03', 'c04']);
@@ -329,11 +334,11 @@ test('coding and canary plans use auto while repeated runs stay limited to C01',
   assert.deepEqual(canary.tasks.map((task) => task.id), ['canary']);
 });
 
-test('headless coding instructions leave test execution to the separate verifier in p1.4', async () => {
+test('headless coding instructions leave test execution to the separate verifier in p1.5', async () => {
   const once = JSON.parse(await readFile(join(codingTasks, '..', 'coding-plan.json'), 'utf8'));
   const repeated = JSON.parse(await readFile(join(codingTasks, '..', 'coding-c01-repeat-plan.json'), 'utf8'));
-  assert.equal(once.dataset.version, '0.1.3-p1.4');
-  assert.equal(repeated.dataset.version, '0.1.3-p1.4');
+  assert.equal(once.dataset.version, '0.1.3-p1.5');
+  assert.equal(repeated.dataset.version, '0.1.3-p1.5');
   for (const taskId of ['c01', 'c02', 'c03', 'c04']) {
     const instruction = await readFile(join(codingTasks, taskId, 'instruction.md'), 'utf8');
     const verifier = await readFile(join(codingTasks, taskId, 'tests', 'test.sh'), 'utf8');
@@ -353,7 +358,7 @@ test('all coding verifier images pin Node 24 for separate execution', async () =
   }
 });
 
-test('p1.4 coding tasks transfer only agent output files to their separate verifier', async () => {
+test('p1.5 coding tasks transfer only agent output files to their separate verifier', async () => {
   const expectedArtifacts = {
     c01: ['/app/src/contact.mjs'],
     c02: ['/app/src/server.mjs', '/app/test/server.test.mjs'],
@@ -371,4 +376,15 @@ test('p1.4 coding tasks transfer only agent output files to their separate verif
       await access(join(taskDirectory, 'solution', 'app', relativePath));
     }
   }
+});
+
+test('p1.5 C01 text and public test expose invalid phone characters', async () => {
+  const taskDirectory = join(codingTasks, 'c01');
+  const instruction = await readFile(join(taskDirectory, 'instruction.md'), 'utf8');
+  const publicTests = await readFile(join(taskDirectory, 'environment', 'app', 'test', 'contact.test.mjs'), 'utf8');
+  const behavior = await readFile(join(taskDirectory, 'tests', 'behavior.mjs'), 'utf8');
+  assert.match(instruction, /Reject any letter or unsupported character rather than silently discarding it\./u);
+  assert.match(publicTests, /normalizePhone rejects letters and unsupported punctuation/u);
+  assert.match(publicTests, /call \(415\) 555-0123/u);
+  assert.match(behavior, /normalizePhone\('call \(415\) 555-0123'\), null/u);
 });

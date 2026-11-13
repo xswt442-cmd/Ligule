@@ -13,8 +13,14 @@ test('displayName falls back to trimmed first and last names', () => {
 
 test('normalizePhone removes punctuation and normalizes supported numbers', () => {
   assert.equal(normalizePhone('(415) 555-0123'), '+14155550123');
+  assert.equal(normalizePhone('415.555.0123'), '+14155550123');
   assert.equal(normalizePhone('+44 (20) 7946-0958'), '+442079460958');
   assert.equal(normalizePhone('12345'), null);
+});
+
+test('normalizePhone rejects letters and unsupported punctuation', () => {
+  assert.equal(normalizePhone('call (415) 555-0123'), null);
+  assert.equal(normalizePhone('415/555-0123'), null);
 });
 
 test('priorityLabel keeps its existing formatting', () => {
