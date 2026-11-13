@@ -139,6 +139,102 @@ test('edit replaces the one occurrence the anchor locates', async () => {
   });
 });
 
+const invalidUtf8EditInputs = [
+  { label: 'invalid prefix', content: Buffer.from([0xff, ...Buffer.from(' hi')]) },
+  { label: 'invalid continuation', content: Buffer.from([0xc3, 0x28, ...Buffer.from(' hi')]) },
+  { label: 'invalid middle sequence', content: Buffer.from([...Buffer.from('left '), 0xe2, 0x28, 0xa1, ...Buffer.from(' hi')]) },
+  { label: 'truncated tail', content: Buffer.from([...Buffer.from('hi '), 0xe2, 0x82]) },
+];
+
+const invalidUtf8EditForms: Array<{ name: string; createArgs: (path: string) => Record<string, unknown> }> = [
+  { name: 'legacy', createArgs: path => ({ path, anchor: 'hi', replacement: 'bye' }) },
+  { name: 'multi', createArgs: path => ({ path, changes: [{ oldText: 'hi', newText: 'bye' }] }) },
+];
+
+const malformedUnicodeEditInputs: Array<{ label: string; content: Buffer; createArgs: (path: string) => Record<string, unknown> }> = [
+  { label: 'legacy half-pair anchor', content: Buffer.from('a😀b', 'utf8'), createArgs: path => ({ path, anchor: '\uD83D', replacement: 'X' }) },
+  { label: 'multi-edit half-pair oldText', content: Buffer.from('a😀b', 'utf8'), createArgs: path => ({ path, changes: [{ oldText: '\uD83D', newText: 'X' }] }) },
+  { label: 'legacy unpaired replacement', content: Buffer.from('a', 'utf8'), createArgs: path => ({ path, anchor: 'a', replacement: '\uD800' }) },
+  { label: 'multi-edit unpaired newText', content: Buffer.from('a', 'utf8'), createArgs: path => ({ path, changes: [{ oldText: 'a', newText: '\uD800' }] }) },
+];
+
+for (const form of invalidUtf8EditForms) {
+  test(`Kernel ${form.name} edit rejects invalid UTF-8 without changing file bytes`, async () => {
+    await withWorkspace(async (workspace) => {
+      const kernel = createKernel({ config: createConfig({ user: { boundary: workspace } }), permission: workspaceWrite });
+      kernel.register(editTool);
+
+      for (const [index, input] of invalidUtf8EditInputs.entries()) {
+        const path = `${form.name}-${index}.txt`;
+        const target = join(workspace, path);
+        await writeFile(target, input.content);
+        const outcome = await Promise.allSettled([kernel.call('edit', form.createArgs(path))]);
+        assert.deepEqual(await readFile(target), input.content, `${input.label} bytes must remain unchanged`);
+        assert.equal(outcome[0]!.status, 'rejected', `${input.label} must be rejected by ${form.name} edit`);
+        if (outcome[0]!.status === 'rejected') {
+          assert.equal(outcome[0]!.reason.code, 'edit_invalid_utf8', `${input.label} must return the stable edit error`);
+        }
+      }
+    });
+  });
+}
+
+test('Kernel edits accept valid U+FFFD and preserve BOM, CRLF, and the final newline state', async () => {
+  await withWorkspace(async (workspace) => {
+    const original = Buffer.from('\uFEFFbefore \uFFFD\r\nhi\r\nafter', 'utf8');
+    const expected = Buffer.from('\uFEFFbefore \uFFFD\r\nbye\r\nafter', 'utf8');
+    const kernel = createKernel({ config: createConfig({ user: { boundary: workspace } }), permission: workspaceWrite });
+    kernel.register(editTool);
+
+    for (const form of invalidUtf8EditForms) {
+      const path = `valid-${form.name}.txt`;
+      const target = join(workspace, path);
+      await writeFile(target, original);
+      await kernel.call('edit', form.createArgs(path));
+      assert.deepEqual(await readFile(target), expected, `${form.name} edit must preserve valid UTF-8 bytes outside the change`);
+    }
+  });
+});
+
+test('Kernel legacy edit rejects overlapping anchors as ambiguous and preserves file bytes', async () => {
+  await withWorkspace(async (workspace) => {
+    const path = 'overlap.txt';
+    const target = join(workspace, path);
+    const original = Buffer.from('aaa', 'utf8');
+    await writeFile(target, original);
+    const kernel = createKernel({ config: createConfig({ user: { boundary: workspace } }), permission: workspaceWrite });
+    kernel.register(editTool);
+
+    const outcome = await Promise.allSettled([
+      kernel.call('edit', { path, anchor: 'aa', replacement: 'X' }),
+    ]);
+    assert.deepEqual(await readFile(target), original, 'overlapping anchors must leave the original bytes unchanged');
+    assert.equal(outcome[0]!.status, 'rejected', 'an overlapping anchor must be rejected');
+    if (outcome[0]!.status === 'rejected') {
+      assert.equal(outcome[0]!.reason.code, 'edit_anchor_ambiguous');
+    }
+  });
+});
+
+test('Kernel edits reject unpaired UTF-16 surrogates without changing valid UTF-8 file bytes', async () => {
+  await withWorkspace(async (workspace) => {
+    const kernel = createKernel({ config: createConfig({ user: { boundary: workspace } }), permission: workspaceWrite });
+    kernel.register(editTool);
+
+    for (const [index, input] of malformedUnicodeEditInputs.entries()) {
+      const path = `malformed-unicode-${index}.txt`;
+      const target = join(workspace, path);
+      await writeFile(target, input.content);
+      const outcome = await Promise.allSettled([kernel.call('edit', input.createArgs(path))]);
+      assert.deepEqual(await readFile(target), input.content, `${input.label} must leave valid UTF-8 bytes unchanged`);
+      assert.equal(outcome[0]!.status, 'rejected', `${input.label} must be rejected`);
+      if (outcome[0]!.status === 'rejected') {
+        assert.equal(outcome[0]!.reason.code, 'tool_args_invalid', `${input.label} must return a stable argument error`);
+      }
+    }
+  });
+});
+
 test('edit applies multiple exact changes through the kernel without a prior read and preserves file formatting', async () => {
   await withWorkspace(async (workspace) => {
     const target = join(workspace, 'formatted.txt');

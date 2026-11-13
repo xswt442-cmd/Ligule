@@ -1,5 +1,6 @@
 // 写操作包括 `create`、`write`、`edit` 和 `delete`。
 // 每种操作在工具内部执行语义校验并返回稳定错误码；删除只使用操作系统回收站。
+import { isUtf8 } from 'node:buffer';
 import { lstat, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, relative, resolve } from 'node:path';
 import { KernelError } from '../kernel/error.js';
@@ -46,6 +47,14 @@ interface MatchedEdit extends EditChange {
   readonly line: number;
 }
 
+function isUnicodeScalarText(text: string): boolean {
+  for (const character of text) {
+    const codePoint = character.codePointAt(0)!;
+    if (codePoint >= 0xd800 && codePoint <= 0xdfff) return false;
+  }
+  return true;
+}
+
 function lineAt(text: string, offset: number): number {
   let line = 1;
   for (let index = 0; index < offset; index += 1) {
@@ -71,6 +80,9 @@ function matchEdits(text: string, changes: EditChange[], path: string): MatchedE
       || typeof change.oldText !== 'string' || typeof change.newText !== 'string'
       || Object.keys(change).some((key) => key !== 'oldText' && key !== 'newText')) {
       throw new KernelError('tool_args_invalid', { detail: `change ${index + 1} must contain only string oldText and newText fields` });
+    }
+    if (!isUnicodeScalarText(change.oldText) || !isUnicodeScalarText(change.newText)) {
+      throw new KernelError('tool_args_invalid', { detail: `change ${index + 1} must contain well-formed Unicode text` });
     }
     if (change.oldText === '') {
       throw new KernelError('edit_change_old_text_empty', { detail: `change ${index + 1} must locate nonempty original text` });
@@ -394,6 +406,9 @@ export const editTool = {
     if (hasLegacyArguments && (typeof args.anchor !== 'string' || typeof args.replacement !== 'string')) {
       throw new KernelError('tool_args_invalid', { detail: 'the legacy edit form requires both anchor and replacement strings' });
     }
+    if (hasLegacyArguments && (!isUnicodeScalarText(args.anchor!) || !isUnicodeScalarText(args.replacement!))) {
+      throw new KernelError('tool_args_invalid', { detail: 'legacy edit strings must contain well-formed Unicode text' });
+    }
     if (hasChanges && !Array.isArray(args.changes)) {
       throw new KernelError('tool_args_invalid', { detail: 'changes must be an array' });
     }
@@ -408,15 +423,25 @@ export const editTool = {
     let before: Buffer;
     try {
       before = await readFile(target);
-      text = before.toString('utf8');
     } catch (error) {
       // 目标不存在时应使用 `create`。
       const code = errorCode(error);
       if (code === 'ENOENT') throw new KernelError('edit_target_missing', { detail: `${args.path} does not exist; create is the tool for a file that is not there yet` });
       throw new KernelError('path_resolve_failed', { cause: error, detail: `reading ${args.path} failed: ${code ?? errorMessage(error)}` });
     }
+    if (!isUtf8(before)) {
+      throw new KernelError('edit_invalid_utf8', { detail: `${args.path} is not valid UTF-8 text; edit was not applied` });
+    }
+    text = before.toString('utf8');
     if (hasLegacyArguments) {
-      const hits = text.split(args.anchor!).length - 1;
+      let hits = 0;
+      let searchFrom = 0;
+      while (true) {
+        const position = text.indexOf(args.anchor!, searchFrom);
+        if (position === -1) break;
+        hits += 1;
+        searchFrom = position + 1;
+      }
       if (hits === 0) throw new KernelError('edit_anchor_not_found', { detail: `the anchor does not appear in ${args.path}` });
       // 定位字符串必须唯一匹配，避免模型在多个位置中任意选择修改目标。
       if (hits > 1) {
