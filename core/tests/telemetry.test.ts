@@ -8,7 +8,8 @@ import { join } from 'node:path';
 import { createTelemetry } from '../dist/kernel/telemetry.js';
 import type { TelemetryEvent } from '../dist/kernel/telemetry.js';
 
-const testRoot = join(process.cwd(), 'testplace', 'telemetry');
+const temporaryRoot = process.env.LIGULE_TEST_TEMP_ROOT ?? join(process.cwd(), 'testplace', 'tmp');
+const testRoot = join(temporaryRoot, 'telemetry');
 
 async function isolated(t: TestContext) {
   await mkdir(testRoot, { recursive: true });

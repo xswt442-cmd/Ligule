@@ -34,7 +34,8 @@ type SetupOptions = {
   logger?: HostOptions['logger'];
 };
 
-const testRoot = join(process.cwd(), 'testplace', 'telemetry-host');
+const temporaryRoot = process.env.LIGULE_TEST_TEMP_ROOT ?? join(process.cwd(), 'testplace', 'tmp');
+const testRoot = join(temporaryRoot, 'telemetry-host');
 
 async function filesUnder(directory: string): Promise<string[]> {
   const result = [];
